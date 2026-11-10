@@ -16,7 +16,7 @@ use std::time::Instant;
 use aim_android_init::props::area::{AreaMemory, HeapMemory};
 use aim_android_init::props::areas::{PROPERTIES_SERIAL, PROPERTY_INFO, read_from_dir};
 use aim_android_init::props::{
-    FutexWaker, PA_SIZE, PropAreaReader, PropertyAreas, PropertyInfoArea, PropertyService,
+    FutexWaker, PA_SIZE, PropertyAreas, PropertyInfoArea, PropertyService, SharedAreaReader,
     WakeTarget,
 };
 use aim_binder_host::mach;
@@ -195,12 +195,14 @@ pub fn mapped_properties(dir: &Path, property_info: Vec<u8>) -> Result<Propertie
 }
 
 /// The in-process services' reader of the areas in `dir`, as bionic's
-/// readers are: `property_info` and each context's area mapped read-only
-/// and shared at its first lookup and kept, so a lookup reads the shared
-/// pages rather than whole files. A mapping that does not parse is not
-/// kept, and its lookup fails as [`read_from_dir`]'s does.
+/// readers are: `property_info`, which init writes once before they start,
+/// read at the first lookup, and each context's area mapped read-only and
+/// shared at its first lookup and kept, then read as the writer updates it
+/// ([`SharedAreaReader`]). What is missing or does not parse is not kept,
+/// and its lookup fails as [`read_from_dir`]'s does.
 pub struct AreaReader {
     dir: std::path::PathBuf,
+    info: std::sync::Mutex<Option<std::sync::Arc<Vec<u8>>>>,
     maps: std::sync::Mutex<HashMap<String, std::sync::Arc<ReadMapping>>>,
 }
 
@@ -209,7 +211,8 @@ struct ReadMapping {
     len: usize,
 }
 
-// SAFETY: a read-only mapping owned by the value; it is only read.
+// SAFETY: a read-only mapping owned by the value, read only through
+// SharedAreaReader's atomic loads.
 unsafe impl Send for ReadMapping {}
 unsafe impl Sync for ReadMapping {}
 
@@ -239,12 +242,6 @@ impl ReadMapping {
             len,
         })
     }
-
-    fn bytes(&self) -> &[u8] {
-        // SAFETY: mapped with this length; init writes the areas as bionic's
-        // writer does while readers read them.
-        unsafe { std::slice::from_raw_parts(self.base, self.len) }
-    }
 }
 
 impl Drop for ReadMapping {
@@ -258,8 +255,19 @@ impl AreaReader {
     pub fn new(dir: &Path) -> Self {
         Self {
             dir: dir.to_path_buf(),
+            info: Default::default(),
             maps: Default::default(),
         }
+    }
+
+    fn property_info(&self) -> io::Result<std::sync::Arc<Vec<u8>>> {
+        let mut info = self.info.lock().unwrap();
+        if let Some(info) = info.as_ref() {
+            return Ok(info.clone());
+        }
+        let read = std::sync::Arc::new(fs::read(self.dir.join(PROPERTY_INFO))?);
+        *info = Some(read.clone());
+        Ok(read)
     }
 
     fn mapping(&self, file: &str) -> io::Result<std::sync::Arc<ReadMapping>> {
@@ -272,26 +280,29 @@ impl AreaReader {
         Ok(mapping)
     }
 
-    fn forget(&self, file: &str) {
-        self.maps.lock().unwrap().remove(file);
-    }
-
     /// [`read_from_dir`] of `name`.
     pub fn get(&self, name: &str) -> io::Result<Option<String>> {
         let invalid = |file: &str, error: String| {
-            self.forget(file);
             io::Error::new(io::ErrorKind::InvalidData, format!("{file}: {error}"))
         };
-        let info = self.mapping(PROPERTY_INFO)?;
-        let info = PropertyInfoArea::new(info.bytes()).map_err(|e| invalid(PROPERTY_INFO, e))?;
+        let bytes = self.property_info()?;
+        let info = PropertyInfoArea::new(&bytes).map_err(|e| {
+            *self.info.lock().unwrap() = None;
+            invalid(PROPERTY_INFO, e)
+        })?;
         let (index, _) = info.property_info_indexes(name);
         let context = *info
             .contexts()
             .get(index as usize)
             .ok_or_else(|| invalid(PROPERTY_INFO, format!("no context for {name}")))?;
         let area = self.mapping(context)?;
-        let area = PropAreaReader::new(area.bytes()).map_err(|e| invalid(context, e))?;
-        Ok(area.get(name).map(|p| p.value))
+        // SAFETY: the mapping is page aligned and lives as long as `area`;
+        // init writes the file only through its PropArea.
+        let reader = unsafe { SharedAreaReader::new(area.base, area.len) }.map_err(|e| {
+            self.maps.lock().unwrap().remove(context);
+            invalid(context, e)
+        })?;
+        Ok(reader.get(name).map(|p| p.value))
     }
 }
 
