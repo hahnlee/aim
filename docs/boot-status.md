@@ -233,7 +233,12 @@ its own), and a fullscreen display area's launch takes its source task's mode.
 A valid multi-window launch or `setWindowingMode` makes a multi-window root
 task of the display area (#2791; host tests only): it requests its launch
 bounds, else keeps its requested ones, else fills the display area, and its
-configuration and root task info are of that mode. A start
+configuration and root task info are of that mode. A reused task's launch
+mode (the options', else a fullscreen display area's fullscreen or freeform
+source task's, else its own) changes a root task's mode as
+`shouldUpdateExistingTaskWindowingMode` allows (never a pinned one's to the
+display area's), and the launch bounds of that mode lay the task out
+(`LaunchParamsController.layoutTask`). A start
 that avoids the front (`ActivityOptions.setAvoidMoveToFront`, or a blocked
 background start, which goes only into a task holding its caller's activity
 and is otherwise aborted, its asked-for or forwarded result cancelled)

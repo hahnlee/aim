@@ -256,6 +256,7 @@ fn system_thread_start_creates_activity_and_returns_start_success() {
         let info = host.activity_info_of("p", "p.Main").unwrap();
         let request = activity_start::StartRequest::launcher("p.Main");
         let token = host.new_activity(1, 10100, "p", info, Default::default(), 7, request);
+        host.tasks.animation_test_task(7, Default::default());
         {
             let mut stack = host.activities.stack.lock().unwrap();
             stack.tasks.push(activity_stack::Task {
@@ -449,6 +450,7 @@ fn activity_start_before_system_ready_waits_for_its_held_process() {
             let info = host.activity_info_of("p", "p.Main").unwrap();
             let request = activity_start::StartRequest::launcher("p.Main");
             let source = host.new_activity(1, 10100, "p", info, Default::default(), 7, request);
+            host.tasks.animation_test_task(7, Default::default());
             {
                 let mut stack = host.activities.stack.lock().unwrap();
                 stack.tasks.push(activity_stack::Task {

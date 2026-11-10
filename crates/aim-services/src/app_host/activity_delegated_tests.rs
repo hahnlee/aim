@@ -42,6 +42,7 @@ fn source(host: &Arc<AppHost>) -> u64 {
         7,
         activity_start::StartRequest::launcher("p.Main"),
     );
+    host.tasks.animation_test_task(7, Default::default());
     let mut stack = host.activities.stack.lock().unwrap();
     stack.tasks.push(activity_stack::Task {
         id: 7,
@@ -360,6 +361,7 @@ fn a_blocked_start_goes_only_into_its_callers_task_left_behind() {
         fixture(host, export(Arc::new(Thread)));
         let t = source(host);
         let token = Some(Binder::Local(t));
+        host.tasks.animation_test_task(8, Default::default());
         {
             // A fullscreen display: the task left behind stays hidden.
             let mut stack = host.activities.stack.lock().unwrap();
