@@ -51,6 +51,12 @@ const MAGIC: &[u8] = b"AIMFSCRYPT01\0";
 const PAGE: usize = 4096;
 /// The host attribute holding an inode's `struct fscrypt_context`.
 pub const CONTEXT: &CStr = c"dev.aim.fscrypt-context";
+/// A context's nonce, and the policy flags `supported` checks.
+const NONCE: usize = 16;
+const PAD_MASK: u8 = 0x03;
+pub const DIRECT_KEY: u8 = 0x04;
+pub const IV_INO_LBLK_64: u8 = 0x08;
+pub const IV_INO_LBLK_32: u8 = 0x10;
 
 unsafe extern "C" {
     /// `fsgetpath(2)`: the path of an inode of a mounted volume.
@@ -142,6 +148,134 @@ impl Drop for Owner {
     fn drop(&mut self) {
         unsafe { libc::munmap(self.state as *mut _, PAGE) };
     }
+}
+
+/// The policy part of a context (`struct fscrypt_policy_v1/v2`), or None
+/// for a context that is not valid (`fscrypt_context_is_valid`).
+pub fn policy(context: &[u8]) -> Option<Vec<u8>> {
+    match (context.first(), context.len()) {
+        (Some(1), 28) => Some([&[0], &context[1..12]].concat()),
+        (Some(2), 40) => Some(context[..24].to_vec()),
+        _ => None,
+    }
+}
+
+/// `fscrypt_supported_policy` for ext4 with 4096-byte blocks: ext4 has
+/// stable inode numbers of 32 bits, which the IV_INO_LBLK flags need. The
+/// host's inode numbers are stable, and no IV is derived from them, since
+/// the bytes stay plaintext.
+pub fn supported(policy: &[u8]) -> bool {
+    let (contents, filenames, flags) = (policy[1], policy[2], policy[3]);
+    let v1_modes = matches!((contents, filenames), (1, 4) | (5, 6) | (9, 9));
+    // Only Adiantum has the IV size DIRECT_KEY needs, for both.
+    let direct = flags & DIRECT_KEY == 0 || (contents, filenames) == (9, 9);
+    if policy[0] == 0 {
+        return v1_modes && direct && flags & !(PAD_MASK | DIRECT_KEY) == 0;
+    }
+    let modes = v1_modes || matches!((contents, filenames), (1, 10) | (7, 8));
+    let exclusive = [DIRECT_KEY, IV_INO_LBLK_64, IV_INO_LBLK_32]
+        .iter()
+        .filter(|flag| flags & **flag != 0)
+        .count();
+    let log2_data_unit = policy[4];
+    modes
+        && exclusive <= 1
+        && direct
+        && flags & !(PAD_MASK | DIRECT_KEY | IV_INO_LBLK_64 | IV_INO_LBLK_32) == 0
+        && (log2_data_unit == 0
+            || (9..=12).contains(&log2_data_unit)
+                && (log2_data_unit == 12 || flags & IV_INO_LBLK_32 == 0))
+        && policy[5..8] == [0; 3]
+}
+
+/// The context of the host inode `path`, none if it has no policy.
+pub fn context(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let mut context = [0u8; 40];
+    let n = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            CONTEXT.as_ptr(),
+            context.as_mut_ptr().cast(),
+            context.len(),
+            0,
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    if n < 0 {
+        let error = io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ENOATTR) => Ok(None),
+            _ => Err(error),
+        };
+    }
+    Ok(Some(context[..n as usize].to_vec()))
+}
+
+/// Stores `context` on the host inode `path`, a fresh nonce in it. Setting
+/// an attribute needs write access, which a file's host mode may deny its
+/// owner for a moment.
+fn store(path: &Path, context: &[u8]) -> io::Result<()> {
+    let mut context = context.to_vec();
+    let at = context.len() - NONCE;
+    unsafe { libc::arc4random_buf(context[at..].as_mut_ptr().cast(), NONCE) };
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let set = || {
+        let set = unsafe {
+            libc::setxattr(
+                name.as_ptr(),
+                CONTEXT.as_ptr(),
+                context.as_ptr().cast(),
+                context.len(),
+                0,
+                libc::XATTR_NOFOLLOW,
+            )
+        };
+        if set < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    };
+    match set() {
+        Err(error) if error.raw_os_error() == Some(libc::EACCES) => {
+            let metadata = fs::symlink_metadata(path)?;
+            if metadata.file_type().is_symlink() {
+                return Err(error);
+            }
+            let mode = metadata.permissions().mode();
+            fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200))?;
+            let result = set();
+            fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+            result
+        }
+        result => result,
+    }
+}
+
+fn withdraw(path: &Path) -> io::Result<()> {
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    if unsafe { libc::removexattr(path.as_ptr(), CONTEXT.as_ptr(), libc::XATTR_NOFOLLOW) } < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ENOATTR) {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// `fscrypt_prepare_new_inode` for an inode a host-side owner made (init's
+/// builtins): `child`, just created in `parent`, takes the parent's policy
+/// with a nonce of its own.
+pub fn inherit(parent: &Path, child: &Path) -> io::Result<()> {
+    let Some(context) = context(parent)? else {
+        return Ok(());
+    };
+    let kind = fs::symlink_metadata(child)?.file_type();
+    if kind.is_dir() || kind.is_file() || kind.is_symlink() {
+        store(child, &context)?;
+    }
+    Ok(())
 }
 
 impl Owner {
@@ -263,6 +397,52 @@ impl Owner {
                 roots.push(root);
             }
             Ok(())
+        })
+    }
+
+    /// `FS_IOC_SET_ENCRYPTION_POLICY` by a host-side owner with root's
+    /// capabilities (init's `FscryptSetDirectoryPolicy`, which may name a
+    /// key it did not add): `dir` gets `policy` (a `struct
+    /// fscrypt_policy_v1` or `_v2`) if it has none, which needs it to be an
+    /// empty directory; one it has already must be the same (EEXIST).
+    pub fn set_policy(&self, dir: &Path, policy: &[u8]) -> io::Result<()> {
+        let error = io::Error::from_raw_os_error;
+        let new = match (policy.first(), policy.len()) {
+            (Some(0), 12) => [&[1], &policy[1..], &[0; NONCE][..]].concat(),
+            (Some(2), 24) => [policy, &[0; NONCE][..]].concat(),
+            _ => return Err(error(libc::EINVAL)),
+        };
+        let metadata = fs::symlink_metadata(dir)?;
+        if let Some(existing) = context(dir)? {
+            return match self::policy(&existing) {
+                Some(existing) if existing == policy => Ok(()),
+                _ => Err(error(libc::EEXIST)),
+            };
+        }
+        if !metadata.is_dir() {
+            return Err(error(libc::ENOTDIR));
+        }
+        let empty = || Ok::<_, io::Error>(fs::read_dir(dir)?.next().is_none());
+        if !empty()? {
+            return Err(error(libc::ENOTEMPTY));
+        }
+        if !supported(policy) {
+            return Err(error(libc::EINVAL));
+        }
+        store(dir, &new)?;
+        // A guest process may have created an entry meanwhile: as on Linux
+        // the directory was not empty, so it and what inherited its policy
+        // lose it again.
+        if !empty()? {
+            withdraw(dir)?;
+            for entry in fs::read_dir(dir)? {
+                withdraw(&entry?.path())?;
+            }
+            return Err(error(libc::ENOTEMPTY));
+        }
+        let spec = Spec::of_context(&new).ok_or_else(|| error(libc::EINVAL))?;
+        self.policy_root(spec, metadata.ino()).inspect_err(|_| {
+            let _ = withdraw(dir);
         })
     }
 

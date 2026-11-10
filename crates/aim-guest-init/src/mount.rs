@@ -98,6 +98,13 @@ impl DataMount {
         Ok(waited)
     }
 
+    /// The data filesystem's fscrypt owner, which the mount prepared.
+    pub fn fscrypt(&self) -> Result<aim_storage::fscrypt::Owner, String> {
+        aim_storage::fscrypt::Owner::locate(&self.layout.runtime)
+            .and_then(|owner| owner.ok_or_else(|| std::io::ErrorKind::NotFound.into()))
+            .map_err(|e| format!("fscrypt: {e}"))
+    }
+
     /// The attach's and the mount's timeline entries.
     pub fn timeline(&self) -> Vec<(Duration, String)> {
         let mut out = Vec::new();

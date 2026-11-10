@@ -26,6 +26,7 @@
 pub mod apex;
 pub mod boot;
 pub mod executor;
+pub mod fscrypt;
 pub mod fsops;
 pub mod futex;
 pub mod guest_inode;

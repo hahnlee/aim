@@ -28,6 +28,7 @@ use aim_android_init::props::service::ControlMessage;
 use aim_android_init::props::{SetEffect, SetOutcome};
 use aim_android_init::rc::{CommandSpec, Rlimit, Service, expand_props};
 
+use crate::fscrypt::Action;
 use crate::fsops::{Effect, FsOps, parse_mode};
 use crate::launch::{Exit, LaunchSpec, Launcher};
 use crate::mount::DataMount;
@@ -70,6 +71,10 @@ const LINUX_ONLY_RLIMITS: &[(u32, &str)] = &[
     (14, "RLIMIT_RTPRIO"),
     (15, "RLIMIT_RTTIME"),
 ];
+
+/// The shutdown target of `reboot_into_recovery({"--prompt_and_wipe_data",
+/// "--reason=..."})`, less the reason.
+const RECOVERY_WIPE: &str = "reboot,recovery --prompt_and_wipe_data --reason=";
 
 /// `/data/property/persistent_properties`.
 pub const PERSISTENT_PROPERTY_FILE: &str = "/data/property/persistent_properties";
@@ -436,8 +441,17 @@ impl GuestExecutor {
         Ok(())
     }
 
-    fn exec(&mut self, spec: &ExecSpec, blocking: bool) -> Result<CommandFlow, String> {
-        let name = self.supervisor.add_exec_service(spec, &self.planner.ids)?;
+    /// `exec`: `reboot_on_failure` is the shutdown target a failed exit
+    /// asks for.
+    fn exec(
+        &mut self,
+        spec: &ExecSpec,
+        blocking: bool,
+        reboot_on_failure: Option<String>,
+    ) -> Result<CommandFlow, String> {
+        let name = self
+            .supervisor
+            .add_exec_service(spec, &self.planner.ids, reboot_on_failure)?;
         let program = spec.args[0].rsplit('/').next().unwrap_or("").to_string();
         if let Some(reason) = self.filtered(&program) {
             self.supervisor.discard_temporary(&name);
@@ -667,6 +681,9 @@ impl GuestExecutor {
         }
         let temp = path.with_extension("tmp");
         std::fs::write(&temp, encode_persistent_properties(&props)).map_err(|e| e.to_string())?;
+        if let Some(parent) = path.parent() {
+            aim_storage::fscrypt::inherit(parent, &temp).map_err(|e| e.to_string())?;
+        }
         std::fs::rename(&temp, &path).map_err(|e| e.to_string())
     }
 
@@ -696,13 +713,99 @@ impl GuestExecutor {
                 waited.as_secs_f64()
             )));
         }
-        // userdata "mounted": queue_fs_event(FS_MGR_MNTALL_DEV_NOT_ENCRYPTED).
-        let _ = self.set_property("ro.crypto.state", "unencrypted");
+        // queue_fs_event of what fs_mgr_mount_all reports for /data.
+        let fstab = match args.iter().find(|a| !a.starts_with("--")) {
+            Some(fstab) => {
+                let host = self.fs.map.resolve(fstab, true)?.host;
+                std::fs::read_to_string(&host).map_err(|e| format!("{fstab}: {e}"))?
+            }
+            None => String::new(),
+        };
+        let Some(options) = crate::fscrypt::data_file_encryption(&fstab) else {
+            let _ = self.set_property("ro.crypto.state", "unencrypted");
+            self.outbox
+                .push_back(Outgoing::Trigger("nonencrypted".to_string()));
+            return Ok(Effect::NoOp(format!(
+                "mount_all ({mode}): partitions are pre-extracted and /data has no fileencryption=; ro.crypto.state=unencrypted, trigger nonencrypted"
+            )));
+        };
+        // FS_MGR_MNTALL_DEV_FILE_ENCRYPTED.
+        self.set_property("ro.crypto.state", "encrypted")?;
+        self.set_property("ro.crypto.type", "file")?;
         self.outbox
             .push_back(Outgoing::Trigger("nonencrypted".to_string()));
-        Ok(Effect::NoOp(format!(
-            "mount_all ({mode}): partitions are pre-extracted and /data is a host directory without FBE; ro.crypto.state=unencrypted, trigger nonencrypted"
+        Ok(Effect::Applied(format!(
+            "mount_all ({mode}): /data file-encrypted ({options}); ro.crypto.state=encrypted, ro.crypto.type=file, trigger nonencrypted"
         )))
+    }
+
+    /// `IsFbeEnabled`.
+    fn file_encrypted(&self) -> bool {
+        self.props.borrow().property("ro.crypto.type").as_deref() == Some("file")
+    }
+
+    /// `ExecVdcRebootOnFailure`: `vdc --wait cryptfs <arg>`, whose failure
+    /// on a device with FBE reboots into recovery to prompt for a data
+    /// wipe, which ends this boot.
+    fn exec_vdc_reboot_on_failure(&mut self, arg: &str) -> Result<CommandFlow, String> {
+        let spec = ExecSpec {
+            seclabel: None,
+            user: None,
+            group: None,
+            supplementary_groups: Vec::new(),
+            args: ["/system/bin/vdc", "--wait", "cryptfs", arg]
+                .map(String::from)
+                .to_vec(),
+        };
+        let reboot = self
+            .file_encrypted()
+            .then(|| format!("{RECOVERY_WIPE}{arg}_failed"));
+        self.exec(&spec, true, reboot)
+    }
+
+    /// `FscryptSetDirectoryPolicy` for `mkdir`: a failure reboots into
+    /// recovery to prompt for a data wipe, which ends this boot.
+    fn set_directory_policy(
+        &mut self,
+        path: &str,
+        action: Action,
+        reference: &str,
+    ) -> Result<(), String> {
+        let host = |guest: &str| self.fs.map.resolve(guest, true).map(|r| r.host);
+        let (dir, reference, mode) = (
+            host(path)?,
+            host(&format!("/data{reference}"))?,
+            host(&format!("/data{}", crate::fscrypt::KEY_MODE))?,
+        );
+        let props = self.props.borrow();
+        let first_api_level = ["ro.product.first_api_level", "ro.build.version.sdk"]
+            .iter()
+            .find_map(|name| {
+                props
+                    .property(name)?
+                    .parse()
+                    .ok()
+                    .filter(|level| *level != 0)
+            })
+            .unwrap_or(0);
+        drop(props);
+        let owner = match &self.data {
+            Some(data) => data.borrow().fscrypt()?,
+            None => return Err("no data filesystem to set a policy in".to_string()),
+        };
+        crate::fscrypt::set_directory_policy(
+            &owner,
+            first_api_level,
+            &reference,
+            &mode,
+            action,
+            &dir,
+        )
+        .map_err(|error| {
+            self.shutdown
+                .get_or_insert_with(|| format!("{RECOVERY_WIPE}set_policy_failed:{path}"));
+            format!("{error}: init reboots into recovery to wipe /data")
+        })
     }
 
     fn perform_apex_config(&mut self, bootstrap: bool) -> Result<(), String> {
@@ -963,8 +1066,8 @@ impl GuestExecutor {
                 self.for_class(class, "restart", *only_enabled)?;
                 return Ok(CommandFlow::Done);
             }
-            Command::Exec(spec) => return self.exec(spec, true),
-            Command::ExecBackground(spec) => return self.exec(spec, false),
+            Command::Exec(spec) => return self.exec(spec, true, None),
+            Command::ExecBackground(spec) => return self.exec(spec, false, None),
             Command::ExecStart { service } => return self.exec_start(service),
             Command::InterfaceStart { interface }
             | Command::InterfaceStop { interface }
@@ -991,14 +1094,15 @@ impl GuestExecutor {
                 let ids = &self.planner.ids;
                 let uid = owner.as_deref().map(|n| ids.decode_uid(n)).transpose()?;
                 let gid = group.as_deref().map(|n| ids.decode_gid(n)).transpose()?;
+                let (action, reference) = crate::fscrypt::mkdir_options(options)?;
                 let mut effect = self.fs.mkdir(path, mode, uid, gid)?;
-                if !options.is_empty()
-                    && let Effect::Applied(text) = &mut effect
-                {
-                    text.push_str(&format!(
-                        " ({}: no fscrypt policy on a host directory)",
-                        options.join(" ")
-                    ));
+                if self.file_encrypted() && action != Action::None {
+                    if self.fs.apply {
+                        self.set_directory_policy(path, action, reference)?;
+                    }
+                    if let Effect::Applied(text) = &mut effect {
+                        text.push_str(&format!(" ({action:?}: the policy of /data{reference})"));
+                    }
                 }
                 effect
             }
@@ -1080,22 +1184,20 @@ impl GuestExecutor {
                 Effect::NoOp("mark_post_data: /data is always available".to_string())
             }
             // do_init_user0: vold prepares /data/data, /data/user/0 and
-            // user 0's DE storage (keys only when FBE is on).
-            Command::InitUser0 => {
-                let spec = ExecSpec {
-                    seclabel: None,
-                    user: None,
-                    group: None,
-                    supplementary_groups: Vec::new(),
-                    args: ["/system/bin/vdc", "--wait", "cryptfs", "init_user0"]
-                        .map(String::from)
-                        .to_vec(),
-                };
-                return self.exec(&spec, true);
+            // user 0's DE storage, with their keys when FBE is on.
+            Command::InitUser0 => return self.exec_vdc_reboot_on_failure("init_user0"),
+            // do_installkey: the system DE key, which the `mkdir`s of
+            // encrypted directories that follow name.
+            Command::Installkey { dir } => {
+                if !self.file_encrypted() {
+                    return Ok(CommandFlow::Done);
+                }
+                let effect =
+                    self.fs
+                        .mkdir(&format!("{dir}/unencrypted"), Some(0o700), Some(0), Some(0))?;
+                self.effect(effect);
+                return self.exec_vdc_reboot_on_failure("enablefilecrypto");
             }
-            Command::Installkey { .. } => Effect::NoOp(
-                "file-based encryption keys: /data is a host directory without FBE".to_string(),
-            ),
             Command::EnterDefaultMountNs => {
                 let effect = self.fs.enter_default_mount_namespace()?;
                 self.planner.map = self.fs.map.clone();

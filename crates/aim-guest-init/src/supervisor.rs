@@ -677,6 +677,7 @@ impl Supervisor {
         &mut self,
         spec: &ExecSpec,
         ids: &IdResolver,
+        reboot_on_failure: Option<String>,
     ) -> Result<String, String> {
         self.exec_count += 1;
         let name = format!("exec {} ({})", self.exec_count, spec.args.join(" "));
@@ -699,6 +700,7 @@ impl Supervisor {
             .collect::<Result<Vec<_>, _>>()?;
         let mut def = template_service(&name, spec.args.clone());
         def.oneshot = true;
+        def.reboot_on_failure = reboot_on_failure;
         let mut record = ServiceRecord::new(def);
         record.flags |= flags::TEMPORARY;
         record.origin = crate::service_namespace::LaunchOrigin::Transient;
