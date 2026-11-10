@@ -301,6 +301,15 @@ impl PackageBootstrap {
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "permission owner is unavailable"))
     }
 
+    /// The image's permission and GID declarations, as [`Self::config`]
+    /// has them.
+    fn declarations(&self) -> Result<&SystemConfig, Exception> {
+        Ok(self
+            .host
+            .image_inputs()?
+            .declarations(&|name| self.host.property(name)))
+    }
+
     fn config(&self) -> Result<SystemConfig, Exception> {
         Ok(self
             .host
@@ -1497,9 +1506,9 @@ impl Service for PackageBootstrap {
                         "permission owner is unavailable",
                     )),
                     Ok(Some(permissions)) => self
-                        .config()
+                        .declarations()
                         .and_then(|config| {
-                            permissions.legacy_permission_state(a.app_id, &users, &config)
+                            permissions.legacy_permission_state(a.app_id, &users, config)
                         })
                         .map(|record| {
                             bridge::write_get_legacy_permission_state_reply(&mut p, &Some(record))
@@ -1518,8 +1527,8 @@ impl Service for PackageBootstrap {
                             "permission owner is unavailable",
                         )),
                         Some(permissions) => self
-                            .config()
-                            .and_then(|config| permissions.gids_for_uid(a.uid, &config))
+                            .declarations()
+                            .and_then(|config| permissions.gids_for_uid(a.uid, config))
                             .map(|gids| {
                                 bridge::write_get_permission_gids_for_uid_reply(&mut p, &Some(gids))
                             }),

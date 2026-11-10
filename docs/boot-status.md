@@ -1094,15 +1094,26 @@ against 6.978 s before (2026-10-30). The image scan parses every scan
 directory's packages in one parallel batch and takes the results in scan
 order, and a boot-scanned package's owner is staged once (it was cloned three
 times per package); the system image scan takes 1.4-1.7 s fresh and
-0.42-0.47 s warm. The in-process services read properties from the areas
-mapped once (a boot makes about 11,000 lookups, about 0.3-0.5 s from files
-before); `notifyPackageUse` checks visibility with the queries' retained
-AppsFilter, and app standby's idle check informs the restriction owner once
-per check. Branch perf/boot on main `926b2486a` (2026-11-11), timed from
-`aimctl start` on throwaway data directories at 1-minute load 6-15 (a
-build that also logs its stage times): `sys.boot_completed` at 6.10, 6.43
-and 6.87 s fresh and 4.98, 5.40 and 5.49 s warm, aimctl's readiness at
-6.9-7.8 s and 5.6-6.3 s. Package boot now starts from configured
+0.27-0.35 s warm; the APEX modules are parsed and verified in parallel.
+The in-process services read properties from the areas mapped once, with
+bionic's serial protocol, and the package boot's live property capture is
+reused until the global property serial changes (a boot makes about 4,500
+lookups, 11,000 before); a query capture projects its packages with the
+snapshot's validated legacy reader; roles, `notifyPackageUse` and known
+packages check visibility with the queries' retained AppsFilter, and the
+boot's permission and GID queries read the image's declarations in place;
+app standby's idle check informs the restriction owner once per check. The
+initial scan takes 0.19-0.21 s fresh and 0.26-0.31 s warm, the
+construction 0.30 s and 0.22-0.27 s. Branch perf/boot-2 on main
+`a3638eae3` (2026-11-11), timed from `aimctl start` on throwaway data
+directories at 1-minute load 4-9 (a build that also logs its stage times):
+`sys.boot_completed` at 5.10, 5.19 and 6.20 s fresh and 3.53, 3.55 and
+3.89 s warm, aimctl's readiness at 5.9-8.0 s and 4.3-4.4 s. Opening
+Settings at readiness shows its window 0.44-0.57 s after `aimctl open`,
+0.10-0.12 s when opened again 25 s later; other apps'
+`setComponentEnabledSetting` calls wait 25-150 ms for the package install
+gate meanwhile (#2983), Settings' own calls before its window do not.
+Package boot now starts from configured
 inputs (#2431): initial resource size comes from the display server's observer
 hello and density from `ro.sf.lcd_density`; the first full SurfaceFlinger query
 must agree. Persistent properties, the applied initial locale, APEX, user-0 DE

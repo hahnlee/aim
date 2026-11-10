@@ -60,16 +60,26 @@ impl InitialOwner {
         property_area: PathBuf,
     ) -> crate::system_package_installer_init::Properties {
         let owner = self.clone();
+        // The last capture and the global serial it was taken at: init bumps
+        // the serial with every property it adds or changes.
+        let last: Mutex<Option<(u32, BTreeMap<String, String>)>> = Mutex::new(None);
         Arc::new(move || {
             use aim_android_init::props::areas::{PROPERTIES_SERIAL, PROPERTY_INFO};
             use aim_android_init::props::{PropAreaReader, PropertyInfoArea};
+            use std::io::Read;
             let serial = || -> Result<u32> {
-                let bytes = std::fs::read(property_area.join(PROPERTIES_SERIAL))
+                let mut header = [0u8; aim_android_init::props::area::PROP_AREA_HEADER_SIZE];
+                std::fs::File::open(property_area.join(PROPERTIES_SERIAL))
+                    .and_then(|mut file| file.read_exact(&mut header))
                     .map_err(|error| failure(format!("live property serial: {error}")))?;
-                Ok(PropAreaReader::new(&bytes).map_err(failure)?.serial())
+                Ok(PropAreaReader::new(&header).map_err(failure)?.serial())
             };
+            let mut last = last.lock().unwrap();
             for _ in 0..8 {
                 let before = serial()?;
+                if let Some((_, map)) = last.as_ref().filter(|(serial, _)| *serial == before) {
+                    return Ok(map.clone());
+                }
                 let info = std::fs::read(property_area.join(PROPERTY_INFO))
                     .map_err(|error| failure(format!("live property inventory: {error}")))?;
                 let contexts = PropertyInfoArea::new(&info).map_err(failure)?;
@@ -122,6 +132,7 @@ impl InitialOwner {
                     return Err(failure("live property map tail"));
                 }
                 if before == serial()? {
+                    *last = Some((before, map.clone()));
                     return Ok(map);
                 }
             }
@@ -1208,5 +1219,70 @@ impl System {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod live_property_tests {
+    use super::*;
+    use aim_android_init::props::{NoWake, PropertyAreas, build_trie};
+    use aim_binder_host::local::{Call, Reply, Service};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The leaf's `getLiveProperties`, counting its captures.
+    struct Leaf(Arc<AtomicUsize>);
+    impl Service for Leaf {
+        fn descriptor(&self) -> &str {
+            initial::DESCRIPTOR
+        }
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            assert_eq!(call.code, initial::GET_LIVE_PROPERTIES);
+            self.0.fetch_add(1, Ordering::Relaxed);
+            let names = initial::GetLiveProperties::read(&mut call.data)
+                .unwrap()
+                .names
+                .unwrap();
+            let mut record = Parcel::new();
+            record.write_i32(1);
+            record.write_i32(names.len() as i32);
+            for name in names {
+                record.write_string16(name.as_deref());
+                record.write_string16(Some("value"));
+            }
+            let mut p = Parcel::new();
+            initial::write_get_live_properties_reply(&mut p, &Some(record.data().to_vec()));
+            Ok(p)
+        }
+    }
+
+    #[test]
+    fn a_capture_is_taken_again_only_after_the_global_serial_changes() {
+        let dir = crate::app_host::test_temp_dir("live-properties");
+        let areas =
+            PropertyAreas::new(build_trie(&[], "u:object_r:default_prop:s0", "string").unwrap())
+                .unwrap();
+        areas.add("debug.first", b"1", &NoWake).unwrap();
+        areas.write_to_dir(&dir).unwrap();
+        let process = crate::test_process(1000);
+        let captures = Arc::new(AtomicUsize::new(0));
+        let aim_binder_host::parcel::Binder::Local(ptr) =
+            process.add_service(Arc::new(Leaf(captures.clone())))
+        else {
+            unreachable!()
+        };
+        let owner = Arc::new(InitialOwner::new(crate::system::ServiceOwner::Local(
+            process.local_service(ptr).unwrap(),
+        )));
+        let live = owner.runtime_properties(dir.clone());
+        let names = |map: BTreeMap<String, String>| map.into_keys().collect::<Vec<_>>();
+        assert_eq!(names(live().unwrap()), ["debug.first"]);
+        assert_eq!(names(live().unwrap()), ["debug.first"]);
+        assert_eq!(captures.load(Ordering::Relaxed), 1);
+        areas.add("debug.second", b"2", &NoWake).unwrap();
+        areas.write_to_dir(&dir).unwrap();
+        assert_eq!(names(live().unwrap()), ["debug.first", "debug.second"]);
+        assert_eq!(captures.load(Ordering::Relaxed), 2);
+        process.shutdown().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

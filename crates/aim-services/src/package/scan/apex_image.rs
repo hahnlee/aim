@@ -28,8 +28,12 @@ impl ApexImage {
     /// Read the original owner's module paths, not flattened payloads or APK
     /// scan directories. Errors abort the phase, as in scanApexPackages.
     pub fn load(apks: &Apks, inventory: &ApexInventory, parse_flags: i32) -> Result<Self, Error> {
-        let mut packages = Vec::new();
-        for info in ordered_sources(inventory) {
+        let sources = ordered_sources(inventory);
+        // scanApexPackages parses the modules in parallel
+        // (ParallelPackageParser); each module's parse and signatures depend
+        // only on its file, and the results are taken in owner order, so the
+        // first error is the serial one.
+        let loaded = super::image::parse_all(&sources, |info| {
             let fail = |phase, message| Error {
                 package: info.module_name.clone().unwrap_or_default(),
                 path: info.module_path.clone(),
@@ -42,8 +46,8 @@ impl ApexImage {
             let signing = apks
                 .signing_details(&parsed)
                 .map_err(|error| fail("apex-signatures", error))?;
-            packages.push(ApexCode {
-                info: info.clone(),
+            Ok(ApexCode {
+                info: (*info).clone(),
                 parsed,
                 signing,
                 scan_parse_flags: if info.factory {
@@ -51,9 +55,11 @@ impl ApexImage {
                 } else {
                     parse_flags & !parse::PARSE_IS_SYSTEM_DIR
                 },
-            });
-        }
-        Ok(Self { packages })
+            })
+        });
+        Ok(Self {
+            packages: loaded.into_iter().collect::<Result<_, Error>>()?,
+        })
     }
 }
 

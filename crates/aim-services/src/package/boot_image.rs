@@ -45,6 +45,16 @@ impl Inputs {
             .clone()
             .with_environment(properties)
     }
+    /// [`Self::config`]'s permissions and GIDs, which the environment's
+    /// features leave as the image declares them, without a copy.
+    pub(crate) fn declarations(
+        &self,
+        properties: &dyn Fn(&str) -> Option<String>,
+    ) -> &SystemConfig {
+        self.config
+            .get_or_init(|| SystemConfig::read_image(&self.image, properties))
+            .declarations()
+    }
     pub fn platform(&self) -> Result<&Platform, String> {
         self.platform
             .get_or_init(|| Platform::load(&self.image, Default::default()))

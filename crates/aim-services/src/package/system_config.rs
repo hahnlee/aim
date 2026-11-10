@@ -248,6 +248,12 @@ impl SystemConfig {
 }
 
 impl ImageConfig {
+    /// The image's declarations without what the environment adds (only
+    /// features), for readers of its permissions and GIDs.
+    pub(crate) fn declarations(&self) -> &SystemConfig {
+        &self.config
+    }
+
     pub(crate) fn with_environment(self, prop: &dyn Fn(&str) -> Option<String>) -> SystemConfig {
         let Self {
             mut config,
