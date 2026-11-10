@@ -1241,11 +1241,15 @@ fn prepare_iov(pin: &fdtab::Pinned, iov: &[libc::iovec], write: bool) -> Result<
     if length == 0 {
         return Ok(());
     }
+    let file = matches!(pin.kind(), Some(Kind::Regular(_))) || pin.regular_access().is_some();
     for vector in iov {
+        let (address, length) = (vector.iov_base as u64, vector.iov_len);
         if write {
-            super::user_memory::prepare_read(vector.iov_base as u64, vector.iov_len)?;
+            super::user_memory::prepare_read(address, length)?;
+        } else if file {
+            super::user_memory::prepare_file_write(address, length)?;
         } else {
-            super::user_memory::prepare_write(vector.iov_base as u64, vector.iov_len)?;
+            super::user_memory::prepare_write(address, length)?;
         }
     }
     Ok(())

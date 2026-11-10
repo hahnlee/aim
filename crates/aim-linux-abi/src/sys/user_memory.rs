@@ -311,30 +311,23 @@ fn range(address: u64, length: usize) -> Result<u64, Errno> {
     address.checked_add(length as u64).ok_or(errno::EFAULT)
 }
 
-fn prepare(address: u64, length: usize, write: bool) -> Result<(), Errno> {
-    let access = if write { Access::Write } else { Access::Read };
+fn prepare(address: u64, length: usize, access: Access) -> Result<u64, Errno> {
     let end = range(address, length)?;
-    if length == 0 {
-        return Ok(());
+    if length != 0 {
+        super::verity_pager::prepare_user_range(address, length as u64, access)?;
     }
-    super::verity_pager::prepare_user_range(address, length as u64, access)?;
-    // One fault-contained access per page, as the kernel's copy makes it:
-    // a load, or a store of the word's own value (an exclusive pair, so no
-    // other writer's store is lost). Protection is per page, so the word
-    // holding the first byte of each page's part stands for all of it.
+    Ok(end)
+}
+
+/// One fault-contained load per page, as the kernel's copy from it makes:
+/// protection is per page, so the word holding the first byte of each
+/// page's part stands for all of it. Nothing is written.
+fn probe(address: u64, end: u64) -> Result<(), Errno> {
     let mut at = address;
     while at < end {
-        let word = UserWord(at & !3);
-        if write {
-            word.fetch_update(
-                std::sync::atomic::Ordering::Relaxed,
-                std::sync::atomic::Ordering::Relaxed,
-                Some,
-            )
+        UserWord(at & !3)
+            .load(std::sync::atomic::Ordering::Relaxed)
             .map(drop)?;
-        } else {
-            word.load(std::sync::atomic::Ordering::Relaxed).map(drop)?;
-        }
         at = (at & !(PAGE - 1)) + PAGE;
     }
     Ok(())
@@ -342,12 +335,31 @@ fn prepare(address: u64, length: usize, write: bool) -> Result<(), Errno> {
 
 /// Prepare a readable user range before acquiring descriptor/I/O locks.
 pub(super) fn prepare_read(address: u64, length: usize) -> Result<(), Errno> {
-    prepare(address, length, false)
+    let end = prepare(address, length, Access::Read)?;
+    probe(address, end)
 }
 
 /// Prepare a writable user range before acquiring descriptor/I/O locks.
 pub(super) fn prepare_write(address: u64, length: usize) -> Result<(), Errno> {
-    prepare(address, length, true)
+    let end = prepare(address, length, Access::Write)?;
+    let mut at = address;
+    while at < end {
+        let (start, stop, protection, _) = crate::patch::vm::region(at).ok_or(errno::EFAULT)?;
+        if start > at || stop <= at || protection & libc::PROT_WRITE == 0 {
+            return Err(errno::EFAULT);
+        }
+        at = stop.min(end);
+    }
+    Ok(())
+}
+
+/// [`prepare_write`] for a regular file's transfer into the range: its
+/// pages need only be mapped (a load each), as the transfer's own EFAULT
+/// covers one without write access, and a regular file loses nothing to
+/// it, where a pipe's or socket's queued data would be consumed.
+pub(super) fn prepare_file_write(address: u64, length: usize) -> Result<(), Errno> {
+    let end = prepare(address, length, Access::Write)?;
+    probe(address, end)
 }
 
 pub fn read_exact(address: u64, length: usize) -> Result<Vec<u8>, Errno> {
@@ -424,8 +436,8 @@ mod tests {
     }
 
     #[test]
-    fn prepared_ranges_need_each_page_s_access_and_keep_its_bytes() {
-        if isolated("prepared_ranges_need_each_page_s_access_and_keep_its_bytes") {
+    fn prepared_ranges_need_each_page_s_access_and_write_nothing() {
+        if isolated("prepared_ranges_need_each_page_s_access_and_write_nothing") {
             return;
         }
         let mapping = Mapping::new();
@@ -448,6 +460,10 @@ mod tests {
         assert_eq!(prepare_write(address, PAGE as usize), Ok(()));
         assert_eq!(prepare_write(address + PAGE - 3, 6), Err(errno::EFAULT));
         assert_eq!(prepare_read(address + PAGE - 3, 6), Ok(()));
+        // A regular file's transfer finds the read-only page itself: its
+        // preparation writes nothing, so a page it does not fill is left
+        // as it was (shared, clean, uncommitted).
+        assert_eq!(prepare_file_write(address + PAGE - 3, 6), Ok(()));
         assert_eq!(read_exact(address + PAGE - 3, 5).unwrap(), b"edge\0");
         assert_eq!(
             unsafe {
@@ -460,6 +476,10 @@ mod tests {
             0
         );
         assert_eq!(prepare_read(address + PAGE - 3, 6), Err(errno::EFAULT));
+        assert_eq!(
+            prepare_file_write(address + PAGE - 3, 6),
+            Err(errno::EFAULT)
+        );
         assert_eq!(prepare_read(1, 1), Err(errno::EFAULT));
         assert_eq!(prepare_write(0, 0), Ok(()));
     }
