@@ -396,6 +396,11 @@ fn take_shown(drawable: Id) -> Option<Fence> {
 /// Whether the Mac shows no windows, as [`watch_screen`] keeps it.
 static HIDDEN: AtomicBool = AtomicBool::new(false);
 
+/// [`HIDDEN`].
+pub fn hidden() -> bool {
+    HIDDEN.load(Ordering::Relaxed)
+}
+
 /// Follow whether the Mac shows windows: its screen's locking and
 /// unlocking, its displays' sleep and wake. When it stops, the drawables
 /// waiting to be shown will not be until it starts again, so their fences

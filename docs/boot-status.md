@@ -229,7 +229,11 @@ the screens show windows again (#670). The original PhoneWindowManager calls
 original PowerManagerService went Awake to Asleep (display suspend blocker
 released, SCREEN_OFF) and back (SCREEN_ON) on those keycodes, injected with
 `input keyevent` because a background `aimctl start` has no input devices
-(2026-11-11).
+(2026-11-11). A reader that opens the keyboard while the screens show nothing
+gets System Sleep pressed; a press PhoneWindowManager drops before it has
+booted is not repeated (host tests only). The lid switch would carry the level,
+but a closed lid sleeps only with `Settings.Global.LID_BEHAVIOR` set, whose
+default is none at android-16.0.0_r1.
 The Mac's screen lock is the keyguard for `ACTION_USER_PRESENT`: the app host
 reads the session's lock at start and hears each lock/unlock, and sends
 USER_PRESENT (the keyguard's flags, user 0, no permission, most-recent delivery

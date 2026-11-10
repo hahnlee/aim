@@ -56,13 +56,10 @@ pub fn start(socket: &Path, win: &Window) -> std::io::Result<()> {
             devs.remap(KEYBOARD, usage, key);
         }
     }
-    let _ = INPUT.set(Input::new(
-        devs,
-        win.width,
-        win.height,
-        win.dpi_y,
-        win.density,
-    ));
+    let input =
+        INPUT.get_or_init(|| Input::new(devs, win.width, win.height, win.dpi_y, win.density));
+    // The screens' watch started first (`metal::watch_screen`).
+    input.screen_at_start(!crate::metal::hidden());
     Ok(())
 }
 
