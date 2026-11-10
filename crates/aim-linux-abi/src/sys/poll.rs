@@ -759,11 +759,12 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
         if let Some(polling) = &polling {
             polling.sync();
         }
-        // Darwin never reports an unconnected TCP socket ready.
-        let unconnected = host
-            .iter()
-            .zip(&pins)
-            .any(|(h, pin)| unconnected(pin.as_ref(), h.fd));
+        // Darwin never reports an unconnected TCP socket ready, which
+        // POLLIN_SET and POLLOUT_SET hold (its HUP and OUT), not
+        // POLLEX_SET.
+        let unconnected = host.iter().zip(&pins).any(|(h, pin)| {
+            h.events & (libc::POLLIN | libc::POLLOUT) != 0 && unconnected(pin.as_ref(), h.fd)
+        });
         let n = host_poll(&mut host, if unconnected { 0 } else { left }, mask);
         if n < 0 {
             return n;
@@ -1850,6 +1851,44 @@ mod reportable_tests {
             }
             close(&[fd]);
         }
+    }
+
+    /// `POLLEX_SET` is EPOLLPRI alone: select sleeps for its timeout on an
+    /// unconnected TCP socket asked only for exceptions, which `tcp_poll`
+    /// reports hung up and writable.
+    #[test]
+    fn select_sleeps_on_an_unconnected_tcp_socket_asked_only_for_exceptions() {
+        let _view = crate::vfs::test_view();
+        let fd = crate::sys::net::socket([2, 1 | O_NONBLOCK, 0, 0, 0, 0]);
+        assert!(fd >= 0, "socket {fd}");
+        let mut except = [0u64; 16];
+        except[fd as usize / 64] = 1 << (fd % 64);
+        let timeout = [0i64, 200_000_000];
+        let cpu = || {
+            let mut t = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: into a local timespec.
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+            t.tv_sec as f64 + t.tv_nsec as f64 / 1e9
+        };
+        let (started, spent) = (std::time::Instant::now(), cpu());
+        assert_eq!(
+            pselect6([
+                fd as u64 + 1,
+                0,
+                0,
+                except.as_mut_ptr() as u64,
+                timeout.as_ptr() as u64,
+                0,
+            ]),
+            0
+        );
+        assert!(started.elapsed() >= std::time::Duration::from_millis(190));
+        let busy = cpu() - spent;
+        assert!(busy < 0.02, "spun for {busy} s of CPU");
+        close(&[fd]);
     }
 
     /// `inet_csk_listen_poll`: a listening socket is only readable, once a
