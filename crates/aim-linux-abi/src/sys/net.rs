@@ -1418,10 +1418,14 @@ pub fn connect(a: [u64; 6]) -> i64 {
                     sa_family: libc::AF_UNSPEC as u8,
                     sa_data: [0; 14],
                 };
+                let old = unix_peer(fd);
                 // SAFETY: a sockaddr of ours, of its length.
                 unsafe { libc::connect(fd, &unspec, 2) };
                 s.peer_gone.store(false, Ordering::Relaxed);
                 *s.peer.lock().unwrap() = None;
+                if old != 0 {
+                    purge(&input);
+                }
                 return 0;
             }
         }
@@ -1436,6 +1440,8 @@ pub fn connect(a: [u64; 6]) -> i64 {
     if let Some(r) = connect_to_router(&input, &name) {
         return r;
     }
+    let unix_dgram = any_sock(&input).filter(|s| s.unix_datagram());
+    let old_peer = unix_dgram.as_ref().map_or(0, |_| unix_peer(fd));
     let zero_port = datagram_to_port_zero(fd, &mut t);
     let mut r = with_target(&t, |sa, len| {
         errno::check(unsafe { libc::connect(fd, sa, len) } as i64)
@@ -1449,11 +1455,16 @@ pub fn connect(a: [u64; 6]) -> i64 {
             clamp_mss(fd, o);
         }
     }
-    // A new peer; the one that closed is forgotten.
+    // A new peer: the one that closed is forgotten, and what an AF_UNIX
+    // datagram socket queued from another one dropped
+    // (`unix_dgram_connect`).
     if r == 0
         && let Some(s) = any_sock(&input)
     {
         s.peer_gone.store(false, Ordering::Relaxed);
+        if unix_dgram.is_some() && old_peer != 0 && unix_peer(fd) != old_peer {
+            purge(&input);
+        }
     }
     if r == -(libc::ENOENT as i64) && is_abstract(&name) {
         // An abstract name nobody bound: refused, not missing.
@@ -2298,6 +2309,29 @@ fn linux_msg_flags(h: i32) -> i32 {
     f
 }
 
+/// The peer AF_UNIX socket `fd` is connected to (its `unsi_conn_pcb`), 0
+/// for none.
+fn unix_peer(fd: i32) -> u64 {
+    socket_info(fd).map_or(0, |info| {
+        u64::from_ne_bytes(info[UNSI_CONN_PCB..UNSI_CONN_PCB + 8].try_into().unwrap())
+    })
+}
+
+/// `unix_dgram_disconnected`: drop what AF_UNIX datagram socket `input`
+/// had queued (`skb_queue_purge`). Each datagram holds at least a byte of
+/// the queue, so its bytes as of now bound the receives, however many more
+/// arrive meanwhile.
+fn purge(input: &SocketInput) {
+    let queued = socket_info(input.fd()).map_or(0, |info| {
+        u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap())
+    });
+    for _ in 0..queued {
+        if receive(input, &[], false, 0, L_MSG_DONTWAIT).is_err() {
+            break;
+        }
+    }
+}
+
 /// `sk_stream_wait_connect` for a TCP send on host socket `fd` that
 /// Darwin failed with ENOTCONN: EPIPE for a socket neither connected nor
 /// connecting (never connected, or listening); for a connecting one,
@@ -2432,7 +2466,7 @@ fn send(
     let addressed = name.is_some_and(|n| n.0 != 0);
     let refused = |s: &Sock| {
         s.peer_gone.store(false, Ordering::Relaxed);
-        while receive(input, &[], false, 0, L_MSG_DONTWAIT).is_ok() {}
+        purge(input);
         -111
     };
     if let Some(s) = unix_dgram
@@ -4129,6 +4163,8 @@ const SOI_OPTIONS: usize = 188;
 const SOI_STATE: usize = 192;
 const SOI_ERROR: usize = 202;
 const SBI_CC: usize = 208;
+/// `soi_proto.pri_un.unsi_conn_pcb`.
+const UNSI_CONN_PCB: usize = 272;
 /// Darwin's `soi_state` flags of a shut direction.
 const SS_CANTSENDMORE: i16 = 0x10;
 const SS_CANTRCVMORE: i16 = 0x20;

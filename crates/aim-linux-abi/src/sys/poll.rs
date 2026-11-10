@@ -2732,6 +2732,50 @@ mod reportable_tests {
         close(&[fd]);
     }
 
+    /// `unix_dgram_connect` to a new peer, or of AF_UNSPEC, drops what the
+    /// socket queued from the old one (`unix_dgram_disconnected`); to the
+    /// same peer, nothing.
+    #[test]
+    fn a_unix_datagram_connect_to_another_peer_drops_its_queue() {
+        let _view = crate::vfs::test_view();
+        let send = |fd: i64| crate::sys::net::sendto([fd as u64, b"x".as_ptr() as u64, 1, 0, 0, 0]);
+        let socket = || crate::sys::net::socket([1, 2 | O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0]);
+        let bound = |fd: i64, name: &str| {
+            let (address, len) = abstract_name(&format!("{name}-{}", std::process::id()));
+            assert_eq!(
+                crate::sys::net::bind([fd as u64, address.as_ptr() as u64, len, 0, 0, 0]),
+                0
+            );
+            (address, len)
+        };
+        let connect = |fd: i64, (address, len): &(Vec<u8>, u64)| {
+            crate::sys::net::connect([fd as u64, address.as_ptr() as u64, *len, 0, 0, 0])
+        };
+        let mut buffer = [0u8; 4];
+        let fd = socket();
+        let own = bound(fd, "aim-poll-queue-own");
+        let (first, second) = (socket(), socket());
+        let first_name = bound(first, "aim-poll-queue-first");
+        let second_name = bound(second, "aim-poll-queue-second");
+        assert_eq!(connect(first, &own), 0);
+        assert_eq!(connect(fd, &first_name), 0);
+        assert_eq!(send(first), 1);
+        assert_eq!(connect(fd, &first_name), 0);
+        assert_eq!(received(fd, &mut buffer), 1);
+        assert_eq!(send(first), 1);
+        assert_eq!(connect(fd, &second_name), 0);
+        assert_eq!(received(fd, &mut buffer), -11);
+        assert_eq!(connect(fd, &first_name), 0);
+        assert_eq!(send(first), 1);
+        let unspec = [0u8; 16];
+        assert_eq!(
+            crate::sys::net::connect([fd as u64, unspec.as_ptr() as u64, 16, 0, 0, 0]),
+            0
+        );
+        assert_eq!(received(fd, &mut buffer), -11);
+        close(&[fd, first, second]);
+    }
+
     /// A refused non-blocking TCP connect: `tcp_done` shuts it both ways,
     /// so `tcp_poll` reports HUP, IN and OUT, and ERR until SO_ERROR
     /// returns ECONNREFUSED once.
