@@ -670,32 +670,24 @@ fn organizer_root_tasks_hold_reparented_tasks_in_their_bounds() {
             host.organizer_task_info(8).unwrap().position_in_parent,
             (0, 0)
         );
-        // Nesting in an app task, nesting root tasks, multi-window on the
-        // display area and reparentTasks of no parent are refused unapplied.
-        for (op, change, code) in [
+        // Nesting in an app task, nesting root tasks and reparentTasks of no
+        // parent are refused unapplied.
+        for (op, code) in [
             (
                 reparent(task, Some(host.task_token(7)), true),
-                None,
                 EX_UNSUPPORTED_OPERATION,
             ),
-            (reparent(token, None, true), None, EX_UNSUPPORTED_OPERATION),
-            (
-                reparent(task, None, true),
-                Some((host.task_token(7), [(340, 0), (344, 0), (352, 6)])),
-                EX_UNSUPPORTED_OPERATION,
-            ),
+            (reparent(token, None, true), EX_UNSUPPORTED_OPERATION),
             (
                 Op {
                     kind: 2,
                     container: None,
                     ..reparent(task, None, true)
                 },
-                None,
                 EX_ILLEGAL_ARGUMENT,
             ),
         ] {
-            let changes: Vec<_> = change.iter().map(|(t, e)| (*t, e.as_slice())).collect();
-            denied(apply_wct(host, &transaction(&changes, &[op]), 1000), code);
+            denied(apply_wct(host, &transaction(&[], &[op]), 1000), code);
             assert_eq!(host.tasks.parent(8), Some(root));
         }
         // A leaf task takes its mode unvalidated (`Task.setWindowingMode`),

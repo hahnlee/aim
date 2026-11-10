@@ -332,6 +332,13 @@ and letterboxing, are tracked in #2050.
   met them follow, as the split divider moves both stages; bounds that would
   leave the other empty are refused and the window goes back. Once adjacency is cleared
   each window moves on its own.
+- **Multi-window root tasks.** A task the display area holds in
+  multi-window mode (a multi-window launch, or `setWindowingMode`, with no
+  organizer root task to go in) keeps its own Mac window at its bounds, the
+  display area's unless it requests others, like a split-screen tile
+  without a partner: the user's resize of the window resizes the task
+  (`canResizeTask`), and the window has no full screen, which only
+  fullscreen and freeform tasks map to.
 - **Title.** The task's `TaskDescription` label, else what a launcher
   calls it: in a shim, the shim's name; in the server, the label of the
   launcher activity the task was started with, else its app's label (both
