@@ -350,8 +350,18 @@ fn system_thread_start_creates_activity_and_returns_start_success() {
             ..Default::default()
         };
         let send_pending = || {
-            host.send_record(None, target, 0, ordered(99), None, None, None, sent())
-                .unwrap()
+            host.send_record(
+                10100,
+                None,
+                target,
+                0,
+                ordered(99),
+                None,
+                None,
+                None,
+                sent(),
+            )
+            .unwrap()
         };
         assert_eq!(send_pending(), 0);
         assert_eq!(send_pending(), -96);
@@ -517,4 +527,115 @@ fn activity_start_before_system_ready_waits_for_its_held_process() {
             assert!(host.processes_on_hold.lock().unwrap().is_empty());
         },
     );
+}
+
+/// A PendingIntent's start into its creator's existing task that only its
+/// creator allows (a visible app opting in with its options, sent from a
+/// background uid) leaves the task behind the focused one
+/// (`MOVE_TO_FRONT_AVOID_PI_ONLY_CREATOR_ALLOWS`) once
+/// `balDontBringExistingBackgroundTaskStackToFg` is on; it brings it to
+/// the front without it.
+#[test]
+fn a_pending_intent_only_its_creator_allows_leaves_the_creators_task_behind() {
+    for flag in [true, false] {
+        crate::system::with_discovery_binders_flags(
+            &[
+                ("android.permission.flags.appop_mode_caching_enabled", true),
+                (
+                    "com.android.window.flags.bal_dont_bring_existing_background_task_stack_to_fg",
+                    flag,
+                ),
+            ],
+            true,
+            |host, _, _, _| {
+                permissions(host);
+                assert_eq!(
+                    pending_intent_start_into_task_7(host),
+                    if flag { 9 } else { 7 }
+                );
+            },
+        );
+    }
+}
+
+/// Sends, as uid 10101, a PendingIntent of `p` (uid 10100, running) for
+/// `p.Main` allowing background starts of its creator
+/// (`MODE_BACKGROUND_ACTIVITY_START_ALLOWED`), whose task 7 is behind task
+/// 9, focused: the focused task.
+fn pending_intent_start_into_task_7(host: &Arc<AppHost>) -> i32 {
+    let fixture = tests::host_with_start(1, Arc::new(|| {}));
+    let mut app = fixture.apps.lock().unwrap().remove(&1).unwrap();
+    app.uid = 10100;
+    host.apps.lock().unwrap().insert(1, app);
+    let info = host.activity_info_of("p", "p.Main").unwrap();
+    let request = || activity_start::StartRequest::launcher("p.Main");
+    let main = host.new_activity(
+        1,
+        10100,
+        "p",
+        info.clone(),
+        Default::default(),
+        7,
+        request(),
+    );
+    let front = host.new_activity(1, 10100, "p", info, Default::default(), 9, request());
+    for id in [7, 9] {
+        host.tasks.animation_test_task(id, Default::default());
+    }
+    {
+        let mut stack = host.activities.stack.lock().unwrap();
+        for (id, package, token) in [(7, "p", main), (9, "q", front)] {
+            stack.tasks.push(activity_stack::Task {
+                id,
+                affinity: None,
+                real_activity: format!("{package}/p.Main"),
+                package: package.into(),
+                intent: Default::default(),
+                base: activity_start::LaunchIntent::Component,
+                uid: 10100,
+                user: 0,
+                last_active: 0,
+                root_was_reset: false,
+            });
+            let mut a = activity_stack::Activity::new(token, id, 1, "p/p.Main", 0, 0, None);
+            a.state = activity_stack::State::Stopped;
+            stack.activities.push(a);
+        }
+        stack.activities.last_mut().unwrap().state = activity_stack::State::Resumed;
+    }
+    let target = host
+        .get_intent_sender(
+            10100,
+            pending_intents::Request {
+                kind: pending_intents::INTENT_SENDER_ACTIVITY,
+                package: Some("p".into()),
+                feature: None,
+                token: None,
+                result_who: None,
+                request_code: 0,
+                intents: Some(vec![Some(
+                    RawIntent::of(None, 0x1000_0000, &[]).with_component("p", "p.Main"),
+                )]),
+                resolved_types: None,
+                flags: 0x0400_0000, // FLAG_IMMUTABLE
+                options: Some(
+                    RawBundle::empty()
+                        .with_ints(&[(
+                            "android.activity.pendingIntentCreatorBackgroundActivityStartMode",
+                            1,
+                        )])
+                        .unwrap(),
+                ),
+                user: 0,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let sent = pending_intents::Sent::default();
+    assert!(
+        host.send_record(10101, None, target, 0, None, None, None, None, sent)
+            .unwrap()
+            >= 0
+    );
+    host.activities.stack.lock().unwrap().focused().unwrap()
 }

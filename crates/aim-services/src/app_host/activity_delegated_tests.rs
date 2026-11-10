@@ -228,6 +228,15 @@ fn as_caller_background_modes_preserve_both_opt_outs_and_real_caller_exemptions(
             |host, _, _, _| {
                 activity_start_tests::permissions(host);
                 query_owners(host);
+                let as_caller = |host: &AppHost, uid, real, options: Option<&RawBundle>| {
+                    let real = super::super::background_start::RealCaller {
+                        uid: real,
+                        pending_intent: false,
+                        bal_allowed: true,
+                    };
+                    host.background_start_verdict(uid, Some(real), false, options)
+                        .map(|v| v.allows())
+                };
                 let options =
                     |creator, sender| {
                         RawBundle::empty().with_ints(&[
@@ -245,16 +254,12 @@ fn as_caller_background_modes_preserve_both_opt_outs_and_real_caller_exemptions(
                     (0, 4, false),
                 ] {
                     assert_eq!(
-                        host.as_caller_background_allowed(
-                            10101,
-                            1000,
-                            Some(&options(creator, sender))
-                        ),
+                        as_caller(host, 10101, 1000, Some(&options(creator, sender))),
                         Ok(allowed)
                     );
                 }
                 assert_eq!(
-                    host.as_caller_background_allowed(10101, 1027, Some(&options(0, 3))),
+                    as_caller(host, 10101, 1027, Some(&options(0, 3))),
                     Ok(false)
                 );
                 let f = super::super::tests::host_with_start(2, Arc::new(|| {}));
@@ -265,34 +270,72 @@ fn as_caller_background_modes_preserve_both_opt_outs_and_real_caller_exemptions(
                 host.tasks.app_switches.lock().unwrap().switches(true);
                 for sender in [-1, 0, 1, 3, 4] {
                     assert_eq!(
-                        host.as_caller_background_allowed(10101, 1000, Some(&options(2, sender))),
+                        as_caller(host, 10101, 1000, Some(&options(2, sender))),
                         Ok(sender != 4 || !additional)
                     );
                 }
                 assert_eq!(
-                    host.as_caller_background_allowed(10101, 1000, Some(&options(0, 2))),
+                    as_caller(host, 10101, 1000, Some(&options(0, 2))),
+                    Ok(false)
+                );
+                assert_eq!(as_caller(host, 1000, 10101, Some(&options(0, 2))), Ok(true));
+                assert_eq!(
+                    as_caller(host, 1000, 10101, Some(&options(2, 2))),
                     Ok(false)
                 );
                 assert_eq!(
-                    host.as_caller_background_allowed(1000, 10101, Some(&options(0, 2))),
-                    Ok(true)
-                );
-                assert_eq!(
-                    host.as_caller_background_allowed(1000, 10101, Some(&options(2, 2))),
-                    Ok(false)
-                );
-                assert_eq!(
-                    host.as_caller_background_allowed(1000, 10101, Some(&options(4, 2))),
+                    as_caller(host, 1000, 10101, Some(&options(4, 2))),
                     Ok(!additional)
                 );
                 // Same-uid launches reuse the original allowed verdict in the pinned controller.
-                assert_eq!(
-                    host.as_caller_background_allowed(1000, 1000, Some(&options(2, 1))),
-                    Ok(true)
-                );
+                assert_eq!(as_caller(host, 1000, 1000, Some(&options(2, 1))), Ok(true));
             },
         );
     }
+}
+
+/// `checkBackgroundActivityStart` of a PendingIntent: a start its
+/// visible creator allows and its sender does not is allowed by the
+/// creator, only the creator allowing it; a visible sender, or the
+/// creator's own uid sending, allows it too.
+#[test]
+fn a_pending_intent_start_only_its_creator_allows_says_so() {
+    use super::super::background_start::{BAL_ALLOW_VISIBLE_WINDOW, BalVerdict, RealCaller};
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        activity_start_tests::permissions(host);
+        query_owners(host);
+        let run = |seq, uid| {
+            let f = super::super::tests::host_with_start(seq, Arc::new(|| {}));
+            let mut app = f.apps.lock().unwrap().remove(&seq).unwrap();
+            app.uid = uid;
+            host.apps.lock().unwrap().insert(seq, app);
+        };
+        run(2, 10100);
+        let options = RawBundle::empty()
+            .with_ints(&[(
+                "android.activity.pendingIntentCreatorBackgroundActivityStartMode",
+                1,
+            )])
+            .unwrap();
+        let sent_by = |sender| {
+            host.background_start_verdict(
+                10100,
+                Some(RealCaller::pending_intent(sender)),
+                false,
+                Some(&options),
+            )
+        };
+        let by_creator = |only_creator_allows| {
+            Ok(BalVerdict {
+                code: BAL_ALLOW_VISIBLE_WINDOW,
+                only_creator_allows,
+            })
+        };
+        assert_eq!(sent_by(10101), by_creator(true));
+        assert_eq!(sent_by(10100), by_creator(false));
+        run(3, 10101);
+        assert_eq!(sent_by(10101), by_creator(false));
+    });
 }
 
 #[test]

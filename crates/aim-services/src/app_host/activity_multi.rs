@@ -60,6 +60,7 @@ pub(super) fn transact(host: &Arc<AppHost>, call: &mut Call<'_>) -> Reply {
             StartArgs { caller, ..args },
             intents,
             types,
+            None,
         )?;
         let mut p = Parcel::new();
         atm::write_start_activity_reply(&mut p, code);
@@ -68,6 +69,9 @@ pub(super) fn transact(host: &Arc<AppHost>, call: &mut Call<'_>) -> Reply {
 }
 
 impl AppHost {
+    /// `startActivities` of `intents` by `resolve_uid`, a PendingIntent's
+    /// creator for one `sender` sends (`startActivitiesInPackage`).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn start_activities_in_package(
         self: &Arc<Self>,
         resolve_uid: i32,
@@ -76,6 +80,7 @@ impl AppHost {
         mut args: StartArgs,
         intents: Vec<Option<RawIntent>>,
         types: Vec<Option<String>>,
+        sender: Option<i32>,
     ) -> Result<i32, Exception> {
         args.request_code = -1;
         args.result_who = None;
@@ -83,7 +88,7 @@ impl AppHost {
         let mut prepared = Vec::new();
         for (i, mut intent) in intents.into_iter().flatten().enumerate() {
             intent.set_flags(intent.intent.flags, intent.intent.extended_flags & !1);
-            let start = match self.prepare_activity_start(
+            let mut start = match self.prepare_activity_start(
                 resolve_uid,
                 pid,
                 user,
@@ -93,6 +98,7 @@ impl AppHost {
                 Err(e) if e.code == EX_SECURITY => return Ok(-96),
                 other => other?,
             };
+            start.real_caller = sender.map(super::background_start::RealCaller::pending_intent);
             if start
                 .info
                 .as_ref()

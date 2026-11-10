@@ -161,7 +161,11 @@ impl AppHost {
             if resolver { 0 } else { from.uid },
         )?;
         prepared.ignore_security = ignore;
-        prepared.real_caller_uid = Some(call.sender_euid as i32);
+        prepared.real_caller = Some(super::background_start::RealCaller {
+            uid: call.sender_euid as i32,
+            pending_intent: false,
+            bal_allowed: true,
+        });
         args.calling_package = from.package.clone();
         self.execute_activity_start(from.uid, from.package, -1, args, prepared)
             .map(|r| r.0)
@@ -302,7 +306,11 @@ impl AppHost {
                 // Supplying activityInfo skips Request.resolveActivity and its grant collection.
                 grants: None,
                 ignore_security: false,
-                real_caller_uid: Some(call.sender_euid as i32),
+                real_caller: Some(super::background_start::RealCaller {
+                    uid: call.sender_euid as i32,
+                    pending_intent: false,
+                    bal_allowed: false,
+                }),
             },
         );
         if result.is_ok()
@@ -314,64 +322,6 @@ impl AppHost {
             Err(e) if e.code == EX_UNSUPPORTED_OPERATION => Ok(false),
             other => other.map(|r| r.0 == 0),
         }
-    }
-
-    // ATMS.createSafeActivityOptionsWithBalAllowed and BAL's two identities.
-    pub(super) fn as_caller_background_allowed(
-        &self,
-        uid: i32,
-        real_uid: i32,
-        options: Option<&RawBundle>,
-    ) -> Result<bool, Exception> {
-        let mode = |key| {
-            options
-                .map_or(Ok(0), |o| o.int(key, 0))
-                .map_err(|_| Exception::illegal_argument("activity options"))
-        };
-        let creator = mode("android.activity.pendingIntentCreatorBackgroundActivityStartMode")?;
-        let sender = mode("android.pendingIntent.backgroundActivityAllowed")?;
-        // SYSTEM_DEFINED is changed to ALLOWED by the ATMS wrapper.
-        let sender = if sender == 0 { 1 } else { sender };
-        let additional = self.flag("com.android.window.flags.bal_additional_start_modes")?;
-        let foreground = |uid| {
-            let running = self.uid_runs(uid);
-            self.tasks.app_switches.lock().unwrap().allows(
-                uid,
-                running,
-                false,
-                std::time::Instant::now(),
-            )
-        };
-        let caller_allowed = if additional && creator == 4 {
-            foreground(uid)
-        } else {
-            self.background_activity_start_allowed(uid)?
-        };
-        if creator != 2 && caller_allowed {
-            return Ok(true);
-        }
-        if sender == 2 {
-            return Ok(false);
-        }
-        // The pinned controller reuses an allowed caller verdict for the same uid.
-        if uid == real_uid && caller_allowed || foreground(real_uid) {
-            return Ok(true);
-        }
-        if additional && sender == 4 {
-            return Ok(false);
-        }
-        let persistent = self
-            .apps
-            .lock()
-            .unwrap()
-            .values()
-            .any(|a| a.uid as i32 == real_uid && a.proc_state <= 1);
-        Ok(persistent
-            || sender == 3
-                && self.check_permission(
-                    Some("android.permission.START_ACTIVITIES_FROM_BACKGROUND"),
-                    real_uid,
-                )? == 0)
     }
 }
 

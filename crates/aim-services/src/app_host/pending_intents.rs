@@ -5,9 +5,9 @@
 //! returned as `FLAG_*` ask, an `IIntentSender` of its own; sent as its
 //! creator (an activity started in its package, a broadcast, a service),
 //! the sender's intent filled in unless it is immutable, once if one-shot,
-//! its finished receiver told. Results to an activity
-//! (`createPendingResult`) are not sent, and the creator's activity
-//! options are not applied to its start (#1493).
+//! its finished receiver told; an activity's start takes the creator's
+//! activity options with the sender's over them. Results to an activity
+//! (`createPendingResult`) are not sent (#1493).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -23,8 +23,9 @@ use aim_service_aidl::android_content_iintentsender as sender;
 
 use super::activity_start::{START_CANCELED, StartArgs};
 use super::activity_user::AllowMode;
+use super::background_start::{KEY_CREATOR_MODE, KEY_SENDER_MODE};
 use super::broadcasts::filter_equals;
-use super::kept::{By, KeptIntent, RawBundle, RawIntent};
+use super::kept::{By, KeptBundle, KeptIntent, RawBundle, RawIntent};
 use super::{AppHost, PER_USER_RANGE};
 use crate::package::component_resolver::ResolveInfo;
 
@@ -90,6 +91,8 @@ struct Record {
     user: i32,
     /// The creator's uid.
     uid: i32,
+    /// The creator's activity options (`Key.options`).
+    options: Option<KeptBundle>,
     canceled: bool,
     cancel_listeners: Vec<Strong>,
 }
@@ -329,6 +332,16 @@ impl AppHost {
             return Err(self
                 .unimplemented_named("activity", "a PendingIntent of an activity result (#1493)"));
         }
+        let options = match req.options {
+            Some(o) => Some(
+                KeptBundle::new(
+                    self.without_others_mode(o, KEY_SENDER_MODE, uid)?,
+                    &self.process,
+                )
+                .map_err(|_| Exception::illegal_argument("activity options"))?,
+            ),
+            None => None,
+        };
         let no_create = req.flags & FLAG_NO_CREATE != 0;
         let cancel_current = req.flags & FLAG_CANCEL_CURRENT != 0;
         let update_current = req.flags & FLAG_UPDATE_CURRENT != 0;
@@ -349,6 +362,7 @@ impl AppHost {
             flags,
             user,
             uid,
+            options,
             canceled: false,
             cancel_listeners: Vec::new(),
         };
@@ -611,6 +625,7 @@ impl AppHost {
         // the native shell's LocalIntentReceiver is local too.
         if matches!(&other, crate::system::ServiceOwner::Local(node) if node.is::<IntentSender>()) {
             return self.send_record(
+                calling_uid,
                 caller,
                 target,
                 code,
@@ -647,10 +662,11 @@ impl AppHost {
         Ok(0)
     }
 
-    /// `PendingIntentRecord.sendInner`.
+    /// `PendingIntentRecord.sendInner` by `calling_uid`.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn send_record(
         self: &Arc<Self>,
+        calling_uid: i32,
         caller: Option<Binder>,
         target: Binder,
         code: i32,
@@ -658,9 +674,9 @@ impl AppHost {
         resolved_type: Option<String>,
         finished: Option<Strong>,
         required_permission: Option<String>,
-        sent: Sent,
+        mut sent: Sent,
     ) -> Result<i32, Exception> {
-        let (kind, package, feature, uid, user, final_intent, resolved, all) = {
+        let (kind, package, feature, uid, user, final_intent, resolved, all, creator_options) = {
             let mut records = self.pending_intents.records.lock().unwrap();
             let Some(at) = records
                 .iter()
@@ -725,7 +741,21 @@ impl AppHost {
                 final_intent,
                 resolved,
                 all,
+                records[at].options.clone(),
             )
+        };
+        // The creator's options, the sender's over them (`mergedOptions`).
+        let sender_options = match sent.options.take() {
+            Some(o) => Some(self.without_others_mode(o, KEY_CREATOR_MODE, calling_uid)?),
+            None => None,
+        };
+        let options = match (&creator_options, sender_options) {
+            (Some(c), Some(s)) => Some(
+                c.bundle
+                    .put_all(&s)
+                    .map_err(|_| Exception::illegal_argument("activity options"))?,
+            ),
+            (c, s) => s.or(c.as_ref().map(|c| c.bundle.clone())),
         };
         let user = if user == USER_CURRENT { 0 } else { user };
         // The finished receiver's process gets its result.
@@ -742,15 +772,23 @@ impl AppHost {
                     result_to: sent.result_to,
                     result_who: sent.result_who,
                     request_code: sent.request_code,
-                    options: sent.options,
+                    options,
                     start_flags: 0,
                     launch: None,
                 };
                 let owner = Some(package.clone());
                 let result = if let Some((intents, types)) = all {
-                    self.start_activities_in_package(uid, 0, user, args, intents, types)
+                    self.start_activities_in_package(
+                        uid,
+                        0,
+                        user,
+                        args,
+                        intents,
+                        types,
+                        Some(calling_uid),
+                    )
                 } else {
-                    self.start_activity_in_package(uid, owner, 0, user, args)
+                    self.start_activity_in_package(uid, owner, 0, user, args, Some(calling_uid))
                 };
                 res = match result {
                     Ok(r) => r,
@@ -909,8 +947,18 @@ mod stats_tests {
                 result
             };
             let send = |target| {
-                host.send_record(None, target, 0, None, None, None, None, Sent::default())
-                    .unwrap()
+                host.send_record(
+                    1000,
+                    None,
+                    target,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Sent::default(),
+                )
+                .unwrap()
             };
             for kind in [
                 INTENT_SENDER_ACTIVITY,
@@ -993,6 +1041,7 @@ mod stats_tests {
             flags: FLAG_IMMUTABLE,
             user: 0,
             uid: 10123,
+            options: None,
             canceled: false,
             cancel_listeners: vec![],
         });

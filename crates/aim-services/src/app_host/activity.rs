@@ -1099,6 +1099,7 @@ impl Service for ActivityTaskManager {
                         options: a.options,
                     };
                     let code = self.0.send_record(
+                        uid,
                         a.caller,
                         target,
                         0,

@@ -48,6 +48,7 @@ pub mod audio_policy;
 pub mod audio_service;
 pub mod auth_service;
 mod background_install_control;
+mod background_start;
 mod battery_history;
 pub mod battery_service;
 pub mod battery_stats;

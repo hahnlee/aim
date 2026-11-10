@@ -2266,7 +2266,7 @@ pub(super) mod tests {
                 launch: None,
             };
             assert_eq!(
-                host.start_activity_in_package(1000, Some("android".into()), 0, 0, args),
+                host.start_activity_in_package(1000, Some("android".into()), 0, 0, args, None),
                 Ok(super::super::activity_stack::START_DELIVERED_TO_TOP)
             );
             let tasks = host.tasks.tasks.lock().unwrap();
