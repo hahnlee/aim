@@ -689,7 +689,27 @@ mod tests {
         close(&[b]);
     }
 
-    /// A pipe's FIOASYNC is O_ASYNC: the reader's owner hears each write.
+    /// Without a pid table, so with no agent to carry it, a kill of SIGIO
+    /// to another process is Darwin's, and is delivered.
+    #[test]
+    fn a_sigio_kill_without_an_agent_is_delivered() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("10")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        assert!(super::super::cred::by_pid_dir().is_none());
+        assert_eq!(
+            super::super::signal::signal_process(pid, SIGIO, libc::SIGIO),
+            0
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// A pipe's FIOASYNC is O_ASYNC: the reader's owner hears each write,
+    /// as `send_sigio` signals it without F_SETSIG: SI_KERNEL, from no
+    /// process.
     #[test]
     fn fioasync_pipe() {
         if fdtab::isolated_kernel_test("sys::fasync::tests::fioasync_pipe") {
@@ -704,7 +724,8 @@ mod tests {
         assert_eq!(fioasync(p[0], 1), 0);
         assert!(is_async(p[0]));
         put(p[1], b"x");
-        assert!(take(SIGIO).is_some());
+        let info = take(SIGIO).unwrap();
+        assert_eq!((info.code, info.fields[0]), (0x80, 0));
         get(p[0]);
         assert_eq!(fioasync(p[0], 0), 0);
         assert!(!is_async(p[0]));

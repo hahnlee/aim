@@ -600,10 +600,17 @@ fn record_external(sig: i32, si: &libc::siginfo_t) {
         0x10002 => -1,               // SI_QUEUE
         0x10003 => -2,               // SI_TIMER
         c @ 1..=6 if sig == 17 => c, // CLD_*
+        // An O_ASYNC file's (`pgsigio`), which Darwin sends as a kill from
+        // the process that made it ready: a guest's kill of SIGIO goes
+        // through Darwin only where no agent can carry it
+        // ([`signal_process`]), so a host SIGIO is taken for the kernel's,
+        // with no sender (`send_sigio`'s SI_KERNEL).
+        _ if sig == SIGIO => SI_KERNEL,
         _ => sigframe::SI_USER,
     };
     let e = &EXTERNAL_INFO[sig as usize - 1];
-    e.from.store(si.si_pid as u32 as u64, Relaxed);
+    let from = if code == SI_KERNEL { 0 } else { si.si_pid };
+    e.from.store(from as u32 as u64, Relaxed);
     e.code.store(
         code as u32 as u64 | (si.si_status as u32 as u64) << 32,
         Relaxed,
@@ -870,8 +877,15 @@ const RESTART_ALWAYS: u64 = 1 << 62;
 /// A call whose EINTR is plain: never restarted ([`not_restarted`]).
 const RESTART_NEVER: u64 = 1 << 61;
 
+/// Whether a guest signal is due on the calling thread: what ends a wait
+/// with EINTR on Linux (`signal_pending`), where a host signal alone
+/// interrupts the host call.
+pub(super) fn due() -> bool {
+    thread::current().is_some_and(interrupted)
+}
+
 /// The current syscall's EINTR is Linux's plain -EINTR, not -ERESTARTSYS:
-/// it is not restarted, with or without a handler.
+/// a handler that runs for it does not restart it, SA_RESTART or not.
 pub(super) fn not_restarted() {
     if let Some(th) = thread::current() {
         th.sig.no_restart.store(true, Relaxed);
@@ -904,7 +918,7 @@ pub fn after_syscall(ctx: &GuestContext, nr: u64, a: &[u64; 6], r: i64) -> bool 
     }
     th.sig.restart_nr.store((nr + 1) | flags, Relaxed);
     th.sig.restart_a0.store(a[0], Relaxed);
-    if r != -(EINTR as i64) || flags == RESTART_NEVER {
+    if r != -(EINTR as i64) {
         return false;
     }
     // A ptrace stop that interrupted the call sees it about to restart,
@@ -1691,7 +1705,13 @@ pub(super) fn signal_process(p: i32, sig: i32, h: i32) -> i64 {
     if matches!(sig, SIGKILL | SIGSTOP) && super::pidns::is_private_init(p) {
         return 0;
     }
-    if sig != 0 && (h == 0 || SYNCHRONOUS & bit(sig) != 0) {
+    // A SIGIO too, where the agent runs, so that a host SIGIO is the
+    // kernel's (`record_external`). Without one (no pid table here, or the
+    // native namespace init) Darwin's kill delivers it, read as the
+    // kernel's.
+    let agent =
+        || super::cred::by_pid_dir().is_some() && super::pidns::is_namespace_init(p) == Ok(false);
+    if sig != 0 && (h == 0 || SYNCHRONOUS & bit(sig) != 0 || sig == SIGIO && agent()) {
         return super::ptrace::remote_signal(p, 0, &sender(sig, sigframe::SI_USER));
     }
     // SAFETY: plain kill of a process of the namespace.

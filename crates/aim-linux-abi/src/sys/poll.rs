@@ -2103,16 +2103,10 @@ mod reportable_tests {
         close(&[blocking]);
     }
 
-    /// `sk_stream_wait_connect`: a send or write on a TCP socket neither
-    /// connected nor connecting, never connected or listening, fails with
-    /// EPIPE and raises SIGPIPE unless MSG_NOSIGNAL (`sk_stream_error`),
-    /// where Darwin's fails with ENOTCONN.
-    #[test]
-    fn a_send_on_an_unconnected_tcp_socket_is_epipe() {
-        let _view = crate::vfs::test_view();
-        const MSG_NOSIGNAL: u64 = 0x4000;
+    /// `send`'s result, and whether it raised SIGPIPE at this thread.
+    fn raised(send: &dyn Fn() -> i64) -> (i64, bool) {
         // SAFETY: this thread's signal mask and pending SIGPIPE.
-        let raised = |send: &dyn Fn() -> i64| unsafe {
+        unsafe {
             let mut pipe: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&mut pipe);
             libc::sigaddset(&mut pipe, libc::SIGPIPE);
@@ -2128,7 +2122,45 @@ mod reportable_tests {
             }
             libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
             (r, raised)
-        };
+        }
+    }
+
+    /// After a refused connect, a send or write returns the pending
+    /// ECONNREFUSED first, without SIGPIPE, and only then fails with EPIPE
+    /// (`sk_stream_error`, `sock_error`), where Darwin's fails with EPIPE
+    /// at once.
+    #[test]
+    fn a_send_after_a_refused_connect_returns_the_refusal_first() {
+        let _view = crate::vfs::test_view();
+        let byte = b"x".as_ptr() as u64;
+        for write in [false, true] {
+            let (fd, connected) = refused(1);
+            assert_eq!(connected, -115);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while polled(fd, POLLIN).1 & POLLHUP == 0 && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let send = || {
+                if write {
+                    fs::write([fd as u64, byte, 1, 0, 0, 0])
+                } else {
+                    crate::sys::net::sendto([fd as u64, byte, 1, 0, 0, 0])
+                }
+            };
+            assert_eq!(raised(&send), (-111, false), "write {write}");
+            assert_eq!(raised(&send), (-32, true), "write {write}");
+            close(&[fd]);
+        }
+    }
+
+    /// `sk_stream_wait_connect`: a send or write on a TCP socket neither
+    /// connected nor connecting, never connected or listening, fails with
+    /// EPIPE and raises SIGPIPE unless MSG_NOSIGNAL (`sk_stream_error`),
+    /// where Darwin's fails with ENOTCONN.
+    #[test]
+    fn a_send_on_an_unconnected_tcp_socket_is_epipe() {
+        let _view = crate::vfs::test_view();
+        const MSG_NOSIGNAL: u64 = 0x4000;
         let fresh = crate::sys::net::socket([2, 1 | O_NONBLOCK, 0, 0, 0, 0]);
         let listener = crate::sys::net::socket([10, 1 | O_NONBLOCK, 0, 0, 0, 0]);
         let mut address = [0u8; 28];
@@ -2191,6 +2223,61 @@ mod reportable_tests {
         assert!(
             waited >= std::time::Duration::from_millis(190)
                 && waited < std::time::Duration::from_secs(5),
+            "{waited:?}"
+        );
+        close(&[fd]);
+    }
+
+    /// A host signal with no guest signal due does not end the wait for a
+    /// TCP connection (`signal_pending` is what does on Linux).
+    #[test]
+    fn a_connecting_send_waits_past_a_host_signal() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_connecting_send_waits_past_a_host_signal",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        extern "C" fn ignore(_: i32) {}
+        // SAFETY: a handler that does nothing, without SA_RESTART, so the
+        // host poll fails with EINTR.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = ignore as extern "C" fn(i32) as usize;
+            libc::sigaction(libc::SIGUSR2, &action, std::ptr::null_mut());
+        }
+        let fd = crate::sys::net::socket([2, 1 | O_NONBLOCK, 0, 0, 0, 0]);
+        let mut address = [0u8; 16];
+        address[..2].copy_from_slice(&2u16.to_le_bytes());
+        address[2..4].copy_from_slice(&9u16.to_be_bytes());
+        address[4..8].copy_from_slice(&[192, 0, 2, 1]);
+        assert_eq!(
+            crate::sys::net::connect([fd as u64, address.as_ptr() as u64, 16, 0, 0, 0]),
+            -115,
+            "TEST-NET-1 needs a route"
+        );
+        assert_eq!(fs::fcntl([fd as u64, 4, 0, 0, 0, 0]), 0);
+        let timeout = [0i64, 500_000];
+        assert_eq!(
+            crate::sys::net::setsockopt([fd as u64, 1, 21, timeout.as_ptr() as u64, 16, 0]),
+            0
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sender = std::thread::spawn(move || {
+            // SAFETY: this thread's own handle.
+            tx.send(unsafe { libc::pthread_self() } as usize).unwrap();
+            let started = std::time::Instant::now();
+            let r = crate::sys::net::sendto([fd as u64, b"x".as_ptr() as u64, 1, 0, 0, 0]);
+            (r, started.elapsed())
+        });
+        let thread = rx.recv().unwrap() as libc::pthread_t;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // SAFETY: a live thread of this process, joined below.
+        unsafe { libc::pthread_kill(thread, libc::SIGUSR2) };
+        let (r, waited) = sender.join().unwrap();
+        assert_eq!(r, -11);
+        assert!(
+            waited >= std::time::Duration::from_millis(450),
             "{waited:?}"
         );
         close(&[fd]);
@@ -2810,6 +2897,40 @@ mod reportable_tests {
         );
         assert_eq!(received(fd, &mut buffer), -11);
         close(&[fd, first, second]);
+    }
+
+    /// A connect, or one of AF_UNSPEC, drops an AF_UNIX datagram socket's
+    /// queue when its peer closed too: Linux's `unix_peer` still holds the
+    /// peer, though Darwin disconnected from it (`unix_dgram_disconnected`).
+    #[test]
+    fn a_unix_datagram_connect_after_its_peers_close_drops_its_queue() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_unix_datagram_connect_after_its_peers_close_drops_its_queue",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        let send = |fd: i64| crate::sys::net::sendto([fd as u64, b"x".as_ptr() as u64, 1, 0, 0, 0]);
+        let other = crate::sys::net::socket([1, 2 | O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0]);
+        let (name, len) = abstract_name(&format!("aim-poll-after-close-{}", std::process::id()));
+        assert_eq!(
+            crate::sys::net::bind([other as u64, name.as_ptr() as u64, len, 0, 0, 0]),
+            0
+        );
+        let unspec = [0u8; 16];
+        let mut buffer = [0u8; 4];
+        for (to, to_len) in [(name.as_ptr(), len), (unspec.as_ptr(), 16)] {
+            let (fd, peer) = unix_datagram_pair(true);
+            assert_eq!(send(peer), 1);
+            close(&[peer]);
+            assert_eq!(
+                crate::sys::net::connect([fd as u64, to as u64, to_len, 0, 0, 0]),
+                0
+            );
+            assert_eq!(received(fd, &mut buffer), -11, "to {to_len}");
+            close(&[fd]);
+        }
+        close(&[other]);
     }
 
     /// A refused non-blocking TCP connect: `tcp_done` shuts it both ways,

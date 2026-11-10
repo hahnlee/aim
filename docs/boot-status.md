@@ -113,7 +113,12 @@ F_SETSIG's signal with POLL_IN, its band and si_fd: a watcher thread waits on a
 second knote on each watched vnode and decodes events as they arrive (#2850).
 F_SETFL and FIOASYNC set O_ASYNC on every fd's host file (FIOASYNC is ENOTTY on
 a file without Linux fasync), and F_GETFL reports it. A host socket or pipe
-keeps its process or group owner in Darwin, whose SIGIO reaches it; with
+keeps its process or group owner in Darwin, whose SIGIO reaches it as
+`send_sigio`'s, SI_KERNEL from no process (a guest's kill of SIGIO to another
+process goes through the agent, so a host SIGIO is the kernel's; where there is
+no agent, no pid table here or the native namespace init as target, and for a
+group kill without a member list, Darwin's kill delivers it, read as the
+kernel's; #2875, #2941); with
 F_SETSIG or a thread owner, Darwin's owner is cleared and an EV_CLEAR read
 knote on a private reference to the file wakes the same watcher thread, which
 sends the signal with POLL_IN and the si_fd that set O_ASYNC until the file's
@@ -157,7 +162,10 @@ write fails with EPIPE and SIGPIPE (unless MSG_NOSIGNAL), as
 `sk_stream_wait_connect` fails it, a listening one's too, where Darwin's fails
 with ENOTCONN; a connecting one's waits for the connection up to SO_SNDTIMEO
 (then EAGAIN; a signal's EINTR restarts only untimed), or is EAGAIN
-non-blocking; a TCP write raises SIGPIPE for EPIPE like a send (#2927);
+non-blocking; a TCP write raises SIGPIPE for EPIPE like a send (#2927), and a
+TCP send or write that Darwin fails with EPIPE returns a pending error instead,
+without SIGPIPE, as `sk_stream_error` does: a refused connect's first send is
+ECONNREFUSED (#2937);
 edge-triggered once per
 change, a shutdown included: its shutdown is recorded, as `inet_shutdown` (with
 ENOTCONN, an unconnected UDP socket's too, #2921) and `unix_shutdown` (with success, in any state Darwin's fails in:

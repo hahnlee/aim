@@ -1418,12 +1418,12 @@ pub fn connect(a: [u64; 6]) -> i64 {
                     sa_family: libc::AF_UNSPEC as u8,
                     sa_data: [0; 14],
                 };
-                let old = unix_peer(fd);
+                let connected = had_peer(&s, fd);
                 // SAFETY: a sockaddr of ours, of its length.
                 unsafe { libc::connect(fd, &unspec, 2) };
                 s.peer_gone.store(false, Ordering::Relaxed);
                 *s.peer.lock().unwrap() = None;
-                if old != 0 {
+                if connected {
                     purge(&input);
                 }
                 return 0;
@@ -1441,7 +1441,9 @@ pub fn connect(a: [u64; 6]) -> i64 {
         return r;
     }
     let unix_dgram = any_sock(&input).filter(|s| s.unix_datagram());
-    let old_peer = unix_dgram.as_ref().map_or(0, |_| unix_peer(fd));
+    let old_peer = unix_dgram
+        .as_ref()
+        .map(|s| (had_peer(s, fd), unix_peer(fd)));
     let zero_port = datagram_to_port_zero(fd, &mut t);
     let mut r = with_target(&t, |sa, len| {
         errno::check(unsafe { libc::connect(fd, sa, len) } as i64)
@@ -1462,7 +1464,9 @@ pub fn connect(a: [u64; 6]) -> i64 {
         && let Some(s) = any_sock(&input)
     {
         s.peer_gone.store(false, Ordering::Relaxed);
-        if unix_dgram.is_some() && old_peer != 0 && unix_peer(fd) != old_peer {
+        if let Some((true, old)) = old_peer
+            && (old == 0 || unix_peer(fd) != old)
+        {
             purge(&input);
         }
     }
@@ -2317,11 +2321,22 @@ fn unix_peer(fd: i32) -> u64 {
     })
 }
 
+/// Whether AF_UNIX datagram socket `s`, host socket `fd`, has a peer, as
+/// Linux's `unix_peer` holds it: one connected, or one that closed, which
+/// Darwin disconnects from (its pending ECONNRESET, taken now, or one
+/// taken before).
+fn had_peer(s: &Sock, fd: i32) -> bool {
+    pending_error(fd);
+    unix_peer(fd) != 0 || s.peer_gone.load(Ordering::Relaxed)
+}
+
 /// `unix_dgram_disconnected`: drop what AF_UNIX datagram socket `input`
 /// had queued (`skb_queue_purge`). Each datagram holds at least a byte of
 /// the queue, so its bytes as of now bound the receives, however many more
-/// arrive meanwhile.
+/// arrive meanwhile. A pending ECONNRESET, its peer's close, would end the
+/// receives first: it is taken.
 fn purge(input: &SocketInput) {
+    pending_error(input.fd());
     let queued = socket_info(input.fd()).map_or(0, |info| {
         u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap())
     });
@@ -2369,24 +2384,59 @@ fn wait_connect(fd: i32, flags: u64) -> Result<(), i64> {
             &mut len,
         )
     };
-    let ms = timeout.tv_sec * 1000 + (timeout.tv_usec as i64 + 999) / 1000;
-    let mut ready = libc::pollfd {
-        fd,
-        events: libc::POLLOUT,
-        revents: 0,
-    };
-    // SAFETY: one pollfd of ours.
-    match unsafe { libc::poll(&mut ready, 1, if ms == 0 { -1 } else { ms as i32 }) } {
-        0 => Err(-(EAGAIN as i64)),
-        n if n > 0 => Ok(()),
-        _ => {
-            let error = errno::last();
-            if error == crate::errno::EINTR && ms != 0 {
-                super::signal::not_restarted();
+    let timed = timeout.tv_sec != 0 || timeout.tv_usec != 0;
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::new(timeout.tv_sec as u64, timeout.tv_usec as u32 * 1000);
+    loop {
+        // Waited in chunks poll's int milliseconds can hold.
+        let ms = if timed {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Err(-(EAGAIN as i64));
             }
-            Err(-(error as i64))
+            left.as_millis().clamp(1, i32::MAX as u128) as i32
+        } else {
+            -1
+        };
+        let mut ready = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: one pollfd of ours.
+        match unsafe { libc::poll(&mut ready, 1, ms) } {
+            0 => {}
+            n if n > 0 => return Ok(()),
+            _ => {
+                let error = errno::last();
+                // A host signal with no guest signal due goes on waiting.
+                if error == crate::errno::EINTR && !super::signal::due() {
+                    continue;
+                }
+                if error == crate::errno::EINTR && timed {
+                    super::signal::not_restarted();
+                }
+                return Err(-(error as i64));
+            }
         }
     }
+}
+
+/// `sk_stream_error` of a TCP send on `s`, host socket `fd`, that failed
+/// with `r`: EPIPE gives way to a pending error (`sock_error`), the kept
+/// one or the host socket's, which Darwin's send leaves pending, and
+/// otherwise raises SIGPIPE unless MSG_NOSIGNAL.
+fn stream_error(s: &Sock, fd: i32, r: i64, flags: u64) -> i64 {
+    if r == -32 {
+        let kept = s.kept_error.swap(0, Ordering::Relaxed);
+        if kept != 0 {
+            return -(kept as i64);
+        }
+        if let error @ 1.. = get_int(fd, libc::SOL_SOCKET, libc::SO_ERROR).unwrap_or(0) {
+            return -(errno::from_darwin(error) as i64);
+        }
+    }
+    epipe(r, flags)
 }
 
 /// A send failed with EPIPE: Linux raises SIGPIPE unless MSG_NOSIGNAL.
@@ -2518,7 +2568,12 @@ fn send(
     while r == -107 && any_sock(input).is_some_and(|s| s.tcp()) {
         match wait_connect(input.fd(), flags) {
             Ok(()) => r = transmit(input, iov, name, ctrl, flags),
-            Err(error) => return epipe(error, flags),
+            Err(error) => {
+                return match any_sock(input) {
+                    Some(s) => stream_error(&s, input.fd(), error, flags),
+                    None => epipe(error, flags),
+                };
+            }
         }
     }
     if unix_dgram.is_some() && !addressed && r == -89 {
@@ -2591,7 +2646,10 @@ fn transmit(
         return -111;
     }
     if r < 0 {
-        return epipe(r, flags);
+        return match any_sock(input).filter(|s| s.tcp()) {
+            Some(s) => stream_error(&s, fd, r, flags),
+            None => epipe(r, flags),
+        };
     }
     match ty {
         Some(SockType::SeqPacket) => {
@@ -3607,7 +3665,11 @@ pub(super) fn write_pinned(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i
         traffic::account(&s, fd, true, r, None);
         // A TCP write's `sk_stream_error`, as a send's without
         // MSG_NOSIGNAL.
-        return Some(if s.tcp() { epipe(r, 0) } else { r });
+        return Some(if s.tcp() {
+            stream_error(&s, fd, r, 0)
+        } else {
+            r
+        });
     }
     Some(send(&input, iov, None, None, 0))
 }
