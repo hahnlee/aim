@@ -880,7 +880,9 @@ fn target_of(ptr: u64, len: u32, bind: bool) -> Result<(Target, Vec<u8>), i64> {
             }
             let end = path.iter().position(|&c| c == 0).unwrap_or(path.len());
             let id = super::cred::current();
-            let search = |directory: &str| super::attrs::search(directory, &id, super::attrs::FS);
+            let search = |directory: &str, known: Option<&libc::stat>| {
+                super::attrs::search(directory, &id, super::attrs::FS, known)
+            };
             // bind makes the socket's inode.
             let r = if bind {
                 vfs::resolve_checked_new(vfs::LINUX_AT_FDCWD, &path[..end], false, search)

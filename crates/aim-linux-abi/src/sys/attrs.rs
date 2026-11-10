@@ -842,6 +842,15 @@ pub fn permits(st: &libc::stat, want: u32, id: &super::cred::Identity, kind: usi
 
 /// A resolved prefix has no remaining symlinks. Do not recurse through stat_at.
 pub(super) fn path_stat(guest: &str) -> Result<libc::stat, crate::errno::Errno> {
+    path_stat_known(guest, None)
+}
+
+/// [`path_stat`], given the host stat of `guest`'s host path where the
+/// caller has one (a walk's lstat of a component that is no symlink).
+fn path_stat_known(
+    guest: &str,
+    known: Option<&libc::stat>,
+) -> Result<libc::stat, crate::errno::Errno> {
     if let Some(route) = vfs::fuse_route(guest) {
         return super::fuse_client::stat(&route, None, None);
     }
@@ -853,7 +862,9 @@ pub(super) fn path_stat(guest: &str) -> Result<libc::stat, crate::errno::Errno> 
     let host =
         std::ffi::CString::new(host.as_os_str().as_bytes()).map_err(|_| crate::errno::EINVAL)?;
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::stat(host.as_ptr(), &mut stat) } < 0 {
+    if let Some(known) = known {
+        stat = *known;
+    } else if unsafe { libc::stat(host.as_ptr(), &mut stat) } < 0 {
         let error = crate::errno::last();
         // The layer's own device nodes (vfs::HOST_DEVICES, the pty slaves)
         // sit in /dev and /dev/pts, a devtmpfs root's, when no mount
@@ -877,10 +888,13 @@ pub(super) fn path_stat(guest: &str) -> Result<libc::stat, crate::errno::Errno> 
     Ok(stat)
 }
 
+/// Search permission on directory `guest` for `id`; `known` is its host
+/// stat where the caller's walk has one.
 pub(super) fn search(
     guest: &str,
     id: &super::cred::Identity,
     kind: usize,
+    known: Option<&libc::stat>,
 ) -> Result<(), crate::errno::Errno> {
     if !recording() {
         return Ok(());
@@ -889,7 +903,7 @@ pub(super) fn search(
     if vfs::fuse_route(guest).is_some_and(|route| !route.default_permissions) {
         return Ok(());
     }
-    let stat = path_stat(guest)?;
+    let stat = path_stat_known(guest, known)?;
     if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
         return Err(crate::errno::ENOTDIR);
     }

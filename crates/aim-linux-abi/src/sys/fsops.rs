@@ -278,7 +278,7 @@ fn unlinkat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
                 .unwrap_or_else(|error| -(error as i64));
         }
     }
-    let resolved = vfs::resolve_checked(a[0] as i32, path, false, |directory| {
+    let resolved = vfs::resolve_checked(a[0] as i32, path, false, |directory, _| {
         if !attrs::recording() {
             return Ok(());
         }
@@ -655,8 +655,8 @@ fn resolve_metadata(
     if !path.starts_with(b"/") && super::fdtab::is_hidden(dirfd) {
         return Err(-(crate::errno::EBADF as i64));
     }
-    let resolved = vfs::resolve_checked(dirfd, path, follow, |directory| {
-        attrs::search(directory, id, attrs::FS)
+    let resolved = vfs::resolve_checked(dirfd, path, follow, |directory, known| {
+        attrs::search(directory, id, attrs::FS, known)
     })
     .map_err(|error| -(error as i64))?;
     check_writable(&resolved)?;
