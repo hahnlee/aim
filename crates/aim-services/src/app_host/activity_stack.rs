@@ -299,6 +299,9 @@ pub struct Decision {
     /// task goes to the back (`setNewTask`'s `toTop`), and an activity
     /// added to a task leaves it where it is.
     pub avoid_move_to_front: bool,
+    /// A blocked background start is aborted (`isAllowedToStart`'s
+    /// `START_ABORTED`).
+    pub aborted: bool,
     /// The activities finished first, top first (`performClearTop`,
     /// `performClearTaskForReuse`).
     pub clear: Vec<u64>,
@@ -349,6 +352,10 @@ pub struct Start<'a> {
     /// (`BAL_BLOCK`); nor is its task resumed as the focused one
     /// (`mDoResume`).
     pub avoid_move_to_front: bool,
+    /// For a blocked background start (`BAL_BLOCK`), the tasks holding an
+    /// activity of its caller's uid (`Task.isUidPresent`): the only ones
+    /// it may go into (`isAllowedToStart`).
+    pub blocked_into: Option<&'a [i32]>,
 }
 
 /// What a start comes to once decided.
@@ -750,12 +757,10 @@ impl Stack {
         if source.is_none_or(|src| src.launch_mode == LAUNCH_SINGLE_INSTANCE) || single {
             flags |= FLAG_ACTIVITY_NEW_TASK;
         }
-        if flags & FLAG_ACTIVITY_LAUNCH_ADJACENT != 0 {
-            if flags & FLAG_ACTIVITY_NEW_TASK == 0 || source.is_none() {
-                flags &= !FLAG_ACTIVITY_LAUNCH_ADJACENT;
-            } else {
-                return Err("an adjacent launch");
-            }
+        if flags & FLAG_ACTIVITY_LAUNCH_ADJACENT != 0
+            && (flags & FLAG_ACTIVITY_NEW_TASK == 0 || source.is_none())
+        {
+            flags &= !FLAG_ACTIVITY_LAUNCH_ADJACENT;
         }
         // `resolveReusableTask`.
         let put = ((flags & FLAG_ACTIVITY_NEW_TASK != 0
@@ -796,6 +801,16 @@ impl Stack {
         });
         d.outcome = Outcome::New(target);
         d.target = target;
+        // `isAllowedToStart`, before the target task is recycled.
+        if s.blocked_into
+            .is_some_and(|tasks| target.is_none_or(|t| !tasks.contains(&t)))
+        {
+            d.aborted = true;
+            return Ok(d);
+        }
+        if flags & FLAG_ACTIVITY_LAUNCH_ADJACENT != 0 {
+            return Err("an adjacent launch");
+        }
         d.home_front = s.activity_type == super::activity::ACTIVITY_TYPE_HOME
             && !s.avoid_move_to_front
             && d.result_to.is_none()
@@ -2039,6 +2054,7 @@ mod tests {
             activity_type: crate::app_host::activity::ACTIVITY_TYPE_STANDARD,
             clear_task_on_launch: false,
             avoid_move_to_front: false,
+            blocked_into: None,
         }
     }
 
@@ -2590,6 +2606,25 @@ mod tests {
         let order: Vec<i32> = s.tasks.iter().map(|t| t.id).collect();
         assert_eq!((order.as_slice(), s.focused()), (&[8, 7, 9][..], Some(9)));
         assert!(!commands.contains(&Launch(3)));
+    }
+
+    // ActivityStarter.isAllowedToStart, after computeTargetTask and before
+    // the target task is recycled or laid out: a blocked start into a task
+    // without its caller's uid is aborted, not refused for what it asks.
+    #[test]
+    fn a_blocked_start_is_aborted_before_its_task_is_recycled() {
+        let s = behind_launcher(vec![]);
+        let adjacent = Intent {
+            flags: FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_LAUNCH_ADJACENT,
+            ..Default::default()
+        };
+        let blocked = |tasks| super::Start {
+            blocked_into: Some(tasks),
+            ..start("com.example/Main", 0, &adjacent, Some(1))
+        };
+        let d = s.decide(&blocked(&[9])).unwrap();
+        assert_eq!((d.aborted, d.target, d.front), (true, Some(7), None));
+        assert_eq!(s.decide(&blocked(&[7])), Err("an adjacent launch"));
     }
 
     // ResetTargetTaskHelper.test of the tasks behind the target: an

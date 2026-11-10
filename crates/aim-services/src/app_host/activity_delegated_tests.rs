@@ -394,6 +394,39 @@ fn a_blocked_start_goes_only_into_its_callers_task_left_behind() {
             r.launched_from.uid = 10101;
             r.launched_from.package = Some("q".into());
         });
+        // handleBackgroundActivityAbort: the result forwarded into a new
+        // task is cancelled to the activity that asked for it.
+        host.activities
+            .stack
+            .lock()
+            .unwrap()
+            .get_mut(t)
+            .unwrap()
+            .result_to = Some(u64::MAX);
+        let forward = RawIntent::of(None, 0x0200_0000 | 0x1000_0000, &[]) // FORWARD_RESULT|NEW_TASK
+            .with_component("p", "p.Main");
+        assert_eq!(
+            caller_options(host, 1000, token, &forward, false, (Some(&opt_out), 0, 0)),
+            Ok(0)
+        );
+        let results = {
+            let stack = host.activities.stack.lock().unwrap();
+            assert_eq!(stack.get(t).unwrap().result_to, None);
+            stack.get(u64::MAX).unwrap().results.clone()
+        };
+        let payloads = host.activities.payloads.lock().unwrap();
+        assert!(matches!(
+            results[..]
+                .iter()
+                .map(|id| payloads.get(id))
+                .collect::<Vec<_>>()[..],
+            [Some(activity_start::Payload::Result {
+                request_code: -1,
+                result_code: 0,
+                ..
+            })]
+        ));
+        drop(payloads);
         let start = || caller_options(host, 1000, token, &intent, false, (Some(&opt_out), 0, 0));
         assert_eq!(start(), Ok(0));
         assert_eq!(host.activities.records.lock().unwrap().len(), 1); // Aborted.

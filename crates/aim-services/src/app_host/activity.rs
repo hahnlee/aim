@@ -216,14 +216,16 @@ impl Activities {
         })
     }
 
-    /// Whether `task` holds an activity of `uid` (`Task.isUidPresent`).
-    pub fn uid_present(&self, task: i32, uid: u32) -> bool {
+    /// The tasks holding an activity of `uid` (`Task.isUidPresent`).
+    pub fn uid_tasks(&self, uid: u32) -> Vec<i32> {
         let stack = self.stack.lock().unwrap();
         let records = self.records.lock().unwrap();
         stack
             .activities
             .iter()
-            .any(|a| a.task == task && records.get(&a.token).is_some_and(|r| r.uid == uid))
+            .filter(|a| records.get(&a.token).is_some_and(|r| r.uid == uid))
+            .map(|a| a.task)
+            .collect()
     }
 
     /// The start of the process of the focused task's top activity

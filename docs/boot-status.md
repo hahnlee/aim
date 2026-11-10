@@ -232,7 +232,8 @@ display area's freeform in window mode, else fullscreen; a reused task keeps
 its own), a fullscreen display area's launch takes its source task's mode, and
 a valid multi-window launch on the display area is an explicit failure. A start
 that avoids the front (`ActivityOptions.setAvoidMoveToFront`, or a blocked
-background start, which goes only into a task holding its caller's activity)
+background start, which goes only into a task holding its caller's activity
+and is otherwise aborted, its asked-for or forwarded result cancelled)
 leaves its task where it is and a new task at the back (#2795; host tests
 only). A pinned
 launch on a device with freeform or picture-in-picture takes its launch bounds,

@@ -1241,6 +1241,7 @@ impl AppHost {
         intent = intent.with_component(&package, &class);
         let real = real_component(&info);
         let target_uid = target_uid as u32;
+        let caller_tasks = blocked.then(|| self.activities.uid_tasks(uid as u32));
         let start = stack::Start {
             component: &real,
             affinity: info.task_affinity.as_deref(),
@@ -1257,6 +1258,7 @@ impl AppHost {
             },
             clear_task_on_launch: info.flags & FLAG_CLEAR_TASK_ON_LAUNCH != 0,
             avoid_move_to_front: launch_options.avoid_move_to_front || blocked,
+            blocked_into: caller_tasks.as_deref(),
         };
         let d = self
             .activities
@@ -1267,12 +1269,24 @@ impl AppHost {
             .map_err(|what| {
                 self.unimplemented_named("activity_task", &format!("{what} (#1485)"))
             })?;
-        // `isAllowedToStart`: a blocked start goes only into an existing
-        // task where its caller has an activity (`Task.isUidPresent`).
-        if blocked
-            && d.target
-                .is_none_or(|t| !self.activities.uid_present(t, uid as u32))
-        {
+        if d.aborted {
+            // `handleBackgroundActivityAbort`: the result asked for, or
+            // forwarded, is cancelled.
+            if let Some(to) = result_to {
+                let payload = self.new_payload(Payload::Result {
+                    who: args.result_who.clone(),
+                    request_code: args.request_code,
+                    result_code: RESULT_CANCELED,
+                    data: None,
+                });
+                deferred.extend(
+                    self.activities
+                        .stack
+                        .lock()
+                        .unwrap()
+                        .send_result(to, payload),
+                );
+            }
             // WaitResult retains START_ABORTED; getExternalResult exposes success.
             return Ok((
                 if args.launch.is_some() {
