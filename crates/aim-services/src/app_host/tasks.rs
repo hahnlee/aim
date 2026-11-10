@@ -5547,8 +5547,17 @@ pub(super) mod tests {
             let commands = host.activities.stack.lock().unwrap().ensure_visible();
             host.run(commands);
             let _ = receive.read_to_end(&mut Vec::new());
+            for task in &mut host.activities.stack.lock().unwrap().tasks {
+                task.intent.component = Some(crate::package::intent::ComponentName {
+                    package: "p".into(),
+                    class: "p.Main".into(),
+                });
+            }
+            let sleeping = || host.organizer_task_info(8).unwrap().is_sleeping;
+            assert!(!sleeping());
             host.set_sleep_token(DISPLAY_OFF_SLEEP_TOKEN, true);
             assert_eq!(states(), [State::Pausing, State::Pausing]);
+            assert!(sleeping());
             host.set_sleep_token("other", true);
             for &t in &activities {
                 let commands = host.activities.stack.lock().unwrap().paused(t);
@@ -5559,6 +5568,7 @@ pub(super) mod tests {
             assert_eq!(states(), [State::Stopping, State::Stopping]);
             host.set_sleep_token("other", false);
             assert_eq!(states(), [State::Resumed, State::Resumed]);
+            assert!(!sleeping());
             quiet(&mut receive);
         });
     }
