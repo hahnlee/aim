@@ -251,6 +251,10 @@ fn change(host: Host, call: impl Fn() -> i32) -> Result<bool, crate::errno::Errn
 struct Table {
     /// (size, mtime) of the file when read.
     stamp: (i64, i64),
+    /// The metadata generation ([`mode_epoch`]) when the stamp was taken:
+    /// every writer of the table moves it after appending, so the table
+    /// is not looked at again while it stays.
+    epoch: Option<u64>,
     map: HashMap<String, Attr>,
 }
 
@@ -303,21 +307,28 @@ fn table_lookup_key(key: &str) -> Attr {
     let Some(path) = file() else {
         return Attr::default();
     };
-    let Ok(md) = std::fs::metadata(&path) else {
-        return Attr::default();
-    };
-    use std::os::unix::fs::MetadataExt;
-    let stamp = (
-        md.size() as i64,
-        md.mtime_nsec() + md.mtime() * 1_000_000_000,
-    );
+    let epoch = mode_epoch().ok().map(|epoch| epoch.load(Ordering::Acquire));
     let mut t = TABLE.lock().unwrap();
-    if t.as_ref().is_none_or(|t| t.stamp != stamp) {
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
-        *t = Some(Table {
-            stamp,
-            map: parse(&text),
-        });
+    if epoch.is_none() || t.as_ref().is_none_or(|t| t.epoch != epoch) {
+        let Ok(md) = std::fs::metadata(&path) else {
+            return Attr::default();
+        };
+        use std::os::unix::fs::MetadataExt;
+        let stamp = (
+            md.size() as i64,
+            md.mtime_nsec() + md.mtime() * 1_000_000_000,
+        );
+        match t.as_mut() {
+            Some(table) if table.stamp == stamp => table.epoch = epoch,
+            _ => {
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                *t = Some(Table {
+                    stamp,
+                    epoch,
+                    map: parse(&text),
+                });
+            }
+        }
     }
     t.as_ref()
         .unwrap()
@@ -379,7 +390,10 @@ fn table_record_key(key: &str, a: Attr) -> Result<(), crate::errno::Errno> {
         .open(path)
         .map_err(|error| crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
     file.write_all(line.as_bytes())
-        .map_err(|error| crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))
+        .map_err(|error| crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
+    // Lookups read the table again once the generation moves.
+    mode_epoch()?.fetch_add(1, Ordering::Release);
+    Ok(())
 }
 
 /// An inode's attributes as last read, valid while its ctime is (every
@@ -658,7 +672,9 @@ pub fn record(host: Host, guest: impl FnOnce() -> String, a: Attr) {
     }
 }
 
-// Shared metadata generation: ordinary writes need no stat or xattr read.
+// Shared metadata generation (`<runtime>/inode-mode-epoch`, one native u64
+// that guest-init's recordings move too): ordinary writes need no stat or
+// xattr read, and table lookups no stat of the table.
 fn mode_epoch() -> Result<&'static AtomicU64, crate::errno::Errno> {
     static EPOCH: OnceLock<Result<usize, crate::errno::Errno>> = OnceLock::new();
     let address = EPOCH.get_or_init(|| {
@@ -1137,6 +1153,29 @@ mod tests {
         assert_eq!(cached & 0o7777, 0o6777);
         std::fs::remove_file(alias).unwrap();
         std::fs::remove_file(first).unwrap();
+    }
+
+    #[test]
+    fn the_table_is_read_again_only_when_the_generation_moves() {
+        let (_guard, _root) = crate::vfs::test_view();
+        let append = |uid: u32| {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(file().unwrap())
+                .unwrap();
+            file.write_all(format!("/table-generation\t{uid}\t-\t-\n").as_bytes())
+                .unwrap();
+        };
+        let advance = || mode_epoch().unwrap().fetch_add(1, Ordering::Release);
+        append(1234);
+        advance();
+        assert_eq!(table_lookup_key("/table-generation").uid, Some(1234));
+        // A writer appends, then moves the generation (guest-init too).
+        append(4321);
+        assert_eq!(table_lookup_key("/table-generation").uid, Some(1234));
+        advance();
+        assert_eq!(table_lookup_key("/table-generation").uid, Some(4321));
     }
 
     #[test]
