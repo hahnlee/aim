@@ -158,82 +158,60 @@ impl Image {
         };
         let mut scan_paths = Vec::new();
         let cache = super::parse_cache::Cache::open(apks, cache_dir);
+        // Each directory's candidates in scan order, up to a directory that
+        // cannot be listed, whose error is returned in its turn below.
+        let mut listed = Vec::new();
+        let mut unlisted = None;
         for directory in directories {
-            let fail = |path: &str, phase, message| Error {
-                package: String::new(),
-                path: path.into(),
-                phase,
-                message,
-            };
-            let host = (apks.files)(&directory.path).ok_or_else(|| {
-                fail(
-                    &directory.path,
-                    "location",
-                    "scan directory not mapped".into(),
-                )
-            })?;
-            let entries = match fs::read_dir(&host) {
-                Ok(entries) => entries,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    if directory.kind == Kind::Framework {
-                        return Err(Error {
-                            package: "android".into(),
-                            path: directory.path,
-                            phase: "framework",
-                            message: "framework package was not loaded".into(),
-                        });
-                    }
-                    continue;
-                }
-                Err(e) => return Err(fail(&directory.path, "directory", e.to_string())),
-            };
-            let mut candidates = Vec::new();
-            for entry in entries {
-                let entry = entry.map_err(|e| fail(&directory.path, "directory", e.to_string()))?;
-                let name = entry.file_name().into_string().map_err(|_| {
-                    fail(&directory.path, "directory", "non-UTF8 package path".into())
-                })?;
-                if stage(&name) {
-                    continue;
-                }
-                let metadata = fs::metadata(entry.path())
-                    .map_err(|e| fail(&directory.path, "directory", e.to_string()))?;
-                if name.ends_with(".apk") || metadata.is_dir() {
-                    candidates.push((name, entry.path()));
+            match candidates(apks, &directory) {
+                Ok(Some(candidates)) => listed.push((directory, candidates)),
+                Ok(None) => {}
+                Err(error) => {
+                    unlisted = Some(error);
+                    break;
                 }
             }
-            // Original parsing is parallel within a directory. Stable
-            // path order makes a native candidate reproducible; package
-            // collisions are still reconciled by the owner, not here.
-            candidates.sort_by(|a, b| a.0.cmp(&b.0));
-            // Parse on worker threads; results are taken in path order, so the
-            // outcome (and the first error) is the sequential one.
-            let parsed = parse_all(&candidates, |(name, host)| {
-                let path = format!("{}/{name}", directory.path);
-                let flags = Location {
-                    path: path.clone(),
-                    ..directory.clone()
+        }
+        // Original parsing is parallel within a directory. A parse depends
+        // only on its package, so every directory's are parsed on worker
+        // threads at once; the results are taken in scan and path order, so
+        // the outcome (and the first error) is the sequential one.
+        let items: Vec<_> = listed
+            .iter()
+            .flat_map(|(directory, candidates)| {
+                candidates
+                    .iter()
+                    .map(move |(name, host)| (directory, name, host))
+            })
+            .collect();
+        let mut parsed = parse_all(&items, |(directory, name, host)| {
+            let path = format!("{}/{name}", directory.path);
+            let flags = Location {
+                path: path.clone(),
+                ..(*directory).clone()
+            }
+            .parse_flags();
+            let entry = cache
+                .as_ref()
+                .and_then(|cache| cache.entry(host, &path, flags));
+            if let Some(parsed) = cache
+                .as_ref()
+                .zip(entry.as_ref())
+                .and_then(|(cache, entry)| cache.read(entry, &path))
+            {
+                return Ok(Ok(parsed));
+            }
+            parse::parse(host, &path, flags, &apks.platform).map(|parsed| {
+                let bytes = parsed.to_cache_entry().bytes;
+                if let (Some(cache), Some(entry)) = (&cache, &entry) {
+                    cache.store(entry, &bytes);
                 }
-                .parse_flags();
-                let entry = cache
-                    .as_ref()
-                    .and_then(|cache| cache.entry(host, &path, flags));
-                if let Some(parsed) = cache
-                    .as_ref()
-                    .zip(entry.as_ref())
-                    .and_then(|(cache, entry)| cache.read(entry, &path))
-                {
-                    return Ok(Ok(parsed));
-                }
-                parse::parse(host, &path, flags, &apks.platform).map(|parsed| {
-                    let bytes = parsed.to_cache_entry().bytes;
-                    if let (Some(cache), Some(entry)) = (&cache, &entry) {
-                        cache.store(entry, &bytes);
-                    }
-                    AndroidPackage::read_cache_entry(&bytes)
-                })
-            });
-            for ((name, _), parsed) in candidates.into_iter().zip(parsed) {
+                AndroidPackage::read_cache_entry(&bytes)
+            })
+        })
+        .into_iter();
+        for (directory, candidates) in listed {
+            for ((name, _), parsed) in candidates.into_iter().zip(parsed.by_ref()) {
                 let mut location = Location {
                     path: format!("{}/{name}", directory.path),
                     ..directory.clone()
@@ -299,8 +277,70 @@ impl Image {
                 });
             }
         }
+        if let Some(error) = unlisted {
+            return Err(error);
+        }
         Ok((image, scan_paths))
     }
+}
+
+fn fail(path: &str, phase: &'static str, message: String) -> Error {
+    Error {
+        package: String::new(),
+        path: path.into(),
+        phase,
+        message,
+    }
+}
+
+/// The entries of `directory` a scan parses, in path order; None for a
+/// directory that is absent, which only the framework's may not be.
+fn candidates(
+    apks: &Apks,
+    directory: &Location,
+) -> Result<Option<Vec<(String, std::path::PathBuf)>>, Error> {
+    let host = (apks.files)(&directory.path).ok_or_else(|| {
+        fail(
+            &directory.path,
+            "location",
+            "scan directory not mapped".into(),
+        )
+    })?;
+    let entries = match fs::read_dir(&host) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if directory.kind == Kind::Framework {
+                return Err(Error {
+                    package: "android".into(),
+                    path: directory.path.clone(),
+                    phase: "framework",
+                    message: "framework package was not loaded".into(),
+                });
+            }
+            return Ok(None);
+        }
+        Err(e) => return Err(fail(&directory.path, "directory", e.to_string())),
+    };
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| fail(&directory.path, "directory", e.to_string()))?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| fail(&directory.path, "directory", "non-UTF8 package path".into()))?;
+        if stage(&name) {
+            continue;
+        }
+        let metadata = fs::metadata(entry.path())
+            .map_err(|e| fail(&directory.path, "directory", e.to_string()))?;
+        if name.ends_with(".apk") || metadata.is_dir() {
+            candidates.push((name, entry.path()));
+        }
+    }
+    // Stable path order makes a native candidate reproducible; package
+    // collisions are still reconciled by the owner, not here.
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(Some(candidates))
 }
 
 /// Applies `parse` to every item on up to `available_parallelism` threads,
