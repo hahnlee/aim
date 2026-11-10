@@ -273,7 +273,16 @@ fn nonce() -> Result<String> {
 /// The proof of `identity` in the store `directory`, read only: what a
 /// store there finds (`Store::lookup`), for a reader that takes no leases.
 pub fn lookup_in(directory: &Path, identity: Identity) -> Result<Option<Metadata>> {
-    match Metadata::open(&directory.join(hex(&binding(identity))), &binding(identity)) {
+    let path = directory.join(hex(&binding(identity)));
+    // Most files have no proof: an lstat says so without allocating a private
+    // descriptor, whose registration serializes with every other one. A
+    // proof published after it is one this lookup preceded.
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
+    match Metadata::open(&path, &binding(identity)) {
         Ok(metadata) => Ok(Some(metadata)),
         Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),

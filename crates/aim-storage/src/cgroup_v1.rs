@@ -819,18 +819,25 @@ pub struct Membership {
     pub threads: Vec<(i32, Start, String)>,
 }
 
+/// The well-formed entries of a membership text: kind, id, start, group.
+fn entries(text: &str) -> impl Iterator<Item = (&str, i32, Start, &str)> {
+    text.lines().filter_map(|line| {
+        let mut f = line.splitn(5, '\t');
+        let (kind, id, sec, usec, group) = (f.next()?, f.next()?, f.next()?, f.next()?, f.next()?);
+        Some((
+            kind,
+            id.parse().ok()?,
+            (sec.parse().ok()?, usec.parse().ok()?),
+            group,
+        ))
+    })
+}
+
 impl Membership {
     pub fn parse(text: &str) -> Self {
         let mut m = Membership::default();
-        for line in text.lines() {
-            let f: Vec<&str> = line.splitn(5, '\t').collect();
-            let [kind, id, sec, usec, group] = f[..] else {
-                continue;
-            };
-            let (Ok(id), Ok(sec), Ok(usec)) = (id.parse(), sec.parse(), usec.parse()) else {
-                continue;
-            };
-            let entry = (id, (sec, usec), group.to_string());
+        for (kind, id, start, group) in entries(text) {
+            let entry = (id, start, group.to_string());
             match kind {
                 "P" => m.processes.push(entry),
                 "T" => m.threads.push(entry),
@@ -838,6 +845,20 @@ impl Membership {
             }
         }
         m
+    }
+
+    /// The group of thread `tid` started at `start` listed in `text`, as
+    /// `parse(text)` would find it first, without parsing the rest.
+    pub fn thread_group(text: &str, tid: i32, start: Start) -> Option<&str> {
+        text.lines().find_map(|line| {
+            let mut f = line.splitn(5, '\t');
+            if f.next()? != "T" || f.next()?.parse::<i32>().ok()? != tid {
+                return None;
+            }
+            let saved: Start = (f.next()?.parse().ok()?, f.next()?.parse().ok()?);
+            let group = f.next()?;
+            (saved == start).then_some(group)
+        })
     }
 
     pub fn text(&self) -> String {
@@ -1015,5 +1036,19 @@ mod tests {
             state_path(Path::new("/run/cgroup-v1/cpu")),
             Path::new("/run/cgroup-v1/cpu.tasks")
         );
+    }
+
+    #[test]
+    fn thread_group_finds_the_first_entry_of_that_start() {
+        let text = "P\t7\t1\t2\t/process\n\
+                    T\t7\t1\t2\n\
+                    T\t8\t1\t3\t/old\n\
+                    T\t8\t1\t2\t/top-app\n\
+                    T\t8\t1\t2\t/later\n";
+        assert_eq!(Membership::thread_group(text, 8, (1, 2)), Some("/top-app"));
+        assert_eq!(Membership::thread_group(text, 8, (1, 3)), Some("/old"));
+        // A process entry and a malformed line are no thread's.
+        assert_eq!(Membership::thread_group(text, 7, (1, 2)), None);
+        assert_eq!(Membership::parse(text).threads.len(), 3);
     }
 }

@@ -621,9 +621,9 @@ mod offset_tests {
         assert_eq!(read.unwrap(), (16, [7u8; 16]));
     }
 
-    /// A description keeps three host descriptors: its source, the lease
-    /// directory and the offset lock file, opened with the description so
-    /// that a later read or write needs none.
+    /// A description keeps two host descriptors, its source and the offset
+    /// lock file (opened with the description, so that a later read or
+    /// write needs none), and uses the process's one lease directory.
     #[test]
     fn description_keeps_source_lease_directory_and_offset_lock() {
         let (_view, root) = vfs::test_view();

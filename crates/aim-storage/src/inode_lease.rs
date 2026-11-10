@@ -70,13 +70,23 @@ impl Identity {
 }
 struct Inner {
     source: PrivateFd,
-    directory: PrivateFd,
-    path: PathBuf,
+    directory: Arc<LeaseDirectory>,
     identity: Identity,
     offset: OffsetFile,
 }
 #[derive(Clone)]
 pub struct Inode(Arc<Inner>);
+/// A lease directory, opened once per process and shared by its inode
+/// handles while the path still names it.
+struct LeaseDirectory {
+    /// As the caller names it.
+    given: PathBuf,
+    /// Canonical.
+    path: PathBuf,
+    descriptor: PrivateFd,
+    node: (libc::dev_t, libc::ino_t),
+}
+static DIRECTORIES: Mutex<Vec<Arc<LeaseDirectory>>> = Mutex::new(Vec::new());
 pub struct Admission {
     inode: Inode,
     _metadata: PrivateFd,
@@ -114,6 +124,62 @@ fn duplicate(fd: BorrowedFd<'_>) -> io::Result<PrivateFd> {
         }
     })
 }
+/// The lease directory `given` names, reusing this process's open one while
+/// `given` still names it: an open of a file then costs one lstat here
+/// instead of creating, canonicalizing and opening the directory.
+fn lease_directory(given: &Path) -> io::Result<Arc<LeaseDirectory>> {
+    let node = match fs::symlink_metadata(given) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(io::Error::from_raw_os_error(libc::ELOOP));
+        }
+        Ok(metadata) => {
+            use std::os::unix::fs::MetadataExt;
+            Some((metadata.dev() as libc::dev_t, metadata.ino() as libc::ino_t))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let mut directories = DIRECTORIES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(known) = directories
+        .iter()
+        .find(|known| known.given == given && Some(known.node) == node)
+    {
+        return Ok(known.clone());
+    }
+    fs::create_dir_all(given)?;
+    if fs::symlink_metadata(given)?.file_type().is_symlink() {
+        return Err(io::Error::from_raw_os_error(libc::ELOOP));
+    }
+    let path = fs::canonicalize(given)?;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    let descriptor = PrivateFd::allocate(|| {
+        let fd = unsafe {
+            libc::open(
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        }
+    })?;
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(descriptor.as_raw_fd(), &mut stat) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let directory = Arc::new(LeaseDirectory {
+        given: given.to_path_buf(),
+        path,
+        descriptor,
+        node: (stat.st_dev, stat.st_ino),
+    });
+    directories.retain(|known| known.given != given && Arc::strong_count(known) > 1);
+    directories.push(directory.clone());
+    Ok(directory)
+}
 fn locked(fd: BorrowedFd<'_>, operation: i32) -> io::Result<()> {
     loop {
         if unsafe { libc::flock(fd.as_raw_fd(), operation) } == 0 {
@@ -140,30 +206,10 @@ impl Inode {
             return Err(io::Error::from_raw_os_error(libc::EINVAL));
         }
         let identity = Identity::from_fd(source.as_fd())?;
-        fs::create_dir_all(directory)?;
-        if fs::symlink_metadata(directory)?.file_type().is_symlink() {
-            return Err(io::Error::from_raw_os_error(libc::ELOOP));
-        }
-        let path = fs::canonicalize(directory)?;
-        let name = std::ffi::CString::new(path.as_os_str().as_bytes())
-            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
-        let directory = PrivateFd::allocate(|| {
-            let fd = unsafe {
-                libc::open(
-                    name.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                )
-            };
-            if fd < 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-            }
-        })?;
+        let directory = lease_directory(directory)?;
         Ok(Self(Arc::new(Inner {
             source,
             directory,
-            path,
             identity,
             offset: OffsetFile {
                 descriptor: std::sync::OnceLock::new(),
@@ -179,15 +225,20 @@ impl Inode {
         self.0.source.as_fd()
     }
     pub fn directory(&self) -> &Path {
-        &self.0.path
+        &self.0.directory.path
     }
     fn lock_file(&self, suffix: &str) -> io::Result<PrivateFd> {
         let name =
             std::ffi::CString::new(format!("{}.{}", self.identity().name(), suffix)).unwrap();
         let fd = PrivateFd::allocate(|| {
             let flags = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC;
-            let mut fd =
-                unsafe { libc::openat(self.0.directory.as_raw_fd(), name.as_ptr(), flags) };
+            let mut fd = unsafe {
+                libc::openat(
+                    self.0.directory.descriptor.as_raw_fd(),
+                    name.as_ptr(),
+                    flags,
+                )
+            };
             if fd < 0 {
                 let error = io::Error::last_os_error();
                 if error.kind() != io::ErrorKind::NotFound {
@@ -195,7 +246,7 @@ impl Inode {
                 }
                 fd = unsafe {
                     libc::openat(
-                        self.0.directory.as_raw_fd(),
+                        self.0.directory.descriptor.as_raw_fd(),
                         name.as_ptr(),
                         flags | libc::O_CREAT | libc::O_EXCL,
                         0o600,
@@ -206,8 +257,13 @@ impl Inode {
                     if error.kind() != io::ErrorKind::AlreadyExists {
                         return Err(error);
                     }
-                    fd =
-                        unsafe { libc::openat(self.0.directory.as_raw_fd(), name.as_ptr(), flags) };
+                    fd = unsafe {
+                        libc::openat(
+                            self.0.directory.descriptor.as_raw_fd(),
+                            name.as_ptr(),
+                            flags,
+                        )
+                    };
                 }
             }
             if fd < 0 {
@@ -920,6 +976,30 @@ pub(crate) mod tests {
         assert_eq!(libc::WEXITSTATUS(status), 0);
         assert!(fixture.inode.offset_lock().is_ok());
         println!("{MARKER}");
+    }
+    /// Handles share one open lease directory while its path names it, and
+    /// open the directory that replaced it once it does not.
+    #[test]
+    fn inodes_share_their_lease_directory_while_its_path_names_it() {
+        let fixture = Fixture::new();
+        let locks = fixture.path.join("locks");
+        let other = Inode::open(&locks, fixture.file.as_fd()).unwrap();
+        assert!(Arc::ptr_eq(&fixture.inode.0.directory, &other.0.directory));
+        fs::rename(&locks, fixture.path.join("replaced")).unwrap();
+        fs::create_dir(&locks).unwrap();
+        let replacement = Inode::open(&locks, fixture.file.as_fd()).unwrap();
+        assert!(!Arc::ptr_eq(
+            &fixture.inode.0.directory,
+            &replacement.0.directory
+        ));
+        drop(replacement.admission().unwrap());
+        assert!(fs::read_dir(&locks).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".admission")
+        }));
     }
     #[test]
     fn canonical_directory_and_lock_nodes_reject_symlink_redirection() {
