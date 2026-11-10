@@ -137,11 +137,10 @@ fn do_mount(a: [u64; 6]) -> Result<(), i64> {
         if is_dir(&source)? != is_dir(&target)? {
             return Err(-(ENOTDIR as i64));
         }
-        let area = if source.area == Area::Image || flags & MS_RDONLY != 0 {
-            Area::Image
-        } else {
-            source.area
-        };
+        // A new bind has its source's mount options, whatever else the
+        // flags ask (mount(2)): MS_RDONLY makes a bind read-only only by a
+        // later remount, so the bind keeps its source's area.
+        let area = source.area;
         // Linux recursive bind clones visible submounts, including virtual
         // FUSE routes whose nodes do not exist in the host anchor tree.
         let host = PathBuf::from(OsStr::from_bytes(source.host.as_bytes()));
@@ -311,6 +310,32 @@ mod tests {
             mount([p(&s), p(&t), 0, MS_BIND | 0x4000, 0, 0]),
             0,
             "bind {target}"
+        );
+    }
+
+    /// A bind asking MS_RDONLY has its source's area, as Linux ignores
+    /// the flag on a new bind: a change below it is seen by the next walk.
+    #[test]
+    fn a_read_only_bind_keeps_its_sources_area() {
+        let (_view, _) = vfs::test_view();
+        let sub = host("/data/robind-source/sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(host("/data/robind-source/other")).unwrap();
+        std::fs::create_dir_all(host("/data/robind-target")).unwrap();
+        let (source, target) = (at("/data/robind-source"), at("/data/robind-target"));
+        assert_eq!(
+            mount([p(&source), p(&target), 0, MS_BIND | MS_RDONLY, 0, 0]),
+            0
+        );
+        let walked = vfs::resolve(LINUX_AT_FDCWD, b"/data/robind-target/sub", true).unwrap();
+        assert_eq!(walked.area, Area::Writable);
+        std::fs::remove_dir(&sub).unwrap();
+        std::os::unix::fs::symlink("other", &sub).unwrap();
+        assert_eq!(
+            vfs::resolve(LINUX_AT_FDCWD, b"/data/robind-target/sub", true)
+                .unwrap()
+                .guest,
+            "/data/robind-target/other"
         );
     }
 
