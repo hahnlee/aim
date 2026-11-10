@@ -414,6 +414,12 @@ fn a_peers_fatal_real_time_signal_kills_it() {
     check("peer_fatal_rt");
 }
 
+/// kill of an unreaped zombie succeeds, also through its gone agent.
+#[test]
+fn a_signal_to_an_unreaped_zombie_succeeds() {
+    check("peer_zombie_signal");
+}
+
 /// SIGCHLD, waitid and waitpid report a child killed by a signal, one
 /// Darwin cannot carry too, and an exit of 128 + a signal as an exit
 /// (#2773).

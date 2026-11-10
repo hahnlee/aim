@@ -1553,6 +1553,22 @@ static void peer_fatal_rt(void) {
   printf("ok peer_fatal_rt\n");
 }
 
+// A signal to a child that exited and is not yet reaped succeeds, as
+// kill(2) of a zombie does, also for one only its agent could carry.
+static void peer_zombie_signal(void) {
+  pid_t child = fork();
+  CHECK(child >= 0, "fork");
+  if (child == 0) _exit(7);
+  siginfo_t si = {0};
+  CHECK(waitid(P_PID, child, &si, WEXITED | WNOWAIT) == 0, "waitid: errno %d", errno);
+  CHECK(kill(child, SIGRTMIN + 4) == 0, "kill zombie: errno %d", errno);
+  int st;
+  CHECK(waitpid(child, &st, 0) == child && WIFEXITED(st) && WEXITSTATUS(st) == 7,
+        "status %#x", st);
+  CHECK(kill(child, SIGRTMIN + 4) == -1 && errno == ESRCH, "kill reaped: errno %d", errno);
+  printf("ok peer_zombie_signal\n");
+}
+
 // A child that kills itself with `sig`, or exits with `code` when `sig` is
 // 0, as its parent's SIGCHLD, waitid and waitpid report it (wait(2)): a
 // signal Darwin cannot carry too, and an exit of 128 + a signal stays an
@@ -2104,7 +2120,7 @@ int main(int argc, char** argv) {
       {"empty_rights", empty_rights}, {"own_files_thread", own_files_thread},
       {"permissions", permissions}, {"peer_ids", peer_ids},
       {"peer_thread_signals", peer_thread_signals},
-      {"peer_fatal_rt", peer_fatal_rt}, {"wait_signal_status", wait_signal_status},
+      {"peer_fatal_rt", peer_fatal_rt}, {"peer_zombie_signal", peer_zombie_signal}, {"wait_signal_status", wait_signal_status},
       {"sigchld_after_reap", sigchld_after_reap},
       {"entry_rewrites", entry_rewrites}, {"other_procs", other_procs},
       {"bench", bench},             {"ns_init_exit", ns_init_exit},

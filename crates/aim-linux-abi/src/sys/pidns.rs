@@ -700,6 +700,14 @@ pub fn running(pid: i32) -> bool {
     bsd_info(pid).is_some_and(|i| i.pbi_status != libc::SZOMB)
 }
 
+/// Whether host process `pid` has exited or is exiting, and is not reaped.
+pub fn ending(pid: i32) -> bool {
+    // <sys/proc_info.h>: the process is working its way in exit().
+    const PROC_FLAG_INEXIT: u32 = 4;
+    bsd_info(pid)
+        .is_some_and(|i| i.pbi_status == libc::SZOMB || i.pbi_flags & PROC_FLAG_INEXIT != 0)
+}
+
 /// Whether host process `pid` is a child of this one (zombies too).
 pub fn is_child(pid: i32) -> bool {
     bsd_info(pid).is_some_and(|i| i.pbi_ppid as i32 == me())
