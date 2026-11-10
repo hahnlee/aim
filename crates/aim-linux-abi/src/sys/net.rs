@@ -158,8 +158,9 @@ pub struct Sock {
     /// Listening (`TCP_LISTEN`): what SO_ACCEPTCONN reports, which Darwin
     /// does not answer for AF_UNIX.
     listening: AtomicBool,
-    /// A TCP socket that may still be unconnected: `TCP_CLOSE` with no
-    /// shutdown, which `tcp_poll` reports as EPOLLOUT | EPOLLHUP and
+    /// A TCP, AF_UNIX stream or AF_UNIX seqpacket socket that may still
+    /// be unconnected: `TCP_CLOSE` with no shutdown, which `tcp_poll`,
+    /// `unix_poll` and `unix_dgram_poll` report as EPOLLOUT | EPOLLHUP and
     /// Darwin as nothing. Cleared once its host socket is in another
     /// state, which it never returns to: a closed connection stays shut.
     unconnected: AtomicBool,
@@ -168,9 +169,9 @@ pub struct Sock {
     /// none: Linux's `sk_shutdown` how in the low two bits, above them a
     /// count of the calls, each of which wakes its waiters.
     shutdown: std::sync::atomic::AtomicU32,
-    /// The error, a Linux errno, of a datagram socket's recvmmsg that had
-    /// received datagrams already: `do_recvmmsg` writes it back to
-    /// `sk_err`, for the next receive, send, SO_ERROR or poll to report.
+    /// The error, a Linux errno, of a recvmmsg that had received messages
+    /// already: `do_recvmmsg` writes it back to `sk_err`, for the next
+    /// receive, send, SO_ERROR or poll to report.
     kept_error: std::sync::atomic::AtomicI32,
     /// Linux sockaddr of the local and peer names, when known.
     local: Mutex<Option<Vec<u8>>>,
@@ -184,12 +185,21 @@ impl Sock {
         self.ty != SockType::Stream && matches!(self.family, Family::Inet(_))
     }
 
+    /// An AF_INET or AF_INET6 stream socket: TCP.
+    pub(super) fn tcp(&self) -> bool {
+        self.ty == SockType::Stream && matches!(self.family, Family::Inet(_))
+    }
+
     fn new(ty: SockType) -> Arc<Sock> {
         Sock::of(ty, Family::Unix)
     }
 
     fn of(ty: SockType, family: Family) -> Arc<Sock> {
-        let tcp = matches!((&ty, &family), (SockType::Stream, Family::Inet(_)));
+        let connection = matches!(
+            (&ty, &family),
+            (SockType::Stream, Family::Inet(_) | Family::Unix)
+                | (SockType::SeqPacket, Family::Unix)
+        );
         Arc::new(Sock {
             ty,
             family,
@@ -199,7 +209,7 @@ impl Sock {
             stamp: std::sync::atomic::AtomicU8::new(0),
             recv: Mutex::new(()),
             listening: AtomicBool::new(false),
-            unconnected: AtomicBool::new(tcp),
+            unconnected: AtomicBool::new(connection),
             shutdown: std::sync::atomic::AtomicU32::new(0),
             kept_error: std::sync::atomic::AtomicI32::new(0),
             local: Mutex::new(None),
@@ -228,6 +238,8 @@ pub(super) fn save_sock(s: &Sock, w: &mut super::fork_state::Writer) {
     w.bool(s.passcred.load(std::sync::atomic::Ordering::Relaxed));
     w.u32(s.stamp.load(Ordering::Relaxed) as u32);
     w.bool(s.listening.load(Ordering::Relaxed));
+    w.u32(s.shutdown.load(Ordering::Relaxed));
+    w.i32(s.kept_error.load(Ordering::Relaxed));
     w.opt(s.local.lock().unwrap().as_deref(), |w, a| w.bytes(a));
     w.opt(s.peer.lock().unwrap().as_deref(), |w, a| w.bytes(a));
     match &s.family {
@@ -283,6 +295,8 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
     let passcred = r.bool();
     let stamp = r.u32() as u8;
     let listening = r.bool();
+    let shutdown = r.u32();
+    let kept_error = r.i32();
     let local = r.opt(|r| r.bytes());
     let peer = r.opt(|r| r.bytes());
     let family = match r.u32() {
@@ -319,6 +333,8 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
     s.passcred.store(passcred, Ordering::Relaxed);
     s.stamp.store(stamp, Ordering::Relaxed);
     s.listening.store(listening, Ordering::Relaxed);
+    s.shutdown.store(shutdown, Ordering::Relaxed);
+    s.kept_error.store(kept_error, Ordering::Relaxed);
     *s.local.lock().unwrap() = local;
     *s.peer.lock().unwrap() = peer;
     s
@@ -1846,9 +1862,13 @@ pub fn shutdown(a: [u64; 6]) -> i64 {
     }
     // SAFETY: SHUT_RD/WR/RDWR agree.
     let r = errno::check(unsafe { libc::shutdown(input.fd(), a[1] as i32) } as i64);
+    // Darwin's fails with ENOTCONN where Linux records the shutdown and
+    // wakes the waiters: `unix_shutdown` in any state, and succeeds;
+    // `inet_shutdown` of a `TCP_CLOSE` socket, and fails.
     if r == -107
         && let Some(s) = any_sock(&input)
-        && unconnected(&s, input.fd()).is_some()
+        && let unix = matches!(s.family, Family::Unix)
+        && (unix || unconnected(&s, input.fd()).is_some())
     {
         let how = a[1] as u32 + 1;
         let _ = s
@@ -1856,6 +1876,9 @@ pub fn shutdown(a: [u64; 6]) -> i64 {
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |word| {
                 Some((word | how).wrapping_add(4))
             });
+        if unix {
+            return 0;
+        }
     }
     r
 }
@@ -2851,13 +2874,62 @@ fn recv(
     if let Some(s) = socket.as_ref().filter(|s| s.datagram()) {
         take_error(s, input.fd())?;
     }
-    let r = receive(input, iov, want_name, ctrl_cap, flags)?;
+    // `tcp_recvmsg` and `unix_stream_read_generic` return `sk_err` once
+    // nothing is queued to read.
+    if let Some(s) = socket.as_ref().filter(|s| !s.datagram())
+        && s.kept_error.load(Ordering::Relaxed) != 0
+        && socket_info(input.fd()).is_some_and(|info| {
+            u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap()) == 0
+        })
+        && let kept @ 1.. = s.kept_error.swap(0, Ordering::Relaxed)
+    {
+        return Err(-(kept as i64));
+    }
+    let end = || Received {
+        n: 0,
+        flags: 0,
+        ctrl: IncomingControl::default(),
+        cred: None,
+        name: None,
+    };
+    let shut = socket.as_ref().is_some_and(|s| received_shut(s));
+    // `__skb_recv_datagram`: a datagram socket shut for receiving is at
+    // end of file once its queue is empty, where Darwin's receive waits.
+    if shut
+        && socket.as_ref().is_some_and(|s| s.ty == SockType::Dgram)
+        && socket_info(input.fd()).is_some_and(|info| {
+            u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap()) == 0
+        })
+    {
+        return Ok(end());
+    }
+    let r = match receive(input, iov, want_name, ctrl_cap, flags) {
+        Err(-107) if shut && socket.as_ref().is_some_and(|s| s.tcp()) => Ok(end()),
+        Err(-107)
+            if socket
+                .as_ref()
+                .is_some_and(|s| s.ty == SockType::Stream && matches!(s.family, Family::Unix)) =>
+        {
+            Err(-(EINVAL as i64))
+        }
+        r => r,
+    }?;
     if flags & L_MSG_PEEK == 0
         && let Some(s) = socket
     {
         traffic::account(&s, input.fd(), false, r.n, r.name.as_deref());
     }
     Ok(r)
+}
+
+/// Whether `s` has a receive shutdown recorded where Darwin's failed
+/// ([`kept`]): `tcp_recvmsg` then reads end of file before it fails an
+/// unconnected socket with ENOTCONN, as a datagram socket's receive does
+/// once its queue is empty. An AF_UNIX stream socket not connected fails
+/// with EINVAL first (`unix_stream_read_generic`), whose Darwin
+/// ENOTCONN the receive translates.
+fn received_shut(s: &Sock) -> bool {
+    s.shutdown.load(Ordering::Relaxed) & RCV_SHUTDOWN != 0
 }
 
 /// `sock_error` of datagram socket `s` on host `fd`, which
@@ -3262,7 +3334,7 @@ pub fn recvmmsg(a: [u64; 6]) -> i64 {
                     return r;
                 }
                 if r != -(crate::errno::EAGAIN as i64)
-                    && let Some(s) = any_sock(&input).filter(|s| s.datagram())
+                    && let Some(s) = any_sock(&input)
                 {
                     s.kept_error.store(-r as i32, Ordering::Relaxed);
                 }
@@ -3314,6 +3386,11 @@ pub(super) fn read_pinned(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i6
         // SAFETY: the guest's iovec buffers.
         let r =
             errno::check(unsafe { libc::readv(input.fd(), iov.as_ptr(), iov.len() as i32) } as i64);
+        let r = if r == -107 && s.tcp() && received_shut(&s) {
+            0
+        } else {
+            r
+        };
         traffic::account(&s, input.fd(), false, r, None);
         return Some(r);
     }
@@ -3921,9 +3998,13 @@ fn host_protocol(fd: i32) -> i32 {
 /// sizeof(struct socket_fdinfo), and offsetof its `.psi.soi_state`,
 /// `.psi.soi_error` and `.psi.soi_rcv.sbi_cc`.
 const SOCKET_FDINFO: usize = 792;
+const SOI_OPTIONS: usize = 188;
 const SOI_STATE: usize = 192;
 const SOI_ERROR: usize = 202;
 const SBI_CC: usize = 208;
+/// Darwin's `soi_state` flags of a shut direction.
+const SS_CANTSENDMORE: i16 = 0x10;
+const SS_CANTRCVMORE: i16 = 0x20;
 
 /// Guest socket `fd`'s PROC_PIDFDSOCKETINFO; None for any other fd.
 fn socket_info(fd: i32) -> Option<[u8; SOCKET_FDINFO]> {
@@ -3952,14 +4033,9 @@ fn socket_info(fd: i32) -> Option<[u8; SOCKET_FDINFO]> {
 /// SO_ERROR returns once. None without one, or for any other fd.
 pub(super) fn pending_error(fd: i32) -> Option<u32> {
     let info = socket_info(fd)?;
-    (u16::from_ne_bytes(info[SOI_ERROR..SOI_ERROR + 2].try_into().unwrap()) != 0 || kept_error(fd))
+    (u16::from_ne_bytes(info[SOI_ERROR..SOI_ERROR + 2].try_into().unwrap()) != 0
+        || matches!(fdtab::get(fd), Some(Kind::Sock(s)) if s.kept_error.load(Ordering::Relaxed) != 0))
         .then(|| u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap()))
-}
-
-/// Whether guest socket `fd` has an error a recvmmsg kept, which no host
-/// readiness reports.
-pub(super) fn kept_error(fd: i32) -> bool {
-    matches!(fdtab::get(fd), Some(Kind::Sock(s)) if s.kept_error.load(Ordering::Relaxed) != 0)
 }
 
 /// The directions shut on guest socket `fd` (its `soi_state`'s
@@ -3967,8 +4043,6 @@ pub(super) fn kept_error(fd: i32) -> bool {
 /// `unix_poll` and `datagram_poll` report as a hangup only once both are
 /// shut. Darwin marks either with EOF and HUP alike. None for any other fd.
 pub(super) fn shut_directions(fd: i32) -> Option<super::tcp_shutdown::Shutdown> {
-    const SS_CANTSENDMORE: i16 = 0x10;
-    const SS_CANTRCVMORE: i16 = 0x20;
     let info = socket_info(fd)?;
     let state = i16::from_ne_bytes(info[SOI_STATE..SOI_STATE + 2].try_into().unwrap());
     Some(super::tcp_shutdown::Shutdown {
@@ -3980,21 +4054,79 @@ pub(super) fn shut_directions(fd: i32) -> Option<super::tcp_shutdown::Shutdown> 
 /// `RCV_SHUTDOWN` in a word of [`unconnected`].
 pub(super) const RCV_SHUTDOWN: u32 = 1;
 
-/// The shutdowns of `s`, on host socket `fd`, if it is a TCP socket never
-/// connected, which `tcp_poll` reports as EPOLLOUT | EPOLLHUP
+/// The shutdowns of `s`, on host socket `fd`, if it is a
+/// connection-oriented socket never connected, which `tcp_poll`,
+/// `unix_poll` and `unix_dgram_poll` report as EPOLLOUT | EPOLLHUP
 /// (`TCP_CLOSE`), and also EPOLLIN | EPOLLRDNORM | EPOLLRDHUP once shut
-/// for receiving, and no host knote or poll as anything: Linux's
-/// `sk_shutdown` (`RCV_SHUTDOWN`, `SEND_SHUTDOWN`) in the low two bits,
-/// above them a count that changes with each `shutdown`.
+/// for receiving, and no host knote or poll as anything: neither
+/// connected, connecting nor listening (its `soi_state` and
+/// `soi_options`), nor shut either way on the host, as a closed connection
+/// is. Linux's `sk_shutdown` (`RCV_SHUTDOWN`, `SEND_SHUTDOWN`) is in the
+/// low two bits, above them a count that changes with each `shutdown`.
 pub(super) fn unconnected(s: &Sock, fd: i32) -> Option<u32> {
+    const SO_ACCEPTCONN: i16 = 0x2;
+    const SS_ISCONNECTED: i16 = 0x2;
+    const SS_ISCONNECTING: i16 = 0x4;
     if !s.unconnected.load(Ordering::Relaxed) {
         return None;
     }
-    if !super::tcp_shutdown::unconnected(fd) {
+    let unconnected = socket_info(fd).is_some_and(|info| {
+        let field = |at: usize| i16::from_ne_bytes(info[at..at + 2].try_into().unwrap());
+        field(SOI_OPTIONS) & SO_ACCEPTCONN == 0
+            && field(SOI_STATE)
+                & (SS_ISCONNECTED | SS_ISCONNECTING | SS_CANTSENDMORE | SS_CANTRCVMORE)
+                == 0
+    });
+    if !unconnected {
         s.unconnected.store(false, Ordering::Relaxed);
         return None;
     }
     Some(s.shutdown.load(Ordering::Relaxed))
+}
+
+/// What `tcp_poll`, `unix_poll` and `unix_dgram_poll` report for a socket
+/// from state this layer keeps, which no host poll or knote reports.
+pub(super) struct Kept {
+    /// Linux event bits, the same for poll and epoll.
+    pub events: u32,
+    /// Never connected: the host's readiness is none of the socket's.
+    pub unconnected: bool,
+    /// The shutdowns they follow from ([`unconnected`]'s word), which an
+    /// edge-triggered interest is reported once for.
+    pub generation: u32,
+}
+
+/// [`Kept`] of `s` on host socket `fd`, if any: an unconnected socket's
+/// readiness, the shutdowns recorded where Darwin's failed with ENOTCONN
+/// (`RCV_SHUTDOWN` readable, both hung up), and the error a recvmmsg kept
+/// (EPOLLERR, for no wakeup: only a level-triggered interest reports it,
+/// as `ep_send_events` keeps one on the ready list).
+pub(super) fn kept(s: &Sock, fd: i32) -> Option<Kept> {
+    const IN: u32 = 0x1 | 0x40 | 0x2000;
+    const OUT: u32 = 0x4 | 0x100;
+    const WRBAND: u32 = 0x200;
+    const HUP: u32 = 0x10;
+    const ERR: u32 = 0x8;
+    let unconnected = unconnected(s, fd);
+    let generation = unconnected.unwrap_or_else(|| s.shutdown.load(Ordering::Relaxed));
+    let mut events = 0;
+    if s.kept_error.load(Ordering::Relaxed) != 0 {
+        events |= ERR;
+    }
+    if unconnected.is_some() {
+        events |= HUP | OUT | if s.tcp() { 0 } else { WRBAND };
+    }
+    if generation & RCV_SHUTDOWN != 0 {
+        events |= IN;
+    }
+    if generation & 3 == 3 {
+        events |= HUP;
+    }
+    (unconnected.is_some() || events != 0).then_some(Kept {
+        events,
+        unconnected: unconnected.is_some(),
+        generation,
+    })
 }
 
 pub fn getsockopt(a: [u64; 6]) -> i64 {
@@ -4198,6 +4330,23 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    /// A fork child's copy of a socket keeps the shutdowns recorded where
+    /// Darwin's failed and the error a recvmmsg kept, which Linux keeps in
+    /// the `struct sock` the child shares.
+    #[test]
+    fn a_fork_keeps_a_sockets_recorded_shutdown_and_kept_error() {
+        use super::*;
+        let s = Sock::of(SockType::Stream, Family::Unix);
+        s.shutdown.store(RCV_SHUTDOWN + 4, Ordering::Relaxed);
+        s.kept_error.store(104, Ordering::Relaxed);
+        let mut writer = super::super::fork_state::Writer::default();
+        save_sock(&s, &mut writer);
+        let saved = writer.into_bytes();
+        let child = load_sock(&mut super::super::fork_state::Reader::new(&saved));
+        assert_eq!(child.shutdown.load(Ordering::Relaxed), RCV_SHUTDOWN + 4);
+        assert_eq!(child.kept_error.load(Ordering::Relaxed), 104);
+    }
+
     /// A raw socket's read() is `raw_recvmsg`'s, which returns a pending
     /// error before any datagram (`skb_recv_datagram`). Darwin opens raw
     /// sockets only for root, so the raw socket here is a UDP host socket
