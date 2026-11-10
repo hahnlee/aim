@@ -285,6 +285,9 @@ pub struct Decision {
     pub result_to: Option<u64>,
     /// The task brought to the front (`setTargetRootTaskIfNeeded`).
     pub front: Option<i32>,
+    /// `setTargetRootTaskIfNeeded` brings the target task to the front: it
+    /// was not on top (`differentTopTask`) and the start does not avoid it.
+    pub brought_to_front: bool,
     /// The existing task the start goes to (`computeTargetTask`), in
     /// front already or not.
     pub target: Option<i32>,
@@ -854,6 +857,7 @@ impl Stack {
             {
                 flags |= FLAG_ACTIVITY_BROUGHT_TO_FRONT;
                 d.front = Some(task);
+                d.brought_to_front = true;
                 // A task already visible in multi-window mode was on top.
                 moved_to_front = !(self.freeform && self.visibility(task) == Visibility::Visible);
             }
@@ -2089,6 +2093,10 @@ mod tests {
                 let request = start("com.example/A", 0, &intent, source);
                 let d = s.decide_only_if_needed(&request, true).unwrap();
                 assert_eq!(d.outcome, Outcome::Front(1));
+                // Resumed, but on top already: not brought to the front
+                // (`differentTopTask`), so no target root task takes it.
+                assert_eq!(d.front, Some(7));
+                assert!(!d.brought_to_front);
                 assert!(d.clear.is_empty());
                 assert_eq!(d.set_intent, None);
             }

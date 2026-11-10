@@ -340,8 +340,15 @@ both, and the other window follows; clearing adjacency makes them independent.
 `setReparentLeafTaskIfRelaunch` marks a root whose leaf task, started again,
 goes onto the display area in the display area's mode, unless the start comes
 from an adjacent root, whose root it then joins (`getOrCreateRootTask`,
-#2912). `setLaunchRoot`, a launch with `FLAG_ACTIVITY_LAUNCH_ADJACENT` into the flag
-root, other root windowing modes and nested roots remain explicit failures. Host regressions cover the wire, modes,
+#2912). `setLaunchRoot` and `ActivityOptions.setLaunchRootTask` name the roots
+new tasks (and reused ones of a launch root's mode, or brought to the front
+with the options' root, or the root a trampoline source's own start named
+until its windows drew) go into, each keeping its own Mac window
+(`getLaunchRootTask`, #2935); a start with a target root leaves a reused
+task's mode alone, and a new task in a multi-window root takes the options'
+launch bounds. A launch with `FLAG_ACTIVITY_LAUNCH_ADJACENT`
+into the flag root, other root windowing modes and nested roots (a launch root
+task not created by an organizer) remain explicit failures. Host regressions cover the wire, modes,
 listing, reparenting, adjacency, tiling, deletion and organizer removal; no
 guest boot or live Mac window was checked (2026-11-04).
 

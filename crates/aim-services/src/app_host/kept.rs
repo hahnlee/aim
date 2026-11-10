@@ -674,6 +674,30 @@ impl RawBundle {
         }))
     }
 
+    /// `Bundle.getParcelable(key, WindowContainerToken.class)`: its binder.
+    pub(super) fn window_container_token(
+        &self,
+        key: &str,
+    ) -> Result<Option<aim_binder_host::parcel::Binder>> {
+        let Some((_, parts, _)) = self.entries()? else {
+            return Ok(None);
+        };
+        let Some((_, value)) = parts.iter().find(|(name, _)| name == key) else {
+            return Ok(None);
+        };
+        let p = value.parcel();
+        let mut r = p.reader();
+        r.read_string16()?;
+        if r.read_i32()? != VAL_PARCELABLE {
+            return Ok(None);
+        }
+        r.read_i32()?; // Parcel.writeValue length
+        if r.read_string16()?.as_deref() != Some("android.window.WindowContainerToken") {
+            return Ok(None);
+        }
+        r.read_binder()
+    }
+
     /// `putParcelable`, preserving the parcel's Binder object offsets.
     pub(super) fn with_parcelable(&self, key: &str, class: &str, value: &Parcel) -> Result<Self> {
         let (magic, mut parts, has_intent) =

@@ -220,6 +220,48 @@ fn reparent_and_reparent_tasks_decode() {
         EX_ILLEGAL_ARGUMENT
     );
 }
+// createForSetLaunchRoot: its container and filters only, null filters
+// none.
+#[test]
+fn set_launch_root_decodes() {
+    let root = Binder::Local(64);
+    let read = |ops: &[Op]| Transaction::read(&mut transaction(&[], ops).reader());
+    let op = |modes, types| Op {
+        kind: 3,
+        modes,
+        types,
+        ..reparent(root, None, false)
+    };
+    assert_eq!(
+        read(&[op(Some(vec![1, 0]), Some(vec![1])), op(None, None)])
+            .unwrap()
+            .hierarchy,
+        [
+            Hop::SetLaunchRoot {
+                root,
+                modes: vec![1, 0],
+                types: vec![1]
+            },
+            Hop::SetLaunchRoot {
+                root,
+                modes: vec![],
+                types: vec![]
+            },
+        ]
+    );
+    for bad in [
+        Op {
+            reparent: Some(root),
+            ..op(None, None)
+        },
+        Op {
+            to_top: true,
+            ..op(None, None)
+        },
+    ] {
+        assert_eq!(read(&[bad]).unwrap_err().code, EX_UNSUPPORTED_OPERATION);
+    }
+}
 // setReparentLeafTaskIfRelaunch: its container and flag only.
 #[test]
 fn reparent_leaf_task_if_relaunch_decodes() {

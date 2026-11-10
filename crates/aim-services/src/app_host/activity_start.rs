@@ -324,6 +324,23 @@ impl AppHost {
         id
     }
 
+    /// `mTargetRootTask` of a start into an existing task with `options`
+    /// from the activity `source`: the options' launch root task, else the
+    /// one the source still holds (`mLaunchRootTask`, a trampoline's start),
+    /// if it is still a task.
+    pub(super) fn target_root_task(
+        &self,
+        options: &super::activity_options::LaunchOptions,
+        source: Option<u64>,
+    ) -> Option<i32> {
+        options.launch_root.or_else(|| {
+            self.activities
+                .with(source.map(Binder::Local), |r| r.launch_root)
+                .flatten()
+                .filter(|&root| self.tasks.windowing_mode(root).is_some())
+        })
+    }
+
     /// A new activity of `start_seq`'s process in `task`, of `style`: its
     /// token.
     #[allow(clippy::too_many_arguments)]
@@ -388,6 +405,7 @@ impl AppHost {
             transition_overrides: Default::default(),
             saved_state: None,
             persistent_state: None,
+            launch_root: request.launch_options.launch_root,
         };
         self.activities
             .records
@@ -1320,7 +1338,11 @@ impl AppHost {
                 .map(|a| a.task),
         };
         if let Some(task) = reused {
-            self.apply_task_launch_options(task, launch_options, &info, source_task)?;
+            let target = super::activity_options::LaunchOptions {
+                launch_root: self.target_root_task(&launch_options, source),
+                ..launch_options
+            };
+            self.apply_task_launch_options(task, target, &info, source_task, d.brought_to_front)?;
         }
         if matches!(d.outcome, Outcome::Front(1) | Outcome::Deliver(_, 1)) {
             let mut stack = self.activities.stack.lock().unwrap();

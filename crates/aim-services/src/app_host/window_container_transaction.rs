@@ -43,6 +43,13 @@ pub(super) enum Hop {
     /// `setLaunchAdjacentFlagRoot`, or `clearLaunchAdjacentFlagRoot` if
     /// `clear`.
     LaunchAdjacentFlagRoot { root: Binder, clear: bool },
+    /// `setLaunchRoot`: new tasks of the windowing modes and activity types
+    /// go into the organizer root task.
+    SetLaunchRoot {
+        root: Binder,
+        modes: Vec<i32>,
+        types: Vec<i32>,
+    },
     /// `setReparentLeafTaskIfRelaunch`: a relaunched leaf task of the
     /// organizer root task goes to the display area, if `reparent`.
     ReparentLeafTaskIfRelaunch { root: Binder, reparent: bool },
@@ -184,10 +191,11 @@ impl Transaction {
         for _ in 0..count(r)? {
             expect(r, 1)?; // typed HierarchyOp present
             // HIERARCHY_OP_TYPE_REPARENT, _REORDER, _CHILDREN_TASKS_REPARENT,
-            // _SET_ADJACENT_ROOTS, _SET_LAUNCH_ADJACENT_FLAG_ROOT,
-            // _CLEAR_ADJACENT_ROOTS or _SET_REPARENT_LEAF_TASK_IF_RELAUNCH
+            // _SET_LAUNCH_ROOT, _SET_ADJACENT_ROOTS,
+            // _SET_LAUNCH_ADJACENT_FLAG_ROOT, _CLEAR_ADJACENT_ROOTS or
+            // _SET_REPARENT_LEAF_TASK_IF_RELAUNCH
             let kind = int(r)?;
-            if !matches!(kind, 0..=2 | 4 | 6 | 15 | 16) {
+            if !matches!(kind, 0..=4 | 6 | 15 | 16) {
                 return Err(unsupported());
             }
             let container = optional_binder(r)?;
@@ -235,7 +243,19 @@ impl Transaction {
             {
                 return Err(unsupported());
             }
+            // createForSetLaunchRoot sets its container and filters only.
+            if kind == 3 && (reparent.is_some() || top_only || to_top) {
+                return Err(unsupported());
+            }
             match (kind, containers) {
+                (3, None) => {
+                    out.hierarchy.push(Hop::SetLaunchRoot {
+                        root: container.ok_or_else(malformed)?,
+                        modes: modes.unwrap_or_default(),
+                        types: types.unwrap_or_default(),
+                    });
+                    continue;
+                }
                 // setAdjacentRootsHierarchyOp reads the containers alone.
                 (4, Some(roots)) if container.is_none() => {
                     out.hierarchy.push(Hop::SetAdjacentRoots(roots));
@@ -395,6 +415,7 @@ impl super::AppHost {
                 Hop::SetAdjacentRoots(_)
                     | Hop::ClearAdjacentRoots(_)
                     | Hop::LaunchAdjacentFlagRoot { .. }
+                    | Hop::SetLaunchRoot { .. }
                     | Hop::ReparentLeafTaskIfRelaunch { .. }
             );
             hierarchy.push(match hop {
@@ -452,6 +473,19 @@ impl super::AppHost {
                         ));
                     }
                     adjacency.launch_root = (!clear).then_some(id);
+                    continue;
+                }
+                Hop::SetLaunchRoot { root, modes, types } => {
+                    let Some(id) = attached(root) else {
+                        detached("setLaunchRoot");
+                        continue;
+                    };
+                    if self.tasks.root(id).is_none() {
+                        return Err(Exception::illegal_argument(format!(
+                            "Can't set not mCreatedByOrganizer as launch root tr={id}"
+                        )));
+                    }
+                    adjacency.set_launch_root(id, modes, types);
                     continue;
                 }
                 Hop::ReparentLeafTaskIfRelaunch { root, reparent } => {

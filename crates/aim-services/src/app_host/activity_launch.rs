@@ -173,6 +173,8 @@ impl AppHost {
             return;
         };
         r.drawn = true;
+        // `onWindowsDrawn`: no trampoline start is expected any more.
+        r.launch_root = None;
         let relaunched = r.relaunched;
         r.relaunched = false;
         drop(records);
