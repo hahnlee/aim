@@ -4273,17 +4273,28 @@ impl AppHost {
             return Ok(inputs.compat.default_value(change));
         }
         for name in names {
-            let enabled = match self.application_info(&name, 0, Some(&state))? {
-                Some(ai) => inputs
-                    .compat
-                    .is_enabled(change, Some(&name), ai.target_sdk_version),
-                None => inputs.compat.default_value(change),
-            };
-            if !enabled {
+            if !self.package_change_enabled(change, &name)? {
                 return Ok(false);
             }
         }
         Ok(true)
+    }
+
+    /// `CompatChanges.isChangeEnabled(change, package, user)`: by its target
+    /// SDK, else the change's default for a package not installed.
+    pub(super) fn package_change_enabled(
+        &self,
+        change: i64,
+        package: &str,
+    ) -> Result<bool, Exception> {
+        let inputs = self.platform()?;
+        let (state, _) = self.packages()?;
+        Ok(match self.application_info(package, 0, Some(&state))? {
+            Some(ai) => inputs
+                .compat
+                .is_enabled(change, Some(package), ai.target_sdk_version),
+            None => inputs.compat.default_value(change),
+        })
     }
 
     /// DeviceIdleController, made when first needed.

@@ -1069,8 +1069,7 @@ impl Service for ActivityTaskManager {
                 }))
             }
             // `startActivityIntentSender`: the record sent as `sendInner`
-            // sends it, with the caller's result target and flags. Its
-            // options are not applied (#1493).
+            // sends it, with the caller's result target, flags and options.
             atm::START_ACTIVITY_INTENT_SENDER => {
                 let a =
                     atm::StartActivityIntentSender::<RawIntent, RawBundle>::read(&mut call.data)

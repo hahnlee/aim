@@ -112,12 +112,13 @@ impl AppHost {
         options.without(key).map_err(invalid)
     }
 
-    /// `checkBackgroundActivityStart` of a start by `uid`, with `real` its
-    /// real caller if any, for a result if `for_result` (`resultRecord`),
-    /// with `options`.
+    /// `checkBackgroundActivityStart` of a start by `uid` of `package` if
+    /// known, with `real` its real caller if any, for a result if
+    /// `for_result` (`resultRecord`), with `options`.
     pub(super) fn background_start_verdict(
         &self,
         uid: i32,
+        package: Option<&str>,
         real: Option<RealCaller>,
         for_result: bool,
         options: Option<&RawBundle>,
@@ -169,21 +170,25 @@ impl AppHost {
             return Ok(real_verdict);
         }
         // Without an opt-in, a PendingIntent's creator's and sender's
-        // privileges by default (`getBackgroundStartPrivilegesAllowedByCreator`,
-        // `getDefaultBackgroundStartPrivileges`): none for root and system,
-        // else unless their target SDK rescinds them.
-        let by_default = |uid, change| -> Result<bool, Exception> {
-            Ok(!matches!(uid, 0 | 1000) && !self.change_enabled(change, uid)?)
-        };
+        // privileges by default (`getBackgroundStartPrivilegesAllowedByCreator`
+        // of the creator's package, else its uid, and
+        // `getDefaultBackgroundStartPrivileges` of the sender's uid): none
+        // for root and system, else unless their target SDK rescinds them.
+        let system = |uid| matches!(uid, 0 | 1000);
         if caller.allows()
             && creator == MODE_SYSTEM_DEFINED
-            && by_default(uid, RESCIND_FROM_CREATOR)?
+            && !system(uid)
+            && !match package {
+                Some(package) => self.package_change_enabled(RESCIND_FROM_CREATOR, package)?,
+                None => self.change_enabled(RESCIND_FROM_CREATOR, uid)?,
+            }
         {
             return Ok(caller);
         }
         if real_verdict.allows()
             && sender == MODE_SYSTEM_DEFINED
-            && by_default(real.uid, RESCIND_FROM_SENDER)?
+            && !system(real.uid)
+            && !self.change_enabled(RESCIND_FROM_SENDER, real.uid)?
         {
             return Ok(real_verdict);
         }

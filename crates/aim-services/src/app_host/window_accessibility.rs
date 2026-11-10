@@ -526,7 +526,7 @@ mod tests {
         set(10123, 0, 1000).unwrap();
         assert_eq!(
             f.host
-                .background_start_verdict(10123, None, false, None)
+                .background_start_verdict(10123, None, None, false, None)
                 .unwrap_err()
                 .message,
             "no permissionmgr"
@@ -605,7 +605,7 @@ mod tests {
         set(10123, 0, 1000).unwrap();
         assert_eq!(
             f.host
-                .background_start_verdict(10123, None, false, None)
+                .background_start_verdict(10123, None, None, false, None)
                 .unwrap_err()
                 .message,
             "no permissionmgr"

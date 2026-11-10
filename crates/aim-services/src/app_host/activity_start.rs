@@ -1239,6 +1239,7 @@ impl AppHost {
         // (`isBackgroundActivityStartsEnabled`).
         let verdict = self.background_start_verdict(
             uid,
+            caller_package.as_deref(),
             real_caller,
             result_to.is_some(),
             args.options.as_ref(),

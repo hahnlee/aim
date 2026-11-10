@@ -749,14 +749,7 @@ impl AppHost {
             Some(o) => Some(self.without_others_mode(o, KEY_CREATOR_MODE, calling_uid)?),
             None => None,
         };
-        let options = match (&creator_options, sender_options) {
-            (Some(c), Some(s)) => Some(
-                c.bundle
-                    .put_all(&s)
-                    .map_err(|_| Exception::illegal_argument("activity options"))?,
-            ),
-            (c, s) => s.or(c.as_ref().map(|c| c.bundle.clone())),
-        };
+        let options = merged_options(creator_options.as_ref().map(|c| &c.bundle), sender_options)?;
         let user = if user == USER_CURRENT { 0 } else { user };
         // The finished receiver's process gets its result.
         let caller_app = self.app_of_thread(caller);
@@ -868,6 +861,21 @@ impl AppHost {
 }
 
 /// `makeIntentSenderCanceled`: its cancel listeners are told.
+/// `SafeActivityOptions.mergeActivityOptions`: the `creator`'s options with
+/// the `sender`'s put over them.
+fn merged_options(
+    creator: Option<&RawBundle>,
+    sender: Option<RawBundle>,
+) -> Result<Option<RawBundle>, Exception> {
+    Ok(match (creator, sender) {
+        (Some(c), Some(s)) => Some(
+            c.put_all(&s)
+                .map_err(|_| Exception::illegal_argument("activity options"))?,
+        ),
+        (c, s) => s.or(c.cloned()),
+    })
+}
+
 fn cancel(r: &mut Record) {
     // Cancellation removes the key from the active index, not the Binder object:
     // PendingIntentRecord retains its key/uid for queries after cancellation.
@@ -900,6 +908,33 @@ fn perform_receive(receiver: &Strong, intent: &RawIntent, user: i32) {
 #[cfg(test)]
 mod stats_tests {
     use super::*;
+
+    /// The sender's options go over the creator's, which keep the rest.
+    #[test]
+    fn a_senders_options_go_over_its_creators() {
+        let ints = |values: &[(&str, i32)]| RawBundle::empty().with_ints(values).unwrap();
+        let creator = ints(&[("a", 1), ("b", 2)]);
+        let merged = merged_options(Some(&creator), Some(ints(&[("b", 3), ("c", 4)])))
+            .unwrap()
+            .unwrap();
+        let int = |key| merged.int(key, 0).unwrap();
+        assert_eq!((int("a"), int("b"), int("c")), (1, 3, 4));
+        assert_eq!(
+            merged_options(Some(&creator), None)
+                .unwrap()
+                .unwrap()
+                .int("b", 0),
+            Ok(2)
+        );
+        assert_eq!(
+            merged_options(None, Some(ints(&[("c", 4)])))
+                .unwrap()
+                .unwrap()
+                .int("c", 0),
+            Ok(4)
+        );
+        assert!(merged_options(None, None).unwrap().is_none());
+    }
     // AMS.getInfoForIntentSender queries PendingIntentRecord.key even after
     // PendingIntentController cancels/removes its active key (Android 16 r1).
     // CTS SafetyCenterManagerTest cancels a shared activity status/action token.
