@@ -47,8 +47,14 @@ const TABLE: &str = "policies";
 const TABLE_NEXT: &str = "policies.next";
 const CE_PROTECTOR: &str = "ce-protector";
 const CE_PROTECTOR_NEXT: &str = "ce-protector.next";
-/// Present once no inode below an encrypted directory lacks a policy.
+/// Holds [`WHOLE_VERSION`] once no inode below an encrypted directory
+/// lacks a policy.
 const WHOLE: &str = "whole";
+const WHOLE_NEXT: &str = "whole.next";
+/// Bumped with each fix of a host-side writer that left inodes without a
+/// policy: a data directory a build before the fix marked whole is walked
+/// again by the first build after it.
+const WHOLE_VERSION: u32 = 1;
 const SECRET: &str = "secret";
 const SECRET_NEXT: &str = "secret.next";
 const MAGIC: &[u8] = b"AIMFSCRYPT01\0";
@@ -357,24 +363,38 @@ pub fn repair(root: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 fn walk(root: &Path, repair: bool) -> io::Result<Vec<PathBuf>> {
-    let device = fs::symlink_metadata(root)?.dev();
+    // An error names the inode, keeping its kind and errno in the text.
+    let at = |path: &Path| {
+        let path = path.to_path_buf();
+        move |error: io::Error| io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+    };
+    let device = fs::symlink_metadata(root).map_err(at(root))?.dev();
     let mut found = Vec::new();
-    let mut pending = vec![(root.to_path_buf(), context(root)?.is_some())];
+    let mut pending = vec![(
+        root.to_path_buf(),
+        context(root).map_err(at(root))?.is_some(),
+    )];
     // An entry removed while the walk runs (a live /data) is gone, not
     // without a policy.
     let gone = |error: &io::Error| error.kind() == io::ErrorKind::NotFound;
     while let Some((dir, encrypted)) = pending.pop() {
-        let entries = match fs::read_dir(&dir) {
+        let entries = match fs::read_dir(&dir).map_err(at(&dir)) {
             Err(error) if gone(&error) => continue,
             entries => entries?,
         };
         for entry in entries {
-            let entry = entry?;
-            let kind = entry.file_type()?;
+            let entry = match entry.map_err(at(&dir)) {
+                Err(error) if gone(&error) => continue,
+                entry => entry?,
+            };
+            let path = entry.path();
+            let kind = match entry.file_type().map_err(at(&path)) {
+                Err(error) if gone(&error) => continue,
+                kind => kind?,
+            };
             if !(kind.is_dir() || kind.is_file() || kind.is_symlink()) {
                 continue;
             }
-            let path = entry.path();
             let visit = || -> io::Result<bool> {
                 // Outside an encrypted tree only a directory can start one.
                 let has = (encrypted || kind.is_dir()) && context(&path)?.is_some();
@@ -383,7 +403,7 @@ fn walk(root: &Path, repair: bool) -> io::Result<Vec<PathBuf>> {
                 }
                 Ok(has)
             };
-            let has = match visit() {
+            let has = match visit().map_err(at(&path)) {
                 Err(error) if gone(&error) => continue,
                 has => has?,
             };
@@ -391,7 +411,7 @@ fn walk(root: &Path, repair: bool) -> io::Result<Vec<PathBuf>> {
                 found.push(path.clone());
             }
             if kind.is_dir() {
-                let device_of = match entry.metadata() {
+                let device_of = match entry.metadata().map_err(at(&path)) {
                     Err(error) if gone(&error) => continue,
                     metadata => metadata?.dev(),
                 };
@@ -515,22 +535,40 @@ impl Owner {
         replace(&self.table.with_file_name(TABLE_NEXT), &self.table, "")?;
         // Nothing in it has a policy yet, and what this build writes
         // host-side adopts one.
-        open(&self.table.with_file_name(WHOLE), true).map(drop)
+        self.mark_whole()
     }
 
-    /// [`repair`]s `tree` (`/data`) unless the filesystem is known whole:
-    /// encrypted by a build whose host-side writers adopt, or repaired
-    /// before. A data directory first encrypted by an earlier build pays
-    /// the walk once. Returns what was repaired, None when skipped.
+    fn mark_whole(&self) -> io::Result<()> {
+        let whole = self.table.with_file_name(WHOLE);
+        let text = format!("{WHOLE_VERSION}\n");
+        replace(&self.table.with_file_name(WHOLE_NEXT), &whole, &text)
+            .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", whole.display())))
+    }
+
+    /// [`repair`]s `tree` (`/data`) unless the filesystem is known whole
+    /// at [`WHOLE_VERSION`]: encrypted by a build whose host-side writers
+    /// adopt, or repaired before, by a build with no writer fix since. A
+    /// data directory first encrypted by an earlier build pays the walk
+    /// once; a mark that is missing, older or unreadable is walked again,
+    /// and a walk that ends early leaves it so. Returns what was repaired,
+    /// None when skipped.
     pub fn repair_once(&self, tree: &Path) -> io::Result<Option<Vec<PathBuf>>> {
         let whole = self.table.with_file_name(WHOLE);
-        match fs::symlink_metadata(&whole) {
-            Ok(_) => return Ok(None),
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-            Err(_) => {}
+        let marked = match fs::read_to_string(&whole) {
+            Ok(text) => text.trim().parse::<u32>().ok(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("{}: {error}", whole.display()),
+                ));
+            }
+        };
+        if marked.is_some_and(|version| version >= WHOLE_VERSION) {
+            return Ok(None);
         }
         let repaired = repair(tree)?;
-        open(&whole, true)?;
+        self.mark_whole()?;
         Ok(Some(repaired))
     }
 
@@ -1236,6 +1274,15 @@ mod tests {
         fs::write(volume.join("user/0/written"), b"").unwrap();
         fs::write(volume.join("plain/sub/file"), b"").unwrap();
         std::os::unix::fs::symlink("target", volume.join("system/link")).unwrap();
+        // A link to a directory is an inode of its own; the walk does not
+        // follow it into the unencrypted tree it names.
+        std::os::unix::fs::symlink("../plain", volume.join("system/plain")).unwrap();
+        // A directory with a policy of its own keeps it, and what it holds
+        // takes that one.
+        let own = [&[2u8, 1, 4, 2, 0, 0, 0, 0][..], &[3; 16], &[0; NONCE]].concat();
+        fs::create_dir(volume.join("system/own")).unwrap();
+        store(&volume.join("system/own"), &own).unwrap();
+        fs::write(volume.join("system/own/file"), b"").unwrap();
         let adopted = volume.join("system/adopted");
         fs::write(&adopted, b"").unwrap();
         adopt(&adopted).unwrap();
@@ -1248,6 +1295,8 @@ mod tests {
         };
         let expected: Vec<PathBuf> = [
             "system/link",
+            "system/own/file",
+            "system/plain",
             "system/users",
             "system/users/0",
             "system/users/0/settings.xml",
@@ -1265,6 +1314,9 @@ mod tests {
         for (path, from) in [
             ("system/users/0/settings.xml", &system),
             ("system/link", &system),
+            ("system/plain", &system),
+            ("system/own", &own),
+            ("system/own/file", &own),
             ("user/0/written", &ce),
         ] {
             let own = super::context(&volume.join(path)).unwrap().unwrap();
@@ -1272,14 +1324,92 @@ mod tests {
         }
         assert_eq!(super::context(&adopted).unwrap(), kept);
         assert_eq!(super::context(&socket).unwrap(), None);
-        assert_eq!(
-            super::context(&volume.join("plain/sub/file")).unwrap(),
-            None
-        );
+        for plain in ["plain", "plain/sub", "plain/sub/file"] {
+            assert_eq!(super::context(&volume.join(plain)).unwrap(), None);
+        }
         // Repaired once, the filesystem is whole: later mounts skip the walk.
         fs::write(volume.join("system/later"), b"").unwrap();
         assert_eq!(owner.repair_once(&volume).unwrap(), None);
         assert_eq!(policy_less(&volume).unwrap(), [volume.join("system/later")]);
+        // A mark of a build before a writer fix, or one unreadable, is
+        // walked again.
+        let whole = data.join("fscrypt").join(WHOLE);
+        for older in [format!("{}\n", WHOLE_VERSION - 1), "?".to_string()] {
+            fs::write(volume.join("system/later"), b"").unwrap();
+            withdraw(&volume.join("system/later")).unwrap();
+            fs::write(&whole, older).unwrap();
+            let repaired = owner.repair_once(&volume).unwrap().unwrap();
+            assert_eq!(repaired, [volume.join("system/later")]);
+            let marked = fs::read_to_string(&whole).unwrap();
+            assert_eq!(marked, format!("{WHOLE_VERSION}\n"));
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A walk that fails names the inode and its errno and leaves the
+    /// filesystem unmarked, so the next mount walks again.
+    #[test]
+    fn a_repair_that_ends_early_is_walked_again() {
+        let dir = crate::scratch_dir("fscrypt-repair-fails");
+        let (runtime, data) = (dir.join("run"), dir.join("data"));
+        let volume = data.join("data");
+        fs::create_dir_all(&runtime).unwrap();
+        fs::create_dir_all(volume.join("system/locked")).unwrap();
+        Owner::prepare(&runtime, &data).unwrap();
+        let owner = Owner::locate(&runtime).unwrap().unwrap();
+        replace(&data.join("fscrypt").join(TABLE_NEXT), &owner.table, "").unwrap();
+        let context = [&[2u8, 1, 4, 2, 0, 0, 0, 0][..], &[7; 16], &[0; NONCE]].concat();
+        let locked = volume.join("system/locked");
+        store(&volume.join("system"), &context).unwrap();
+        store(&locked, &context).unwrap();
+        fs::write(locked.join("file"), b"").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0)).unwrap();
+        let error = owner.repair_once(&volume).unwrap_err();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let text = error.to_string();
+        assert!(
+            text.contains(&locked.display().to_string()) && text.contains("os error 13"),
+            "{text}"
+        );
+        assert!(!data.join("fscrypt").join(WHOLE).exists());
+        let repaired = owner.repair_once(&volume).unwrap().unwrap();
+        assert_eq!(repaired, [locked.join("file")]);
+        assert_eq!(owner.repair_once(&volume).unwrap(), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Entries removed while a walk runs, as on a live /data, are gone,
+    /// not a failure: a writer churning files and directories never fails
+    /// the walk.
+    #[test]
+    fn a_walk_tolerates_entries_removed_under_it() {
+        let dir = crate::scratch_dir("fscrypt-walk-race");
+        let context = [&[2u8, 1, 4, 2, 0, 0, 0, 0][..], &[7; 16], &[0; NONCE]].concat();
+        let system = dir.join("system");
+        fs::create_dir(&system).unwrap();
+        store(&system, &context).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let churn = {
+            let (system, stop) = (system.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    for n in 0..32 {
+                        let sub = system.join(format!("d{n}"));
+                        fs::create_dir_all(sub.join("deeper")).unwrap();
+                        fs::write(sub.join("deeper/file"), b"").unwrap();
+                    }
+                    for n in 0..32 {
+                        fs::remove_dir_all(system.join(format!("d{n}"))).unwrap();
+                    }
+                }
+            })
+        };
+        for _ in 0..200 {
+            policy_less(&system).unwrap();
+            repair(&system).unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        churn.join().unwrap();
         fs::remove_dir_all(dir).unwrap();
     }
 
