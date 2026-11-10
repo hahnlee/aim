@@ -181,6 +181,9 @@ The app host starts the home at `systemReady` (`startHomeOnAllDisplays`,
 manager and starts that activity in the root home task (activity type HOME).
 Once the root home task has gone and no task is left to focus, the home is
 started again (`resumeHomeActivity`).
+Its undefined windowing mode resolves fullscreen even on window mode's freeform
+display area (`TaskFragment.resolveOverrideConfiguration`), so its bounds fill
+the display area and it cannot be resized (#2914).
 In window mode the root home task stays behind the Mac desktop. It is invisible,
 never sent to the display server, and its activity is launched straight
 to stopped. A start that brings it to the front (a HOME intent, even one that
