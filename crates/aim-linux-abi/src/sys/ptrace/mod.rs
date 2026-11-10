@@ -32,8 +32,7 @@ use crate::sys::{cred, pidns, thread};
 pub use agent::{fork_restore, fork_save, socket_path, start};
 pub(in crate::sys) use tracee::thread_ended;
 pub use tracee::{
-    born_traced, clone_event, clone_stop, forget, process_ending, tracer_of, trap_pending,
-    trap_stop,
+    born_traced, clone_event, clone_stop, forget, tracer_of, trap_pending, trap_stop,
 };
 
 const PTRACE_PEEKTEXT: u64 = 1;
@@ -497,6 +496,13 @@ fn scatter(mut data: &[u8], local: &[(u64, u64)]) -> Result<(), i32> {
     Ok(())
 }
 
+/// The process ends with wait status `status`: once the signals peers sent
+/// it are answered, as `tracee::process_ending` ends its traced threads.
+pub fn process_ending(status: i32) {
+    agent::signals_answered();
+    tracee::process_ending(status);
+}
+
 /// Queue `info` for thread `tid` (0: the process) of another process `pid`,
 /// whose permission the caller checked.
 pub fn remote_signal(pid: i32, tid: i32, info: &crate::sys::sigframe::Siginfo) -> i64 {
@@ -510,6 +516,10 @@ pub fn remote_signal(pid: i32, tid: i32, info: &crate::sys::sigframe::Siginfo) -
     });
     match call(pid, &req) {
         Ok((r, _)) => r,
+        // A process that is ending, or ended and is not reaped, keeps its
+        // pid, and a signal to it succeeds (Linux's kill of a zombie):
+        // its agent is gone, or went before it replied.
+        Err(e) if e == -(ESRCH as i64) && pidns::ending(pid) => 0,
         Err(e) => e,
     }
 }
