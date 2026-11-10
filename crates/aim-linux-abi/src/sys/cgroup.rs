@@ -216,6 +216,49 @@ fn all_tasks() -> Vec<(i32, i32)> {
         .collect()
 }
 
+/// The live tasks of the guest whose group `old` and `new` may give
+/// differently, with their process: those with a thread entry in one and
+/// not the other, and the threads of a process with such a process entry.
+/// A superset of the tasks whose group changed, found without listing every
+/// task of the guest.
+fn changed_tasks(old: &Membership, new: &Membership) -> Vec<(i32, i32)> {
+    // The ids whose first entry (the one group_of finds) differs.
+    fn differing(a: &[(i32, Start, String)], b: &[(i32, Start, String)]) -> HashSet<i32> {
+        fn first(entries: &[(i32, Start, String)]) -> HashMap<i32, &str> {
+            let mut first = HashMap::new();
+            for (id, _, group) in entries {
+                first.entry(*id).or_insert(group.as_str());
+            }
+            first
+        }
+        let (a, b) = (first(a), first(b));
+        a.keys()
+            .chain(b.keys())
+            .filter(|id| a.get(*id) != b.get(*id))
+            .copied()
+            .collect()
+    }
+    let threads = differing(&old.threads, &new.threads);
+    let processes = differing(&old.processes, &new.processes);
+    let pids: std::collections::BTreeSet<i32> = threads
+        .iter()
+        .map(|tid| super::thread::owner(*tid))
+        .chain(processes.iter().copied())
+        .filter(|pid| *pid > 0 && super::pidns::contains(*pid))
+        .collect();
+    let mut tasks = Vec::new();
+    for pid in pids {
+        let whole = processes.contains(&pid);
+        tasks.extend(
+            tids(pid)
+                .into_iter()
+                .filter(|tid| whole || threads.contains(tid))
+                .map(|tid| (pid, tid)),
+        );
+    }
+    tasks
+}
+
 /// A tid as the guest numbers it (the main thread's is its pid's).
 fn guest_tid(pid: i32, tid: i32) -> i32 {
     if tid == pid {
@@ -790,6 +833,35 @@ mod tests {
             threads: Vec::new(),
         };
         assert_eq!(group_of(&only_process, owner), "/background");
+    }
+
+    /// A membership change affects the tasks whose first entry it changes,
+    /// and only live ones of the guest.
+    #[test]
+    fn a_membership_change_names_the_tasks_it_may_move() {
+        let start = own_start().unwrap();
+        let base = Membership {
+            processes: vec![(me(), start, "/a".into())],
+            threads: Vec::new(),
+        };
+        assert!(changed_tasks(&base, &base).is_empty());
+        let moved = Membership {
+            processes: base.processes.clone(),
+            threads: vec![(me(), start, "/b".into())],
+        };
+        assert_eq!(changed_tasks(&base, &moved), vec![(me(), me())]);
+        // A later entry of a thread is not the one its group comes from.
+        let mut shadowed = moved.clone();
+        shadowed.threads.push((me(), start, "/c".into()));
+        assert!(changed_tasks(&moved, &shadowed).is_empty());
+        let other = Membership {
+            processes: vec![(me(), start, "/c".into())],
+            threads: Vec::new(),
+        };
+        assert_eq!(changed_tasks(&base, &other), vec![(me(), me())]);
+        let mut foreign = base.clone();
+        foreign.processes.push((i32::MAX, (1, 1), "/x".into()));
+        assert!(changed_tasks(&base, &foreign).is_empty());
     }
 
     #[test]

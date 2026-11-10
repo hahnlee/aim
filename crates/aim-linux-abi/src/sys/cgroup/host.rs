@@ -244,7 +244,13 @@ pub(super) fn update(
     new: &Membership,
     controls: Option<&Path>,
 ) -> Result<(), Errno> {
-    let affected: std::collections::BTreeSet<_> = all_tasks()
+    // A membership change touches only the tasks it names; a control file
+    // change, every task of its group's subtree.
+    let tasks = match controls {
+        Some(_) => all_tasks(),
+        None => changed_tasks(old, new),
+    };
+    let affected: std::collections::BTreeSet<_> = tasks
         .into_iter()
         .filter(|(_, tid)| {
             let group = group_of(new, *tid);
