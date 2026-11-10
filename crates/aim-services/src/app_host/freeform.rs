@@ -21,6 +21,13 @@ const REVERSE_PORTRAIT: i32 = 9;
 const USER_LANDSCAPE: i32 = 11;
 const USER_PORTRAIT: i32 = 12;
 const LOCKED: i32 = 14;
+/// `Gravity`'s axes and their ends.
+const HORIZONTAL_GRAVITY_MASK: i32 = 0x07;
+const VERTICAL_GRAVITY_MASK: i32 = 0x70;
+const LEFT: i32 = 0x03;
+const RIGHT: i32 = 0x05;
+const TOP: i32 = 0x30;
+const BOTTOM: i32 = 0x50;
 /// `LaunchParamsUtil`'s default sizes and display edge offset, in dp.
 const PORTRAIT_SIZE_DP: (i32, i32) = (412, 732);
 const LANDSCAPE_SIZE_DP: (i32, i32) = (1064, 600);
@@ -70,6 +77,19 @@ pub struct Activity {
     pub min_size: (i32, i32),
     pub min_aspect_ratio: f32,
     pub max_aspect_ratio: f32,
+    /// Its window layout, if it has one.
+    pub layout: Option<Layout>,
+}
+
+/// An `ActivityInfo.WindowLayout`'s size and gravity: lengths of -1 and
+/// fractions below 0 are unspecified.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    pub width: i32,
+    pub width_fraction: f32,
+    pub height: i32,
+    pub height_fraction: f32,
+    pub gravity: i32,
 }
 
 impl From<&ActivityInfo> for Activity {
@@ -82,6 +102,13 @@ impl From<&ActivityInfo> for Activity {
                 .map_or((-1, -1), |l| (l.min_width, l.min_height)),
             min_aspect_ratio: info.min_aspect_ratio,
             max_aspect_ratio: info.max_aspect_ratio,
+            layout: info.window_layout.as_ref().map(|l| Layout {
+                width: l.width,
+                width_fraction: l.width_fraction,
+                height: l.height,
+                height_fraction: l.height_fraction,
+                gravity: l.gravity,
+            }),
         }
     }
 }
@@ -149,6 +176,67 @@ pub fn task_bounds(
     };
     avoid_conflict(display, others, &mut bounds);
     bounds
+}
+
+/// `TaskLaunchParamsModifier.getLayoutBounds`: the bounds `info`'s window
+/// layout asks for on a display of `display` bounds and `density_dpi`,
+/// laid out right to left if `rtl`: of its size, the display's in a
+/// dimension it leaves unspecified (`calculateLayoutBounds`), else of the
+/// `current` bounds or the default ones, placed by its gravity
+/// (`applyLayoutGravity`, centred on an axis of none). None for a layout
+/// of neither size nor gravity.
+pub fn layout_bounds(
+    info: &Activity,
+    display: Rect,
+    density_dpi: i32,
+    rtl: bool,
+    current: Option<Rect>,
+) -> Option<Rect> {
+    let layout = info.layout?;
+    let horizontal = layout.gravity & HORIZONTAL_GRAVITY_MASK;
+    let vertical = layout.gravity & VERTICAL_GRAVITY_MASK;
+    let sized = layout.width >= 0
+        || layout.height >= 0
+        || layout.width_fraction >= 0.0
+        || layout.height_fraction >= 0.0;
+    if !sized && horizontal == 0 && vertical == 0 {
+        return None;
+    }
+    let (width, height) = if sized {
+        let length = |length: i32, fraction: f32, full: i32| {
+            if length > 0 && length < full {
+                length
+            } else if fraction > 0.0 && fraction < 1.0 {
+                (full as f32 * fraction) as i32
+            } else {
+                full
+            }
+        };
+        (
+            length(layout.width, layout.width_fraction, display.width()),
+            length(layout.height, layout.height_fraction, display.height()),
+        )
+    } else {
+        let b = current
+            .filter(|b| b.width() > 0 && b.height() > 0)
+            .unwrap_or_else(|| default_bounds(info, display, density_dpi, rtl, &[]));
+        (b.width(), b.height())
+    };
+    let fraction = |gravity: i32, start: i32, end: i32| match gravity {
+        g if g == start => 0.0,
+        g if g == end => 1.0,
+        _ => 0.5,
+    };
+    let left = display.left
+        + (fraction(horizontal, LEFT, RIGHT) * (display.width() - width) as f32) as i32;
+    let top =
+        display.top + (fraction(vertical, TOP, BOTTOM) * (display.height() - height) as f32) as i32;
+    Some(Rect {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    })
 }
 
 /// `TaskLaunchParamsModifier.cascadeBounds`: a freeform `source` task's
@@ -439,6 +527,7 @@ mod tests {
             min_size: (-1, -1),
             min_aspect_ratio: 0.0,
             max_aspect_ratio: 0.0,
+            layout: None,
         }
     }
 
@@ -596,6 +685,58 @@ mod tests {
         };
         assert_eq!(cascade(edge, DISPLAY, 320).right, 3456);
         assert_eq!(cascade(edge, DISPLAY, 320).bottom, 2426);
+    }
+
+    /// `getLayoutBounds`: a window layout's size, a fraction of the
+    /// display, or the display's, placed by its gravity; a layout of
+    /// gravity only places the current or default bounds; one of neither
+    /// gives none.
+    #[test]
+    fn a_window_layout_sizes_and_places_the_task() {
+        let layout = |width, width_fraction, height, height_fraction, gravity| Activity {
+            layout: Some(Layout {
+                width,
+                width_fraction,
+                height,
+                height_fraction,
+                gravity,
+            }),
+            ..activity(-1)
+        };
+        let r = |left, top, right, bottom| Rect {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        let bounds = |info: &Activity, current| layout_bounds(info, DISPLAY, 320, false, current);
+        // 1000 x half the display, top left.
+        assert_eq!(
+            bounds(&layout(1000, -1.0, -1, 0.5, TOP | LEFT), None),
+            Some(r(0, 0, 1000, 1213))
+        );
+        // Of no height, the display's; centred without gravity.
+        assert_eq!(
+            bounds(&layout(1000, -1.0, -1, -1.0, 0), None),
+            Some(r(1228, 0, 2228, 2426))
+        );
+        // A width past the display's, then the fraction's.
+        assert_eq!(
+            bounds(&layout(5000, 0.25, 600, -1.0, BOTTOM | RIGHT), None),
+            Some(r(2592, 1826, 3456, 2426))
+        );
+        let current = r(10, 10, 410, 810);
+        assert_eq!(
+            bounds(&layout(-1, -1.0, -1, -1.0, RIGHT), Some(current)),
+            Some(r(3056, 813, 3456, 1613))
+        );
+        let default = default_bounds(&activity(-1), DISPLAY, 320, false, &[]);
+        assert_eq!(
+            bounds(&layout(-1, -1.0, -1, -1.0, TOP), None),
+            Some(r(default.left, 0, default.right, default.height()))
+        );
+        assert_eq!(bounds(&layout(-1, -1.0, -1, -1.0, 0), None), None);
+        assert_eq!(bounds(&activity(-1), None), None);
     }
 
     #[test]

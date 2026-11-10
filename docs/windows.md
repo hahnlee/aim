@@ -177,7 +177,9 @@ itself (`OP_WINDOWS`, from guest-init) and, in window mode:
   .getTaskBounds`: 412×732 dp, 1064×600 dp for a landscape activity, fit
   into the display and centred, or 75 dp down and right of a freeform
   source task of that size; launch bounds turned to the activity's
-  orientation; then moved off another freeform task's corners), and
+  orientation; an activity's `<layout>` size and gravity, which a start
+  into its running task applies again (`getLayoutBounds`); then moved off
+  another freeform task's corners), and
   reports it (`TASK`, `PACKAGE`, `ACTIVITY`, then `FRONT`). Its
   activities' configuration is the freeform task's (`TaskFragment
   .computeConfigResourceOverrides`: its sizes from its bounds). Every

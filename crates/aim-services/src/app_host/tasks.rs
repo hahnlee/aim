@@ -514,9 +514,33 @@ impl AppHost {
             .filter(|_| !windows && options.mode == 0)
             .and_then(|s| self.tasks.windowing_mode(s))
             .filter(|m| matches!(m, 1 | 5));
+        let mode = source_mode.unwrap_or(options.mode);
+        // Without launch bounds, the activity's window layout gives bounds
+        // where freeform or fullscreen launch policy applies (with freeform
+        // window management, `getLayoutBounds` of the persisted bounds): a
+        // launch on a freeform display area of them is freeform, and they
+        // stand for the persisted params.
+        let layout = if !home
+            && options.bounds.is_none()
+            && matches!(mode, 0 | 1 | 5)
+            && activity.layout.is_some()
+            && self.supports_freeform()?
+        {
+            super::freeform::layout_bounds(
+                &activity,
+                area,
+                display.density_dpi(),
+                false,
+                saved.as_ref().map(|p| p.bounds),
+            )
+        } else {
+            None
+        };
+        let saved = saved.filter(|_| layout.is_none());
         let launch_mode = match &saved {
+            _ if layout.is_some() && windows && mode == 0 => 5,
             Some(p) if p.windowing_mode != 0 => p.windowing_mode,
-            _ => source_mode.unwrap_or(options.mode),
+            _ => mode,
         };
         // The display area's mode is inherited, and so is a mode the activity
         // cannot take (TaskDisplayArea.validateWindowingMode).
@@ -547,7 +571,7 @@ impl AppHost {
             let task_bounds = |initial, b| {
                 super::freeform::task_bounds(&activity, area, dpi, false, initial, b, &others)
             };
-            match (options.bounds, saved_bounds) {
+            match (options.bounds.or(layout), saved_bounds) {
                 (Some(b), _) => task_bounds(true, Some(b)),
                 (None, Some(b)) => super::freeform::restored_bounds(area, &others, b),
                 (None, None) => task_bounds(false, self.cascade_from(source, area, dpi)),
@@ -669,6 +693,7 @@ impl AppHost {
                 restore_bounds: (windowing_mode == 5)
                     .then_some(bounds)
                     .or(options.bounds)
+                    .or(layout)
                     .or(saved_bounds),
                 min_size: activity.min_size,
                 layer: None,
@@ -900,16 +925,30 @@ impl AppHost {
         // them, else from a freeform source's cascaded (`getTaskBounds`, also
         // a fullscreen task's restore bounds), away from the other freeform
         // tasks.
-        let initial = self.initial_launch_bounds(launch_mode, &options)?;
+        let dpi = display.0.density_dpi();
+        let activity = super::freeform::Activity::from(info);
+        // Else the window layout's (`getLayoutBounds`), as a new task's.
+        let initial = match self.initial_launch_bounds(launch_mode, &options)? {
+            None if matches!(launch_mode, 0 | 1 | 5)
+                && activity.layout.is_some()
+                && self.supports_freeform()? =>
+            {
+                super::freeform::layout_bounds(&activity, area, dpi, false, None)
+            }
+            initial => initial,
+        };
+        let launch_mode = match launch_mode {
+            0 if windows && initial.is_some() => 5,
+            mode => mode,
+        };
         let bounds = if matches!(launch_mode, 1 | 5) && !overrides {
-            let dpi = display.0.density_dpi();
             let suggested = initial.or_else(|| {
                 (launch_mode == 5)
                     .then(|| self.cascade_from(source, area, dpi))
                     .flatten()
             });
             Some(super::freeform::task_bounds(
-                &super::freeform::Activity::from(info),
+                &activity,
                 area,
                 dpi,
                 false,
@@ -5272,6 +5311,59 @@ pub(super) mod tests {
                 ))
             );
             assert_ne!(host.tasks.bounds(8), Some(default));
+        });
+    }
+
+    /// `getLayoutBounds`: in window mode, a new task of an activity with a
+    /// window layout opens at its bounds, and a start into a running
+    /// freeform task of it lays it out there again (`layoutTask`).
+    #[test]
+    fn a_window_layout_places_new_and_reused_tasks() {
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            enable_freeform(host);
+            let old = Rect {
+                left: 100,
+                top: 100,
+                right: 900,
+                bottom: 1500,
+            };
+            let (_thread, activities, _receive, _) = wct_tasks(host, export, old);
+            host.activities
+                .records
+                .lock()
+                .unwrap()
+                .get_mut(&activities[1])
+                .unwrap()
+                .info
+                .resize_mode = 2;
+            let mut info = host.activity_info_of("p", "p.Main").unwrap();
+            info.screen_orientation = -1;
+            // 600 x 900, top left (`Gravity.TOP | Gravity.LEFT`).
+            info.window_layout = Some(crate::package::pkg::WindowLayout {
+                width: 600,
+                width_fraction: -1.0,
+                height: 900,
+                height_fraction: -1.0,
+                gravity: 0x33,
+                min_width: -1,
+                min_height: -1,
+                affinity: None,
+            });
+            let layout = Rect {
+                left: 0,
+                top: 0,
+                right: 600,
+                bottom: 900,
+            };
+            *host.tasks.next.lock().unwrap() = 100;
+            let id = host
+                .new_task_with_options(10100, "p", "p.Main", &info, None, Default::default())
+                .unwrap();
+            assert_eq!(host.tasks.own_bounds(id), Some((5, layout)));
+            assert_eq!(host.tasks.bounds(8), Some(old));
+            host.apply_task_launch_options(8, Default::default(), &info, None, false)
+                .unwrap();
+            assert_eq!(host.tasks.own_bounds(8), Some((5, layout)));
         });
     }
 

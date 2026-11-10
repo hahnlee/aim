@@ -1223,6 +1223,11 @@ impl AppHost {
         Ok(self.multi_window()?.supported)
     }
 
+    /// `retrieveSettings`' `mSupportsFreeformWindowManagement`.
+    pub(super) fn supports_freeform(&self) -> Result<bool, Exception> {
+        Ok(self.multi_window()?.freeform)
+    }
+
     /// `TaskLaunchParamsModifier`'s initial bounds of a launch in windowing
     /// mode `mode` from its `options`' launch bounds: those of a freeform or
     /// fullscreen launch if the device manages freeform windows, of a pinned
