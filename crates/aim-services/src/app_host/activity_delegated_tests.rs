@@ -351,6 +351,111 @@ fn as_caller_binder_cancellation_selector_and_source_process_checks() {
     });
 }
 
+// ActivityStarter.isAllowedToStart and setInitialState: a blocked
+// background start goes only into a task holding its caller's activity, and
+// leaves that task where it is (mCanMoveToFrontCode), as an option can ask.
+#[test]
+fn a_blocked_start_goes_only_into_its_callers_task_left_behind() {
+    activity_start_tests::with_start(|host, export| {
+        fixture(host, export(Arc::new(Thread)));
+        let t = source(host);
+        let token = Some(Binder::Local(t));
+        {
+            // A fullscreen display: the task left behind stays hidden.
+            let mut stack = host.activities.stack.lock().unwrap();
+            stack.freeform = false;
+            stack.tasks.push(activity_stack::Task {
+                id: 8,
+                affinity: None,
+                real_activity: "q/q.Main".into(),
+                package: "q".into(),
+                intent: Default::default(),
+                base: activity_start::LaunchIntent::Component,
+                uid: 10101,
+                user: 0,
+                last_active: 0,
+                root_was_reset: false,
+            });
+            stack.activities.push(activity_stack::Activity::new(
+                u64::MAX,
+                8,
+                2,
+                "q/q.Main",
+                0,
+                0,
+                None,
+            ));
+        }
+        let intent = RawIntent::of(None, 0, &[]).with_component("p", "p.Main");
+        let opt_out = RawBundle::empty()
+            .with_ints(&[("android.pendingIntent.backgroundActivityAllowed", 2)])
+            .unwrap();
+        host.activities.with(token, |r| {
+            r.launched_from.uid = 10101;
+            r.launched_from.package = Some("q".into());
+        });
+        // handleBackgroundActivityAbort: the result forwarded into a new
+        // task is cancelled to the activity that asked for it.
+        host.activities
+            .stack
+            .lock()
+            .unwrap()
+            .get_mut(t)
+            .unwrap()
+            .result_to = Some(u64::MAX);
+        let forward = RawIntent::of(None, 0x0200_0000 | 0x1000_0000, &[]) // FORWARD_RESULT|NEW_TASK
+            .with_component("p", "p.Main");
+        assert_eq!(
+            caller_options(host, 1000, token, &forward, false, (Some(&opt_out), 0, 0)),
+            Ok(0)
+        );
+        let results = {
+            let stack = host.activities.stack.lock().unwrap();
+            assert_eq!(stack.get(t).unwrap().result_to, None);
+            stack.get(u64::MAX).unwrap().results.clone()
+        };
+        let payloads = host.activities.payloads.lock().unwrap();
+        assert!(matches!(
+            results[..]
+                .iter()
+                .map(|id| payloads.get(id))
+                .collect::<Vec<_>>()[..],
+            [Some(activity_start::Payload::Result {
+                request_code: -1,
+                result_code: 0,
+                ..
+            })]
+        ));
+        drop(payloads);
+        let start = || caller_options(host, 1000, token, &intent, false, (Some(&opt_out), 0, 0));
+        assert_eq!(start(), Ok(0));
+        assert_eq!(host.activities.records.lock().unwrap().len(), 1); // Aborted.
+        host.activities.with(token, |r| r.uid = 10101);
+        assert_eq!(start(), Ok(0));
+        assert_eq!(host.activities.records.lock().unwrap().len(), 2);
+        let stack = host.activities.stack.lock().unwrap();
+        let added = stack
+            .activities
+            .iter()
+            .find(|a| a.token != t && a.task == 7);
+        assert_eq!(
+            added.map(|a| a.state),
+            Some(activity_stack::State::Initializing)
+        );
+        assert_eq!(stack.focused(), Some(8));
+        drop(stack);
+        let mut p = Parcel::new();
+        let avoid = [(
+            "android.activity.avoidMoveToFront",
+            crate::bundle::Value::Bool(true),
+        )];
+        crate::bundle::write(&mut p, &avoid);
+        let avoid = aim_service_aidl::ReadParcelable::read_from(&mut p.reader()).unwrap();
+        let options = host.activity_launch_options(Some(&avoid), 10100).unwrap();
+        assert!(options.avoid_move_to_front);
+    });
+}
+
 #[test]
 fn as_caller_resolver_child_uses_system_visibility_but_keeps_original_identity() {
     crate::system::with_discovery_binders_flags(

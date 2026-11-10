@@ -2243,6 +2243,38 @@ pub(super) mod tests {
                     mode
                 );
             }
+            // ActivityStarter.setTargetRootTaskIfNeeded: a start's options
+            // lay out the task it goes to though it is focused already.
+            let focused = host.activities.stack.lock().unwrap().focused().unwrap();
+            let count = host.tasks.tasks.lock().unwrap().len();
+            let args = super::super::activity_start::StartArgs {
+                start_flags: 0,
+                caller: None,
+                calling_package: Some("android".into()),
+                intent: Some(
+                    super::super::kept::RawIntent::of(None, 0x1000_0000, &[])
+                        .with_component("p", "p.Main"),
+                ),
+                resolved_type: None,
+                result_to: None,
+                result_who: None,
+                request_code: -1,
+                options: Some(
+                    RawBundle::empty()
+                        .with_ints(&[("android.activity.windowingMode", 1)])
+                        .unwrap(),
+                ),
+                launch: None,
+            };
+            assert_eq!(
+                host.start_activity_in_package(1000, Some("android".into()), 0, 0, args),
+                Ok(super::super::activity_stack::START_DELIVERED_TO_TOP)
+            );
+            let tasks = host.tasks.tasks.lock().unwrap();
+            assert_eq!(tasks.len(), count);
+            let task = tasks.iter().find(|t| t.id == focused).unwrap();
+            assert_eq!(task.windowing_mode, 1);
+            drop(tasks);
             for display in [-2, 1, 123] {
                 let bundle = RawBundle::empty()
                     .with_ints(&[("android.activity.launchDisplayId", display)])

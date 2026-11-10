@@ -11,6 +11,8 @@ pub(super) struct LaunchOptions {
     /// home of a home activity's (`ActivityRecord.setActivityType`) or
     /// `startHomeActivity`'s, else unset (standard).
     pub activity_type: i32,
+    /// `getAvoidMoveToFront`: the start brings no task to the front.
+    pub avoid_move_to_front: bool,
 }
 
 impl AppHost {
@@ -88,6 +90,9 @@ impl AppHost {
                 .rect("android:activity.launchBounds")
                 .map_err(bad)?
                 .filter(|b| b.width() > 0 && b.height() > 0),
+            avoid_move_to_front: o
+                .boolean("android.activity.avoidMoveToFront", false)
+                .map_err(bad)?,
             ..Default::default()
         })
     }

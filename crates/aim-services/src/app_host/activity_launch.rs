@@ -363,12 +363,12 @@ mod tests {
         with_start(|host, export| {
             permissions(host);
             let token = source(host);
-            let request = |uid, package: &str, user, caller, flags| {
+            let request = |uid, package: &str, user, caller, flags, intent_flags| {
                 let mut p = Parcel::new();
                 let mut a = super::super::activity_start_tests::args(
                     Some(package),
                     user,
-                    Some(RawIntent::of(None, 0, &[]).with_component("p", "p.Main")),
+                    Some(RawIntent::of(None, intent_flags, &[]).with_component("p", "p.Main")),
                 );
                 a.caller = caller;
                 a.flags = flags;
@@ -386,7 +386,7 @@ mod tests {
             };
             for (uid, package, user) in [(10100, "q", 0), (10100, "p", 10), (99000, "p", 0)] {
                 assert_eq!(
-                    request(uid, package, user, None, 0)
+                    request(uid, package, user, None, 0, 0)
                         .reader()
                         .read_exception()
                         .unwrap()
@@ -395,10 +395,12 @@ mod tests {
                     EX_SECURITY
                 );
             }
-            for (uid, caller, flags, expected) in [
-                (1000, None, 2, -96),
-                (1000, Some(Binder::Handle(u32::MAX)), 0, -94),
-                (10100, None, 0, 102),
+            for (uid, caller, flags, intent_flags, expected) in [
+                (1000, None, 2, 0, -96),
+                (1000, Some(Binder::Handle(u32::MAX)), 0, 0, -94),
+                // A blocked background start into a new task aborts
+                // (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_MULTIPLE_TASK).
+                (10100, None, 0, 0x1800_0000, 102),
             ] {
                 let p = request(
                     uid,
@@ -406,6 +408,7 @@ mod tests {
                     0,
                     caller,
                     flags,
+                    intent_flags,
                 );
                 let mut r = p.reader();
                 r.read_exception().unwrap().unwrap();
@@ -427,7 +430,7 @@ mod tests {
             app.config = Some(host.global_configuration().unwrap());
             host.apps.lock().unwrap().insert(1, app);
             std::thread::scope(|scope| {
-                let child = scope.spawn(|| request(1000, "android", 0, None, 0));
+                let child = scope.spawn(|| request(1000, "android", 0, None, 0, 0));
                 let deadline = Instant::now() + Duration::from_secs(5);
                 let token = loop {
                     let token = host
