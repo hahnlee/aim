@@ -2477,14 +2477,18 @@ mod reportable_tests {
     /// (`unix_dgram_sendmsg`).
     #[test]
     fn a_unix_datagram_survivor_of_its_peer_is_not_pollerr() {
+        // A child a test running in parallel forks holds the closed peer.
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_unix_datagram_survivor_of_its_peer_is_not_pollerr",
+        ) {
+            return;
+        }
         let _view = crate::vfs::test_view();
         let writable = POLLOUT | POLLWRNORM | POLLWRBAND;
         let send = |fd: i64| crate::sys::net::sendto([fd as u64, b"x".as_ptr() as u64, 1, 0, 0, 0]);
         for queued in [true, false] {
             let mut pair = [0i32; 2];
             assert_eq!(
-                // Close-on-exec, so that no process a test running in
-                // parallel spawns holds the peer open.
                 crate::sys::net::socketpair([
                     1,
                     2 | O_NONBLOCK | O_CLOEXEC,
@@ -2555,6 +2559,12 @@ mod reportable_tests {
     /// as one sent first does.
     #[test]
     fn a_unix_datagram_receive_waits_past_its_peers_close() {
+        // A child a test running in parallel forks holds the closed peer.
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_unix_datagram_receive_waits_past_its_peers_close",
+        ) {
+            return;
+        }
         let _view = crate::vfs::test_view();
         let send = |fd: i64| crate::sys::net::sendto([fd as u64, b"x".as_ptr() as u64, 1, 0, 0, 0]);
         let (fd, peer) = unix_datagram_pair(false);
@@ -2589,6 +2599,12 @@ mod reportable_tests {
     /// AF_UNSPEC, forgets the peer that closed.
     #[test]
     fn a_unix_datagram_disconnect_forgets_its_closed_peer() {
+        // A child a test running in parallel forks holds the closed peer.
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_unix_datagram_disconnect_forgets_its_closed_peer",
+        ) {
+            return;
+        }
         let _view = crate::vfs::test_view();
         let send = |fd: i64| crate::sys::net::sendto([fd as u64, b"x".as_ptr() as u64, 1, 0, 0, 0]);
         let mut buffer = [0u8; 4];
