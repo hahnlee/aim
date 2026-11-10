@@ -162,7 +162,9 @@ writable datagram or AF_UNIX socket only (#2925). A stream or seqpacket peer's c
 ECONNRESET/POLLERR, as Linux's `unix_release_sock` makes it. An AF_UNIX datagram
 socket whose peer closed has no error, though Darwin's has ECONNRESET: it polls
 writable, receives what is queued, and its next send without an address fails
-with ECONNREFUSED, then ENOTCONN, as an unconnected one's does (#2924). A poll with no event
+with ECONNREFUSED, which drops what it had queued, then ENOTCONN, as an
+unconnected one's does; a connect to a new peer, or of AF_UNSPEC (a disconnect),
+forgets the closed one (#2924). A poll with no event
 on a socket or pipe reports its hangup and error too, waking for one that
 arrives during the wait without spinning on a full buffer or a TCP half-close
 (#2779). A pipe or named FIFO is never POLLPRI, POLLRDBAND, POLLWRBAND or

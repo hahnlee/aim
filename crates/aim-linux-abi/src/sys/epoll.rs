@@ -696,12 +696,14 @@ fn bits(k: &libc::kevent, i: &Interest) -> u32 {
             // only for a queued datagram, a zero-length one included (its
             // address counts in Darwin's queued bytes, not in `data`). A
             // datagram socket's error may also arrive behind a queued one.
-            if super::net::peer_gone(k.ident as i32) == Some(0) {
+            match super::net::pending_error(k.ident as i32) {
+                Some(super::net::Pending::Error(queued)) => {
+                    b = EPOLLERR | if queued == 0 { 0 } else { b };
+                }
                 // An AF_UNIX datagram peer's close, which Darwin reports
                 // as an error and Linux as nothing.
-                b = 0;
-            } else if let Some(queued) = super::net::pending_error(k.ident as i32) {
-                b = EPOLLERR | if queued == 0 { 0 } else { b };
+                Some(super::net::Pending::PeerClosed(0)) => b = 0,
+                Some(super::net::Pending::PeerClosed(_)) | None => {}
             }
         }
         if b & EPOLLIN != 0 && super::wait::pidfd_reaped(k.ident as i32) {
@@ -711,7 +713,10 @@ fn bits(k: &libc::kevent, i: &Interest) -> u32 {
         b |= i.events & (EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND);
         if eof {
             b |= if k.fflags != 0 { EPOLLERR } else { EPOLLHUP };
-        } else if super::net::pending_error(k.ident as i32).is_some() {
+        } else if matches!(
+            super::net::pending_error(k.ident as i32),
+            Some(super::net::Pending::Error(_))
+        ) {
             // Nothing in the firing tells an error apart: filt_sowrite
             // reports it with the free space, as for plain writability.
             b |= EPOLLERR;

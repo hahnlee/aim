@@ -255,18 +255,19 @@ fn guest_revents(fd: i32, pin: Option<&super::fdtab::Pinned>, h: &libc::pollfd, 
     // POLLERR for a pending socket error, which Darwin reports as
     // readable, writable or not at all; readable only with data queued or
     // at EOF. Darwin's queued count includes each datagram's address, so a
-    // zero-length one counts.
-    // An AF_UNIX datagram peer's close, which Darwin reports as an error,
-    // readable with nothing queued, is no event.
-    if pin.is_some() && h.revents != 0 && super::net::peer_gone(h.fd) == Some(0) {
-        revents &= !(POLLIN | POLLRDNORM);
-    }
+    // zero-length one counts. An AF_UNIX datagram peer's close, which
+    // Darwin reports as an error, readable with nothing queued, is no
+    // event.
     if pin.is_some() && (h.revents != 0 || h.events & (POLLIN | libc::POLLOUT) == 0) {
-        if let Some(queued) = super::net::pending_error(h.fd) {
-            revents |= POLLERR;
-            if queued == 0 && h.revents & POLLHUP == 0 {
-                revents &= !(POLLIN | POLLRDNORM);
+        match super::net::pending_error(h.fd) {
+            Some(super::net::Pending::Error(queued)) => {
+                revents |= POLLERR;
+                if queued == 0 && h.revents & POLLHUP == 0 {
+                    revents &= !(POLLIN | POLLRDNORM);
+                }
             }
+            Some(super::net::Pending::PeerClosed(0)) => revents &= !(POLLIN | POLLRDNORM),
+            Some(super::net::Pending::PeerClosed(_)) | None => {}
         }
     }
     // `tcp_poll` reports a writable socket as POLLOUT | POLLWRNORM, where
@@ -615,7 +616,10 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
         let errored = host.iter().zip(&pins).zip(&guest).any(|((h, pin), g)| {
             (pin.is_some()
                 && h.events & (POLLIN | libc::POLLOUT) == 0
-                && super::net::pending_error(h.fd).is_some())
+                && matches!(
+                    super::net::pending_error(h.fd),
+                    Some(super::net::Pending::Error(_))
+                ))
                 || kept(pin.as_ref(), h.fd)
                     .is_some_and(|kept| kept.events as i16 & (g.events | POLLHUP | POLLERR) != 0)
         });
@@ -2532,6 +2536,96 @@ mod reportable_tests {
         let fresh = crate::sys::net::socket([1, 2 | O_NONBLOCK, 0, 0, 0, 0]);
         assert_eq!(send(fresh), -107);
         close(&[fresh]);
+    }
+
+    /// An AF_UNIX datagram socketpair end, close-on-exec, as (end, peer).
+    fn unix_datagram_pair(nonblocking: bool) -> (i64, i64) {
+        let mut pair = [0i32; 2];
+        let flags = O_CLOEXEC | if nonblocking { O_NONBLOCK } else { 0 };
+        assert_eq!(
+            crate::sys::net::socketpair([1, 2 | flags, 0, pair.as_mut_ptr() as u64, 0, 0]),
+            0
+        );
+        (pair[0] as i64, pair[1] as i64)
+    }
+
+    /// The peer of an AF_UNIX datagram socket closing while its receive
+    /// waits is no error: the receive waits on, to its timeout
+    /// (`__unix_dgram_recvmsg`), and the next send fails with ECONNREFUSED,
+    /// as one sent first does.
+    #[test]
+    fn a_unix_datagram_receive_waits_past_its_peers_close() {
+        let _view = crate::vfs::test_view();
+        let send = |fd: i64| crate::sys::net::sendto([fd as u64, b"x".as_ptr() as u64, 1, 0, 0, 0]);
+        let (fd, peer) = unix_datagram_pair(false);
+        let timeout = [0i64, 500_000];
+        assert_eq!(
+            crate::sys::net::setsockopt([fd as u64, 1, 20, timeout.as_ptr() as u64, 16, 0]),
+            0
+        );
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            close(&[peer]);
+        });
+        let started = std::time::Instant::now();
+        let mut buffer = [0u8; 4];
+        assert_eq!(received(fd, &mut buffer), -11);
+        assert!(started.elapsed() >= std::time::Duration::from_millis(450));
+        closer.join().unwrap();
+        assert_eq!(send(fd), -111);
+        assert_eq!(send(fd), -107);
+        close(&[fd]);
+        // A send first, with nothing having looked at the socket.
+        let (fd, peer) = unix_datagram_pair(true);
+        close(&[peer]);
+        assert_eq!(send(fd), -111);
+        assert_eq!(send(fd), -107);
+        close(&[fd]);
+    }
+
+    /// The ECONNREFUSED send of an AF_UNIX datagram socket whose peer
+    /// closed disconnects it and drops what it had queued
+    /// (`unix_dgram_disconnected`); a connect to a new peer, or of
+    /// AF_UNSPEC, forgets the peer that closed.
+    #[test]
+    fn a_unix_datagram_disconnect_forgets_its_closed_peer() {
+        let _view = crate::vfs::test_view();
+        let send = |fd: i64| crate::sys::net::sendto([fd as u64, b"x".as_ptr() as u64, 1, 0, 0, 0]);
+        let mut buffer = [0u8; 4];
+        let (fd, peer) = unix_datagram_pair(true);
+        assert_eq!(send(peer), 1);
+        close(&[peer]);
+        assert_eq!(send(fd), -111);
+        assert_eq!(received(fd, &mut buffer), -11);
+        close(&[fd]);
+
+        let (fd, peer) = unix_datagram_pair(true);
+        close(&[peer]);
+        assert_eq!(polled(fd, POLLOUT), (1, POLLOUT));
+        let other = crate::sys::net::socket([1, 2 | O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0]);
+        let (name, len) = abstract_name(&format!("aim-poll-reconnect-{}", std::process::id()));
+        assert_eq!(
+            crate::sys::net::bind([other as u64, name.as_ptr() as u64, len, 0, 0, 0]),
+            0
+        );
+        assert_eq!(
+            crate::sys::net::connect([fd as u64, name.as_ptr() as u64, len, 0, 0, 0]),
+            0
+        );
+        assert_eq!(send(fd), 1);
+        assert_eq!(received(other, &mut buffer), 1);
+        close(&[fd, other]);
+
+        let (fd, peer) = unix_datagram_pair(true);
+        close(&[peer]);
+        assert_eq!(polled(fd, POLLOUT), (1, POLLOUT));
+        let unspec = [0u8; 16];
+        assert_eq!(
+            crate::sys::net::connect([fd as u64, unspec.as_ptr() as u64, 16, 0, 0, 0]),
+            0
+        );
+        assert_eq!(send(fd), -107);
+        close(&[fd]);
     }
 
     /// A refused non-blocking TCP connect: `tcp_done` shuts it both ways,
