@@ -112,20 +112,23 @@ inotify signals its F_SETOWN/F_SETOWN_EX owner for each queued event, SIGIO or
 F_SETSIG's signal with POLL_IN, its band and si_fd: a watcher thread waits on a
 second knote on each watched vnode and decodes events as they arrive (#2850).
 F_SETFL and FIOASYNC set O_ASYNC on every fd's host file (FIOASYNC is ENOTTY on
-a file without Linux fasync), and F_GETFL reports it. A host socket or pipe
-keeps its process or group owner in Darwin, whose SIGIO reaches it as
-`send_sigio`'s, SI_KERNEL from no process (a guest's kill of SIGIO to another
-process goes through the agent, so a host SIGIO is the kernel's; where there is
-no agent, no pid table here or the native namespace init as target, and for a
-group kill without a member list, Darwin's kill delivers it, read as the
-kernel's; #2875, #2941); with
-F_SETSIG or a thread owner, Darwin's owner is cleared and an EV_CLEAR read
-knote on a private reference to the file wakes the same watcher thread, which
-sends the signal with POLL_IN and the si_fd that set O_ASYNC until the file's
-last guest fd closes. Arrivals before the watcher drains the knote are one
-signal, where Linux queues one real-time signal each, and there is no POLL_OUT
-or POLL_HUP yet. eventfd, timerfd, signalfd, epoll and pidfd keep their owner
-in the layer and, as on Linux, never signal it; a fork child copies these
+a file without Linux fasync), and F_GETFL reports it. A host socket keeps its
+process or group owner in Darwin, and a pipe or tty its group owner, whose
+SIGIO reaches it as `send_sigio`'s, SI_KERNEL from no process (a guest's kill
+of SIGIO to another process goes through the agent, so a host SIGIO is the
+kernel's; where there is no agent, no pid table here or the native namespace
+init as target, and for a group kill without a member list, Darwin's kill
+delivers it, read as the kernel's; #2875, #2941). With F_SETSIG, a thread
+owner, or a process owner of a pipe or tty (Darwin would take its group),
+Darwin's owner is cleared and EV_CLEAR read and write knotes on a private reference to the file wake the same watcher
+thread, which signals as the Linux driver does: POLL_IN on data, POLL_OUT on
+write space (a pipe writer on its reader's reads and close), POLL_HUP when a
+socket's peer is gone, each with its band and the si_fd that set O_ASYNC,
+until the file's last guest fd closes. Wakeups before the watcher reads them
+are one signal, where Linux queues one real-time signal each, and a socket's
+POLL_OUT comes on every freeing of space, not only after a send found it full.
+eventfd, timerfd, signalfd, epoll, pidfd, regular files and memfds keep their
+owner in the layer and, as on Linux, never signal it; a fork child copies these
 owners (#2858, #2859, #2860). A pty's broker refuses O_ASYNC, and FIOASYNC on
 it is ENOTTY (#2877). A fork child
 gives each rebuilt pidfd, epoll and inotify fd its own close-on-exec flag

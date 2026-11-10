@@ -42,26 +42,29 @@ pub struct Owner {
 }
 
 impl Owner {
-    /// `send_sigio` for POLL_IN through `fd`: nothing without an owner.
-    pub fn readable(&self, fd: i32) {
+    /// `send_sigio` for `reason` (`signal::POLL_*`) through `fd`: nothing
+    /// without an owner.
+    pub fn notify(&self, fd: i32, reason: i32) {
         let owner = match self.kind {
             _ if self.pid == 0 => return,
             F_OWNER_TID => IoOwner::Thread(self.pid),
             F_OWNER_PID => IoOwner::Process(self.pid),
             _ => IoOwner::Group(self.pid),
         };
-        super::signal::send_io(owner, self.signum, fd, (self.uid, self.euid));
+        super::signal::send_io(owner, self.signum, fd, reason, (self.uid, self.euid));
     }
 
     /// The owner as Darwin's F_SETOWN takes it (a pid, a negated group, or
-    /// 0 for none) when Darwin can signal it: SIGIO to a process or group.
-    pub fn host(&self) -> Option<i32> {
+    /// 0 for none) when Darwin can signal it: SIGIO to a process or group,
+    /// and to a process only on a socket (Darwin's other files take the
+    /// process's group in its place).
+    pub fn host(&self, socket: bool) -> Option<i32> {
         match self.kind {
             _ if self.signum != 0 => None,
             _ if self.pid == 0 => Some(0),
-            F_OWNER_TID => None,
-            F_OWNER_PID => Some(self.pid),
-            _ => Some(-self.pid),
+            F_OWNER_PID if socket => Some(self.pid),
+            F_OWNER_PGRP => Some(-self.pid),
+            _ => None,
         }
     }
 }

@@ -704,7 +704,7 @@ impl Inotify {
         drop(s);
         if let Some(fd) = fd {
             for _ in 0..raised {
-                owner.readable(fd);
+                owner.notify(fd, super::signal::POLL_IN);
             }
         }
     }
