@@ -639,3 +639,69 @@ fn pending_intent_start_into_task_7(host: &Arc<AppHost>) -> i32 {
     );
     host.activities.stack.lock().unwrap().focused().unwrap()
 }
+
+/// `PendingIntentRecord.sendInner`: the sender's launch flags go into an
+/// immutable PendingIntent's intent, of `FLAG_ACTIVITY_NEW_TASK` and
+/// `FLAG_ACTIVITY_MULTIPLE_TASK` only.
+#[test]
+fn a_pending_intent_takes_its_senders_launch_flags() {
+    let flags = [("android.permission.flags.appop_mode_caching_enabled", true)];
+    crate::system::with_discovery_binders_flags(&flags, true, |host, _, _, export| {
+        let (_thread, tokens, _receive, _) =
+            tasks::tests::wct_tasks(host, export, config::Rect::default());
+        // Its activity joins `p`'s process.
+        {
+            let mut apps = host.apps.lock().unwrap();
+            let app = apps.get_mut(&7).unwrap();
+            app.process = "p".into();
+            app.isolated = false;
+        }
+        let target = host
+            .get_intent_sender(
+                10100,
+                pending_intents::Request {
+                    kind: pending_intents::INTENT_SENDER_ACTIVITY,
+                    package: Some("p".into()),
+                    feature: None,
+                    token: None,
+                    result_who: None,
+                    request_code: 0,
+                    intents: Some(vec![Some(intent("p.Main"))]),
+                    resolved_types: None,
+                    flags: 0x0400_0000, // FLAG_IMMUTABLE
+                    options: None,
+                    user: 0,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        // FLAG_ACTIVITY_NEW_TASK, FLAG_ACTIVITY_MULTIPLE_TASK and
+        // FLAG_ACTIVITY_NO_HISTORY.
+        let sent = pending_intents::Sent {
+            options: Some(
+                RawBundle::empty()
+                    .with_ints(&[(
+                        "android.activity.pendingIntentLaunchFlags",
+                        0x1000_0000 | 0x0800_0000 | 0x4000_0000,
+                    )])
+                    .unwrap(),
+            ),
+            ..Default::default()
+        };
+        assert!(
+            host.send_record(10100, None, target, 0, None, None, None, None, sent)
+                .unwrap()
+                >= 0
+        );
+        let records = host.activities.records.lock().unwrap();
+        let flags: Vec<_> = records
+            .iter()
+            .filter(|(t, _)| !tokens.contains(t))
+            .map(|(_, r)| match &r.intent {
+                activity_start::LaunchIntent::Raw(k) => k.intent.intent.flags & 0x7800_0000,
+                _ => -1,
+            })
+            .collect();
+        assert_eq!(flags, [0x1800_0000]);
+    });
+}

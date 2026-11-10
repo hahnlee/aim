@@ -73,6 +73,9 @@ struct Root {
     last_active: i64,
     /// `mLaunchCookie`, held while the root task is.
     cookie: Option<(Binder, Option<Strong>)>,
+    /// `mReparentLeafTaskIfRelaunch`: a relaunched leaf task leaves it for
+    /// the display area.
+    reparent_leaf_if_relaunch: bool,
 }
 
 /// What `TaskInfo` reports of an organizer root task.
@@ -255,6 +258,30 @@ impl Tasks {
             last_active: root.last_active,
             cookie: root.cookie.as_ref().map(|c| c.0),
         })
+    }
+
+    /// `Task.setReparentLeafTaskIfRelaunch` of the organizer root task `id`.
+    pub(super) fn set_reparent_leaf_if_relaunch(&self, id: i32, reparent: bool) {
+        let mut tasks = self.tasks.lock().unwrap();
+        if let Some(root) = tasks
+            .iter_mut()
+            .find(|t| t.id == id)
+            .and_then(|t| t.root.as_mut())
+        {
+            root.reparent_leaf_if_relaunch = reparent;
+        }
+    }
+
+    /// Whether task `id` is in an organizer root task whose relaunched
+    /// leaf tasks leave it (`getRootTask().mReparentLeafTaskIfRelaunch`).
+    fn reparents_if_relaunched(&self, id: i32) -> bool {
+        let tasks = self.tasks.lock().unwrap();
+        let parent = tasks.iter().find(|t| t.id == id).and_then(|t| t.parent);
+        tasks
+            .iter()
+            .find(|t| Some(t.id) == parent)
+            .and_then(|t| t.root.as_ref())
+            .is_some_and(|r| r.reparent_leaf_if_relaunch)
     }
 
     /// The root tasks, top to bottom (`DisplayContent.forAllRootTasks`).
@@ -612,6 +639,45 @@ impl AppHost {
         Ok(id)
     }
 
+    /// `TaskDisplayArea.getOrCreateRootTask` of the existing task `id` of a
+    /// standard activity started with `options` from the task `source`: it
+    /// goes into the launch root task (`getLaunchRootTask`), here the
+    /// organizer root task of a source in adjacent roots, or the one of
+    /// those it is in already, else out of an organizer root task whose
+    /// relaunched leaf tasks leave it onto the display area; over its new
+    /// siblings unless the start avoids the front.
+    fn reparent_launched_task(
+        self: &Arc<Self>,
+        id: i32,
+        options: &super::activity_options::LaunchOptions,
+        source: Option<i32>,
+    ) -> Result<(), String> {
+        let standard = self.activities.stack.lock().unwrap().activity_type(id)
+            == super::activity::ACTIVITY_TYPE_STANDARD;
+        if !standard {
+            return Ok(());
+        }
+        let parent = self.tasks.parent(id);
+        // A pinned task relaunching is left to its organizer.
+        let launch_root = source
+            .filter(|_| self.tasks.windowing_mode(id) != Some(2))
+            .and_then(|s| {
+                let root = self.tasks.parent(s)?;
+                let adjacent = self.tasks.adjacency.lock().unwrap().of(root);
+                (!adjacent.is_empty())
+                    .then(|| parent.filter(|p| adjacent.contains(p)).unwrap_or(root))
+            });
+        let to_top = !options.avoid_move_to_front;
+        match launch_root {
+            Some(root) if parent != Some(root) => self.reparent_task(id, Some(root), to_top),
+            None if self.tasks.reparents_if_relaunched(id) => {
+                eprintln!("app host: task {id} reparented to the display area on relaunch");
+                self.reparent_task(id, None, to_top)
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// A reused task `id`, started with `options` from the task `source` if
     /// any, takes the launch's windowing mode and bounds
     /// (`ActivityStarter.setTargetRootTaskIfNeeded`): the launch params
@@ -629,7 +695,9 @@ impl AppHost {
         let windows = self.tasks.window_mode();
         // The launch mode: the options', else a fullscreen display area's
         // source task's if fullscreen or freeform
-        // (`canInheritWindowingModeFromSource`), else the task's own.
+        // (`canInheritWindowingModeFromSource`), else the task's own unless
+        // its root task lets it go on relaunch: then it is the one it
+        // resolves where it goes.
         let source_mode = source
             .filter(|_| options.mode == 0 && !windows)
             .and_then(|s| self.tasks.windowing_mode(s))
@@ -639,10 +707,15 @@ impl AppHost {
                 .windowing_mode(id)
                 .ok_or_else(|| state(format!("no task {id}")))
         };
+        let inherited = (!self.tasks.reparents_if_relaunched(id))
+            .then(|| mode_of(id))
+            .transpose()?;
+        self.reparent_launched_task(id, &options, source)
+            .map_err(state)?;
         let own = mode_of(id)?;
         let launch_mode = match (options.mode, source_mode) {
             (0, Some(m)) => m,
-            (0, None) => own,
+            (0, None) => inherited.unwrap_or(own),
             (m, _) => m,
         };
         // `inMultiWindowMode` of a root task's configured mode: pinned,
@@ -977,6 +1050,7 @@ impl AppHost {
                 root: Some(Root {
                     last_active: super::alarm_service::elapsed_ms(),
                     cookie: cookie.map(|c| (c, held)),
+                    reparent_leaf_if_relaunch: false,
                 }),
             },
         );
@@ -4466,6 +4540,88 @@ pub(super) mod tests {
             );
             assert_eq!(task8(), (6, Some(default)));
             assert_eq!(host.tasks.parent(8), Some(root));
+        });
+    }
+
+    /// `setReparentLeafTaskIfRelaunch` on organizer root tasks, as split
+    /// screen sets it: a relaunch of a leaf task of the root goes onto the
+    /// display area, taking its mode (`TaskDisplayArea.getOrCreateRootTask`,
+    /// no inherit-from-task), but not one from a source in a root adjacent
+    /// to it (`getLaunchRootTask`); a non-organized task is refused.
+    #[test]
+    fn a_relaunched_leaf_task_leaves_a_root_task_that_reparents_it() {
+        use super::super::activity_options::LaunchOptions;
+        use super::super::task_organizer::tests::apply_wct;
+        use super::super::window_container_transaction::tests::{Op, reparent, transaction};
+        use aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION;
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let (_thread, activities, _receive, _) =
+                tasks_in_mode(host, export, Rect::default(), false);
+            for a in &activities {
+                let mut records = host.activities.records.lock().unwrap();
+                records.get_mut(a).unwrap().info.resize_mode = 2;
+            }
+            for task in &mut host.activities.stack.lock().unwrap().tasks {
+                task.intent.component = Some(crate::package::intent::ComponentName {
+                    package: "p".into(),
+                    class: "p.Main".into(),
+                });
+            }
+            let info = host.activity_info_of("p", "p.Main").unwrap();
+            let (a, b) = (
+                host.create_root_task(6, None).unwrap(),
+                host.create_root_task(6, None).unwrap(),
+            );
+            let token = |id| host.task_token(id);
+            let flag = |task, reparent_leaf| Op {
+                kind: 16,
+                reparent_leaf,
+                ..reparent(task, None, false)
+            };
+            // The leaf tasks inherit the root's mode (WINDOWING_MODE_UNDEFINED).
+            let inherit = [(244, 0), (248, 0), (252, 0), (256, 0), (352, 0)];
+            let apply = |ops: &[Op]| {
+                let changes = [(token(8), &inherit[..]), (token(7), &inherit[..])];
+                apply_wct(host, &transaction(&changes, ops), 1000)
+                    .reader()
+                    .read_exception()
+                    .unwrap()
+                    .map_err(|e| e.code)
+            };
+            assert_eq!(
+                apply(&[flag(token(8), true)]),
+                Err(EX_UNSUPPORTED_OPERATION)
+            );
+            apply(&[
+                reparent(token(8), Some(token(a)), true),
+                reparent(token(7), Some(token(b)), true),
+                Op {
+                    kind: 4,
+                    container: None,
+                    containers: Some(vec![token(a), token(b)]),
+                    ..reparent(token(a), None, false)
+                },
+                flag(token(a), true),
+            ])
+            .unwrap();
+            assert_eq!(host.tasks.windowing_mode(8), Some(6));
+            // From the root adjacent to its own, it stays there.
+            host.apply_task_launch_options(8, LaunchOptions::default(), &info, Some(7))
+                .unwrap();
+            assert_eq!(host.tasks.parent(8), Some(a));
+            host.apply_task_launch_options(8, LaunchOptions::default(), &info, None)
+                .unwrap();
+            assert_eq!(host.tasks.parent(8), None);
+            assert_eq!(host.tasks.windowing_mode(8), Some(1));
+            // Cleared, the root keeps its relaunched leaf task.
+            apply(&[
+                reparent(token(8), Some(token(a)), true),
+                flag(token(a), false),
+            ])
+            .unwrap();
+            host.apply_task_launch_options(8, LaunchOptions::default(), &info, None)
+                .unwrap();
+            assert_eq!(host.tasks.parent(8), Some(a));
         });
     }
 

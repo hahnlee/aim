@@ -725,6 +725,7 @@ fn organizer_root_tasks_hold_reparented_tasks_in_their_bounds() {
             top_only: false,
             modes: Some(vec![1, 6, 0]),
             types: Some(vec![1, 2, 3, 0]),
+            reparent_leaf: false,
         };
         apply_wct(host, &transaction(&[], &[dismiss]), 1000)
             .reader()

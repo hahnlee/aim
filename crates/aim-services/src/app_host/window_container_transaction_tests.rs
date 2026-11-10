@@ -35,6 +35,7 @@ pub(in crate::app_host) struct Op {
     pub top_only: bool,
     pub modes: Option<Vec<i32>>,
     pub types: Option<Vec<i32>>,
+    pub reparent_leaf: bool,
 }
 /// A transaction of the pinned fixture's Change, with the edits at its
 /// offsets, for each token, then `ops`.
@@ -81,7 +82,11 @@ pub(in crate::app_host) fn transaction(
                 None => p.write_i32(-1),
             }
         }
-        p.write_raw(&data[488..540], &[]);
+        // The Bundles, typed objects and alwaysOnTop, then
+        // mReparentLeafTaskIfRelaunch and the rest.
+        p.write_raw(&data[488..520], &[]);
+        p.write_bool(op.reparent_leaf);
+        p.write_raw(&data[524..540], &[]);
     }
     p.write_raw(&data[540..], &[]);
     p
@@ -96,6 +101,7 @@ pub(in crate::app_host) fn reparent(task: Binder, parent: Option<Binder>, to_top
         top_only: false,
         modes: None,
         types: None,
+        reparent_leaf: false,
     }
 }
 #[test]
@@ -160,6 +166,7 @@ fn reparent_and_reparent_tasks_decode() {
         top_only: true,
         modes: Some(vec![1, 6, 0]),
         types: Some(vec![]),
+        reparent_leaf: false,
     };
     assert_eq!(
         read(&[children]).unwrap().hierarchy,
@@ -212,6 +219,39 @@ fn reparent_and_reparent_tasks_decode() {
         Transaction::read(&mut truncated.reader()).unwrap_err().code,
         EX_ILLEGAL_ARGUMENT
     );
+}
+// setReparentLeafTaskIfRelaunch: its container and flag only.
+#[test]
+fn reparent_leaf_task_if_relaunch_decodes() {
+    let root = Binder::Local(64);
+    let read = |ops: &[Op]| Transaction::read(&mut transaction(&[], ops).reader());
+    let op = |reparent_leaf| Op {
+        kind: 16,
+        reparent_leaf,
+        ..reparent(root, None, false)
+    };
+    for reparent in [true, false] {
+        assert_eq!(
+            read(&[op(reparent)]).unwrap().hierarchy,
+            [Hop::ReparentLeafTaskIfRelaunch { root, reparent }]
+        );
+    }
+    for bad in [
+        Op {
+            reparent: Some(root),
+            ..op(true)
+        },
+        Op {
+            to_top: true,
+            ..op(true)
+        },
+        Op {
+            reparent_leaf: true,
+            ..reparent(root, None, false)
+        },
+    ] {
+        assert_eq!(read(&[bad]).unwrap_err().code, EX_UNSUPPORTED_OPERATION);
+    }
 }
 // setAdjacentRootSet (its containers only), clearAdjacentRoots and
 // setLaunchAdjacentFlagRoot / clearLaunchAdjacentFlagRoot (clearRoot in mToTop).
