@@ -299,7 +299,8 @@ turns FBE on and depends on slice 4's CE protection: it lands after it.
   directory it climbs, up to the first with a policy or the data volume's
   root; lookups pay only while a key is absent (until user 0's unlock
   and the previous boot's `/data/per_boot` is gone), an xattr read per
-  directory of a writable area they walk, up to the first encrypted one
+  directory they walk on the data filesystem (any but the read-only
+  image root's tree on its own volume), up to the first encrypted one
   whose key is present: everything below it has its policy. Slice 1 measures
   `startup_bench` and a boot before and after.
 - A partial FBE (properties before slices 1-3) is worse than none: the

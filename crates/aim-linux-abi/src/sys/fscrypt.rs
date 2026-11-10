@@ -25,6 +25,7 @@
 
 use std::ffi::{CStr, CString};
 use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -612,15 +613,41 @@ pub(super) fn removed(inode: Option<u64>) -> Result<(), Errno> {
     }
 }
 
+/// Whether the host path `host`, of a guest path in `area`, is off the data
+/// filesystem, so that it has no policy: in the tree of a read-only image
+/// root on another host filesystem. A writable area, or a bind of the data
+/// filesystem (read-only ones included, which are image areas), may be on
+/// it.
+pub(crate) fn off_data(host: &std::path::Path, area: crate::vfs::Area) -> Result<bool, Errno> {
+    static IMAGE_DEVICE: OnceLock<Option<u64>> = OnceLock::new();
+    if area != crate::vfs::Area::Image
+        || !crate::vfs::read_only_root()
+        || !host.starts_with(crate::vfs::root())
+    {
+        return Ok(false);
+    }
+    let Some(owner) = owner()? else {
+        return Ok(true);
+    };
+    let image = IMAGE_DEVICE.get_or_init(|| {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(crate::vfs::root()).ok().map(|m| m.dev())
+    });
+    Ok(image.is_some_and(|device| device != owner.device()))
+}
+
 /// `fscrypt_file_open` (also for execve) and `fscrypt_prepare_setattr` of a
-/// size: a locked regular file can neither be opened nor truncated. Only a
-/// writable area can be on the data filesystem, and nothing below an
-/// encrypted directory whose key is present is locked.
+/// size: a locked regular file can neither be opened nor truncated. Nothing
+/// off the data filesystem ([`off_data`]) or below an encrypted directory
+/// whose key is present is locked.
 pub(super) fn open(resolved: &crate::vfs::Resolved) -> Result<(), Errno> {
     let host = resolved.host.as_c_str();
-    if resolved.area == crate::vfs::Area::Writable
-        && !resolved.unlocked
+    if !resolved.unlocked
         && locking()?
+        && !off_data(
+            std::path::Path::new(std::ffi::OsStr::from_bytes(host.to_bytes())),
+            resolved.area,
+        )?
         && host_type(Host::Path(host)).is_ok_and(|kind| kind == libc::S_IFREG)
         && locked(Host::Path(host))?.is_some()
     {
@@ -1477,6 +1504,46 @@ mod tests {
         assert_eq!(open_at(&format!("open/../shut/{file}"), 0), errno(ENOKEY));
         add(&dir, &raw, &root()).unwrap();
         assert!(!locking().unwrap());
+        std::fs::remove_dir_all(&host).unwrap();
+    }
+
+    #[test]
+    fn a_read_only_bind_of_a_locked_directory_stays_locked() {
+        let (_guard, view) = crate::vfs::test_view();
+        let host = view.join("data/fscrypt-tests");
+        let _ = std::fs::remove_dir_all(&host);
+        std::fs::create_dir_all(&host).unwrap();
+        let raw = [0x5a; 64];
+        let identifier = populate(view, "shut", &raw);
+        let dir = open(view, "shut");
+        assert_eq!(remove(&dir, identifier, false, &root()), Ok(0));
+        // An image area by its read-only flag, still on the data filesystem.
+        std::fs::create_dir_all(view.join("root/mnt/fscrypt-ro")).unwrap();
+        let (source, target) = (guest("shut"), c"/mnt/fscrypt-ro");
+        let bind = [
+            source.as_ptr() as u64,
+            target.as_ptr() as u64,
+            0,
+            0x1000 | 1,
+            0,
+            0,
+        ];
+        assert_eq!(super::super::mount::mount(bind), 0);
+        let names = list("../../mnt/fscrypt-ro");
+        assert_eq!(names.len(), 4);
+        assert!(names.iter().all(|name| !plain_names().contains(name)));
+        assert_eq!(kind("../../mnt/fscrypt-ro/file"), Err(errno(errno::ENOENT)));
+        let file = names
+            .iter()
+            .find(|name| kind(&format!("shut/{name}")) == Ok(libc::S_IFREG as u32))
+            .unwrap();
+        assert_eq!(
+            open_at(&format!("../../mnt/fscrypt-ro/{file}"), 0),
+            errno(ENOKEY)
+        );
+        let detach = [target.as_ptr() as u64, 2, 0, 0, 0, 0];
+        assert_eq!(super::super::mount::umount2(detach), 0);
+        add(&dir, &raw, &root()).unwrap();
         std::fs::remove_dir_all(&host).unwrap();
     }
 

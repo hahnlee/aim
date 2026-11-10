@@ -2831,15 +2831,18 @@ pub fn resolve_checked_new(
 }
 
 /// The lock (fscrypt) of the directory with the guest path `dir` (by its
-/// host names). Only a writable area can be on the data filesystem, and
-/// nothing below an encrypted directory whose key is present is locked:
-/// `unlocked` keeps the host path of the last such directory a walk
-/// passed, so that the directories below it are not asked.
+/// host names). Nothing off the data filesystem
+/// ([`off_data`](crate::sys::fscrypt::off_data)) or below an encrypted
+/// directory whose key is present is locked: `unlocked` keeps the host
+/// path of the last such directory a walk passed, so that the directories
+/// below it are not asked.
 /// Returns the lock and the directory's host path.
 fn dir_lock(dir: &str, unlocked: &mut Option<PathBuf>) -> Result<(Lock, CString), Errno> {
     let (host, area) = lookup(dir);
     let path = host_cstring(host.clone())?;
-    if area != Area::Writable || unlocked.as_ref().is_some_and(|root| host.starts_with(root)) {
+    if unlocked.as_ref().is_some_and(|root| host.starts_with(root))
+        || crate::sys::fscrypt::off_data(&host, area)?
+    {
         return Ok((Lock::Plain, path));
     }
     let lock = crate::sys::fscrypt::path_lock(&path)?;
@@ -3003,14 +3006,14 @@ fn resolve_inner(
         fuse_walk = None;
         let named = done.host.as_ref().map(|names| join_guest(names));
         let (host, area) = lookup(named.as_deref().unwrap_or(&current));
-        // A symlink below an encrypted directory whose key is present is
-        // not locked ([`dir_lock`]).
+        // A symlink off the data filesystem or below an encrypted directory
+        // whose key is present is not locked ([`dir_lock`]).
         let link = (locking
-            && area == Area::Writable
             && !done
                 .unlocked
                 .as_ref()
-                .is_some_and(|root| host.starts_with(root)))
+                .is_some_and(|root| host.starts_with(root))
+            && !crate::sys::fscrypt::off_data(&host, area)?)
         .then(|| host_cstring(host.clone()))
         .transpose()?;
         let Some(mut target) = link_target(host, area) else {

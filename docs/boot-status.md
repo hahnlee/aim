@@ -9348,7 +9348,8 @@ after guest-init starts on a second boot and 2.4 s on a first (host load
 5), and `boot_progress_start` about 0.75 s later. Until user 0's CE
 unlock and the removal of the previous boot's `/data/per_boot`, a key
 some policy names is absent, so path walks ask the fscrypt owner whether
-a directory is locked; they now ask only in writable areas and only down
+a directory is locked; they now skip the read-only image root's tree on
+its own volume (a read-only bind of data still asks) and ask only down
 to the first encrypted directory whose key is present (ADR 0016). The
 package boot's app-data passes before the unlock, whose installd calls
 walk `/data/user_de/0/...`, take 20-30% less (deferred 217 packages
