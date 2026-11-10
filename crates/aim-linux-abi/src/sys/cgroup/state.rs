@@ -121,15 +121,13 @@ pub(super) fn commit(
 pub(super) fn inherit(root: &Path, creator: i32, tid: i32, start: Start) -> Result<(), Errno> {
     let _policy = policy_lock(root, libc::LOCK_SH)?;
     let mut base = lock_file(&cgroup_v1::state_path(root), libc::LOCK_SH)?;
-    let mut m = Membership::parse(&text(&mut base)?);
+    // Only the creator's entry matters: the base lists the whole guest's.
+    let listed = text(&mut base)?;
+    let listed = Membership::thread_group(&listed, creator, start).map(str::to_owned);
     let path = directory(root).join(me().to_string());
     match std::fs::metadata(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if !m
-                .threads
-                .iter()
-                .any(|(t, saved, _)| *t == creator && *saved == start)
-            {
+            if listed.is_none() {
                 return Ok(());
             }
             std::fs::create_dir_all(directory(root)).map_err(io_error)?;
@@ -141,16 +139,18 @@ pub(super) fn inherit(root: &Path, creator: i32, tid: i32, start: Start) -> Resu
     let before = text(&mut file)?;
     let mut fragment = Membership::parse(&before);
     fragment.threads.retain(|(_, saved, _)| *saved == start);
-    merge(&mut m, &fragment);
-    // An implicit process membership needs no per-thread record. Explicit
-    // membership must be copied, even '/' (a thread moved out of its process).
-    if let Some((.., group)) = m
+    // This process's fragment overrides the base, as `merge` folds it.
+    let group = fragment
         .threads
         .iter()
-        .find(|(t, saved, _)| *t == creator && *saved == start)
-    {
+        .find(|(t, ..)| *t == creator)
+        .map(|(.., group)| group.clone())
+        .or(listed);
+    // An implicit process membership needs no per-thread record. Explicit
+    // membership must be copied, even '/' (a thread moved out of its process).
+    if let Some(group) = group {
         fragment.threads.retain(|(t, ..)| *t != tid);
-        fragment.threads.push((tid, start, group.clone()));
+        fragment.threads.push((tid, start, group));
         if let Err(error) = replace(&mut file, fragment.text().as_bytes()) {
             replace(&mut file, before.as_bytes())?;
             return Err(error);
