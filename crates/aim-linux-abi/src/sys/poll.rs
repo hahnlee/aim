@@ -1976,6 +1976,16 @@ mod reportable_tests {
                 (POLLOUT | POLLWRNORM | POLLHUP, 0x4 | 0x10)
             };
             assert_eq!(polled(fd, ALL | POLLRDHUP), (1, revents), "how {how}");
+            // `tcp_recvmsg`: end of file once shut for receiving, before
+            // TCP_CLOSE's ENOTCONN.
+            let mut buffer = [0u8; 4];
+            let read = if how == 0 { 0 } else { -107 };
+            assert_eq!(received(fd, &mut buffer), read, "how {how}");
+            assert_eq!(
+                fs::read([fd as u64, buffer.as_mut_ptr() as u64, 4, 0, 0, 0]),
+                read,
+                "how {how}"
+            );
             assert_eq!(selected(fd), (2, true, true), "how {how}");
             assert_eq!(waited(edge, 0), (1, epoll), "how {how}");
             assert_eq!(waited(edge, 0).0, 0, "how {how}");
@@ -2229,6 +2239,9 @@ mod reportable_tests {
         assert_eq!(waited(level, 0), (1, 0x1));
         assert_eq!(waited(edge, 0), (1, 0x1 | 0x2000));
         assert_eq!(waited(edge, 0).0, 0);
+        // End of file once shut for receiving (`__skb_recv_datagram`).
+        let mut buffer = [0u8; 4];
+        assert_eq!(received(dgram, &mut buffer), 0);
         assert_eq!(shutdown(dgram, 1), 0);
         assert_eq!(
             polled(dgram, ALL | POLLRDHUP),
@@ -2245,7 +2258,10 @@ mod reportable_tests {
         );
         assert_eq!(crate::sys::net::listen([listener as u64, 4, 0, 0, 0, 0]), 0);
         assert_eq!(polled(listener, ALL), (0, 0));
+        // `unix_stream_read_generic`: not connected is EINVAL.
+        assert_eq!(received(listener, &mut buffer), -22);
         assert_eq!(shutdown(listener, 2), 0);
+        assert_eq!(received(listener, &mut buffer), -22);
         assert_eq!(polled(listener, ALL | POLLRDHUP), (1, read | POLLHUP));
         let both = watching(listener, 0x1 | 0x4);
         assert_eq!(waited(both, 0), (1, 0x1 | 0x10));

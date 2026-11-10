@@ -2868,13 +2868,51 @@ fn recv(
     if let Some(s) = socket.as_ref().filter(|s| s.datagram()) {
         take_error(s, input.fd())?;
     }
-    let r = receive(input, iov, want_name, ctrl_cap, flags)?;
+    let end = || Received {
+        n: 0,
+        flags: 0,
+        ctrl: IncomingControl::default(),
+        cred: None,
+        name: None,
+    };
+    let shut = socket.as_ref().is_some_and(|s| received_shut(s));
+    // `__skb_recv_datagram`: a datagram socket shut for receiving is at
+    // end of file once its queue is empty, where Darwin's receive waits.
+    if shut
+        && socket.as_ref().is_some_and(|s| s.ty == SockType::Dgram)
+        && socket_info(input.fd()).is_some_and(|info| {
+            u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap()) == 0
+        })
+    {
+        return Ok(end());
+    }
+    let r = match receive(input, iov, want_name, ctrl_cap, flags) {
+        Err(-107) if shut && socket.as_ref().is_some_and(|s| s.tcp()) => Ok(end()),
+        Err(-107)
+            if socket
+                .as_ref()
+                .is_some_and(|s| s.ty == SockType::Stream && matches!(s.family, Family::Unix)) =>
+        {
+            Err(-(EINVAL as i64))
+        }
+        r => r,
+    }?;
     if flags & L_MSG_PEEK == 0
         && let Some(s) = socket
     {
         traffic::account(&s, input.fd(), false, r.n, r.name.as_deref());
     }
     Ok(r)
+}
+
+/// Whether `s` has a receive shutdown recorded where Darwin's failed
+/// ([`kept`]): `tcp_recvmsg` then reads end of file before it fails an
+/// unconnected socket with ENOTCONN, as a datagram socket's receive does
+/// once its queue is empty. An AF_UNIX stream socket not connected fails
+/// with EINVAL first (`unix_stream_read_generic`), whose Darwin
+/// ENOTCONN the receive translates.
+fn received_shut(s: &Sock) -> bool {
+    s.shutdown.load(Ordering::Relaxed) & RCV_SHUTDOWN != 0
 }
 
 /// `sock_error` of datagram socket `s` on host `fd`, which
@@ -3331,6 +3369,11 @@ pub(super) fn read_pinned(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i6
         // SAFETY: the guest's iovec buffers.
         let r =
             errno::check(unsafe { libc::readv(input.fd(), iov.as_ptr(), iov.len() as i32) } as i64);
+        let r = if r == -107 && s.tcp() && received_shut(&s) {
+            0
+        } else {
+            r
+        };
         traffic::account(&s, input.fd(), false, r, None);
         return Some(r);
     }
