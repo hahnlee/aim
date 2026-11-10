@@ -353,6 +353,31 @@ fn application_info_for_the_user() {
     assert_eq!(field(&ai, "credentialProtectedDataDir"), &Value::Null);
 }
 
+/// PackageInfoUtils.generateApplicationInfo (android-16.0.0_r1): the parsed
+/// appCategory, else FallbackCategoryProvider's entry (updateApplicationInfo),
+/// else the installer's saved categoryHint, else CATEGORY_UNDEFINED.
+#[test]
+fn application_category_prefers_parsed_then_fallback_then_saved_hint() {
+    let category = |parsed: i32, fallback: Option<i32>, hint: i32| {
+        let mut state = state();
+        let ps = state.packages.get_mut(APP).unwrap();
+        ps.category_override = hint;
+        Arc::make_mut(ps.pkg.as_mut().unwrap()).category = parsed;
+        state.system.fallback_categories =
+            fallback.map(|c| (APP.to_string(), c)).into_iter().collect();
+        let ai = get_application_info(&state, 1000, APP, 0);
+        let Value::Int(category) = *field(&ai, "category") else {
+            panic!("no category")
+        };
+        category
+    };
+    assert_eq!(category(-1, None, -1), -1);
+    assert_eq!(category(-1, None, 7), 7);
+    assert_eq!(category(-1, Some(4), 7), 4);
+    assert_eq!(category(0, Some(4), 7), 0);
+    assert_eq!(category(5, None, -1), 5);
+}
+
 #[test]
 fn queries_normalize_renamed_package_names_once() {
     let mut state = state();
