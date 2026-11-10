@@ -12,7 +12,7 @@
 //! peer held here: the tracer exited (or execed, which Darwin cannot run
 //! with the connection open).
 
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 use super::tracee::{self, Traced};
@@ -84,6 +84,8 @@ unsafe extern "C" {
 static OWN: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 /// Whether this process listens.
 static LISTENING: Mutex<bool> = Mutex::new(false);
+/// SIGNAL requests taken and not yet answered ([`signals_answered`]).
+static SIGNALS: Answers = Answers::new();
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -385,12 +387,71 @@ fn connection(fd: i32) {
             }
             continue;
         }
-        if !send(fd, &handle(op, &mut r, peer)) {
+        let sent = if op != SIGNAL {
+            send(fd, &handle(op, &mut r, peer))
+        } else if let Some(_answering) = SIGNALS.begin() {
+            send(fd, &handle(op, &mut r, peer))
+        } else {
+            // The group is exiting: the signal is dropped, as Linux drops
+            // it then, and kill succeeds.
+            send(fd, &reply(0, |_| {}))
+        };
+        if !sent {
             break;
         }
     }
     close(fd);
     tracee::tracer_gone(peer);
+}
+
+/// Requests taken and not yet answered, until this process ends.
+struct Answers {
+    /// The requests being answered, and whether the process is ending.
+    state: Mutex<(usize, bool)>,
+    done: Condvar,
+}
+/// A request from its taking until its reply is sent.
+struct Answering<'a>(&'a Answers);
+impl Answers {
+    const fn new() -> Self {
+        Answers {
+            state: Mutex::new((0, false)),
+            done: Condvar::new(),
+        }
+    }
+    /// None once the process is ending: what arrives then is not waited
+    /// for, so a stream of requests cannot hold the exit back.
+    fn begin(&self) -> Option<Answering<'_>> {
+        let mut state = lock(&self.state);
+        if state.1 {
+            return None;
+        }
+        state.0 += 1;
+        Some(Answering(self))
+    }
+    fn end(&self) {
+        let mut state = lock(&self.state);
+        state.1 = true;
+        while state.0 != 0 {
+            state = self.done.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+impl Drop for Answering<'_> {
+    fn drop(&mut self) {
+        lock(&self.0.state).0 -= 1;
+        self.0.done.notify_all();
+    }
+}
+
+/// Wait until every signal a peer sent before this process began to end
+/// is answered. A signal's default action can end this process while its
+/// agent replies, and Linux's kill still returns 0 to the sender then, not
+/// the ESRCH a lost reply reads. A reply lost after this (a request taken
+/// as the process ends) is the caller's to read as delivery
+/// ([`super::remote_signal`]).
+pub(super) fn signals_answered() {
+    SIGNALS.end();
 }
 
 // ---- requests -----------------------------------------------------------------
@@ -800,6 +861,52 @@ mod tests {
         let (a, len) = sockaddr("12345.sock");
         assert_eq!(len as usize, 2 + 10 + 1);
         assert_eq!(a.sun_path[10], 0);
+    }
+
+    #[test]
+    fn process_ends_only_after_its_signal_replies() {
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        static ANSWERS: Answers = Answers::new();
+        let answering = ANSWERS.begin().unwrap();
+        let (done, ended) = mpsc::channel();
+        let ending = std::thread::spawn(move || {
+            ANSWERS.end();
+            done.send(()).unwrap();
+        });
+        assert_eq!(
+            ended.recv_timeout(Duration::from_millis(300)),
+            Err(RecvTimeoutError::Timeout)
+        );
+        // Requests taken once the process is ending are not waited for.
+        assert!(ANSWERS.begin().is_none());
+        drop(answering);
+        ended.recv_timeout(Duration::from_secs(2)).unwrap();
+        ending.join().unwrap();
+    }
+
+    #[test]
+    fn overlapping_signal_requests_cannot_hold_the_exit_back() {
+        use std::sync::mpsc;
+        static ANSWERS: Answers = Answers::new();
+        // A peer whose requests always overlap: it takes the next before
+        // its previous one is answered.
+        let first = ANSWERS.begin().unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut held = Some(first);
+            while held.is_some() {
+                let next = ANSWERS.begin();
+                std::thread::sleep(Duration::from_millis(1));
+                held = next;
+            }
+        });
+        let (done, ended) = mpsc::channel();
+        let ending = std::thread::spawn(move || {
+            ANSWERS.end();
+            done.send(()).unwrap();
+        });
+        ended.recv_timeout(Duration::from_secs(2)).unwrap();
+        ending.join().unwrap();
+        peer.join().unwrap();
     }
 
     #[test]
