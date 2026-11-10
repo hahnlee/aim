@@ -967,15 +967,19 @@ pub fn pin_guest_io(fd: i32) -> Result<Pinned, crate::errno::Errno> {
     let borrow = Borrow(fd);
     require_guest_visible(fd)?;
     let kind = get(fd);
+    let cached = REGULAR_ACCESS[fd as usize].load(Ordering::Relaxed);
+    // A regular file description, or a plain fd found regular since it was
+    // published, is no FUSE marker socket: only others are asked (a
+    // getsockopt).
+    let regular = matches!(kind, Some(Kind::Regular(_))) || cached != 0 && kind.is_none();
     if !matches!(kind, None | Some(Kind::Regular(_)))
         || super::fuse_client::get(fd).is_some()
-        || super::fuse_device::is_typed(fd)
+        || !regular && super::fuse_device::is_typed(fd)
     {
         clear_regular_access(fd);
         drop(borrow);
         return pin_guest(fd);
     }
-    let cached = REGULAR_ACCESS[fd as usize].load(Ordering::Relaxed);
     let access = if cached != 0 && kind.is_none() {
         Some(cached as i32 - 1)
     } else {
