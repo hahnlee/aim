@@ -158,8 +158,9 @@ pub struct Sock {
     /// Listening (`TCP_LISTEN`): what SO_ACCEPTCONN reports, which Darwin
     /// does not answer for AF_UNIX.
     listening: AtomicBool,
-    /// A TCP socket that may still be unconnected: `TCP_CLOSE` with no
-    /// shutdown, which `tcp_poll` reports as EPOLLOUT | EPOLLHUP and
+    /// A TCP, AF_UNIX stream or AF_UNIX seqpacket socket that may still
+    /// be unconnected: `TCP_CLOSE` with no shutdown, which `tcp_poll`,
+    /// `unix_poll` and `unix_dgram_poll` report as EPOLLOUT | EPOLLHUP and
     /// Darwin as nothing. Cleared once its host socket is in another
     /// state, which it never returns to: a closed connection stays shut.
     unconnected: AtomicBool,
@@ -194,7 +195,11 @@ impl Sock {
     }
 
     fn of(ty: SockType, family: Family) -> Arc<Sock> {
-        let tcp = matches!((&ty, &family), (SockType::Stream, Family::Inet(_)));
+        let connection = matches!(
+            (&ty, &family),
+            (SockType::Stream, Family::Inet(_) | Family::Unix)
+                | (SockType::SeqPacket, Family::Unix)
+        );
         Arc::new(Sock {
             ty,
             family,
@@ -204,7 +209,7 @@ impl Sock {
             stamp: std::sync::atomic::AtomicU8::new(0),
             recv: Mutex::new(()),
             listening: AtomicBool::new(false),
-            unconnected: AtomicBool::new(tcp),
+            unconnected: AtomicBool::new(connection),
             shutdown: std::sync::atomic::AtomicU32::new(0),
             kept_error: std::sync::atomic::AtomicI32::new(0),
             local: Mutex::new(None),
@@ -1861,6 +1866,10 @@ pub fn shutdown(a: [u64; 6]) -> i64 {
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |word| {
                 Some((word | how).wrapping_add(4))
             });
+        // `unix_shutdown` succeeds unconnected; `inet_shutdown` does not.
+        if matches!(s.family, Family::Unix) {
+            return 0;
+        }
     }
     r
 }
@@ -3926,9 +3935,13 @@ fn host_protocol(fd: i32) -> i32 {
 /// sizeof(struct socket_fdinfo), and offsetof its `.psi.soi_state`,
 /// `.psi.soi_error` and `.psi.soi_rcv.sbi_cc`.
 const SOCKET_FDINFO: usize = 792;
+const SOI_OPTIONS: usize = 188;
 const SOI_STATE: usize = 192;
 const SOI_ERROR: usize = 202;
 const SBI_CC: usize = 208;
+/// Darwin's `soi_state` flags of a shut direction.
+const SS_CANTSENDMORE: i16 = 0x10;
+const SS_CANTRCVMORE: i16 = 0x20;
 
 /// Guest socket `fd`'s PROC_PIDFDSOCKETINFO; None for any other fd.
 fn socket_info(fd: i32) -> Option<[u8; SOCKET_FDINFO]> {
@@ -3972,8 +3985,6 @@ pub(super) fn kept_error(fd: i32) -> bool {
 /// `unix_poll` and `datagram_poll` report as a hangup only once both are
 /// shut. Darwin marks either with EOF and HUP alike. None for any other fd.
 pub(super) fn shut_directions(fd: i32) -> Option<super::tcp_shutdown::Shutdown> {
-    const SS_CANTSENDMORE: i16 = 0x10;
-    const SS_CANTRCVMORE: i16 = 0x20;
     let info = socket_info(fd)?;
     let state = i16::from_ne_bytes(info[SOI_STATE..SOI_STATE + 2].try_into().unwrap());
     Some(super::tcp_shutdown::Shutdown {
@@ -3985,17 +3996,30 @@ pub(super) fn shut_directions(fd: i32) -> Option<super::tcp_shutdown::Shutdown> 
 /// `RCV_SHUTDOWN` in a word of [`unconnected`].
 pub(super) const RCV_SHUTDOWN: u32 = 1;
 
-/// The shutdowns of `s`, on host socket `fd`, if it is a TCP socket never
-/// connected, which `tcp_poll` reports as EPOLLOUT | EPOLLHUP
+/// The shutdowns of `s`, on host socket `fd`, if it is a
+/// connection-oriented socket never connected, which `tcp_poll`,
+/// `unix_poll` and `unix_dgram_poll` report as EPOLLOUT | EPOLLHUP
 /// (`TCP_CLOSE`), and also EPOLLIN | EPOLLRDNORM | EPOLLRDHUP once shut
-/// for receiving, and no host knote or poll as anything: Linux's
-/// `sk_shutdown` (`RCV_SHUTDOWN`, `SEND_SHUTDOWN`) in the low two bits,
-/// above them a count that changes with each `shutdown`.
+/// for receiving, and no host knote or poll as anything: neither
+/// connected, connecting nor listening (its `soi_state` and
+/// `soi_options`), nor shut either way on the host, as a closed connection
+/// is. Linux's `sk_shutdown` (`RCV_SHUTDOWN`, `SEND_SHUTDOWN`) is in the
+/// low two bits, above them a count that changes with each `shutdown`.
 pub(super) fn unconnected(s: &Sock, fd: i32) -> Option<u32> {
+    const SO_ACCEPTCONN: i16 = 0x2;
+    const SS_ISCONNECTED: i16 = 0x2;
+    const SS_ISCONNECTING: i16 = 0x4;
     if !s.unconnected.load(Ordering::Relaxed) {
         return None;
     }
-    if !super::tcp_shutdown::unconnected(fd) {
+    let unconnected = socket_info(fd).is_some_and(|info| {
+        let field = |at: usize| i16::from_ne_bytes(info[at..at + 2].try_into().unwrap());
+        field(SOI_OPTIONS) & SO_ACCEPTCONN == 0
+            && field(SOI_STATE)
+                & (SS_ISCONNECTED | SS_ISCONNECTING | SS_CANTSENDMORE | SS_CANTRCVMORE)
+                == 0
+    });
+    if !unconnected {
         s.unconnected.store(false, Ordering::Relaxed);
         return None;
     }

@@ -84,13 +84,6 @@ pub(super) fn polled_hangup(fd: RawFd) -> Option<Shutdown> {
     state(fd).map(|state| Shutdown::of(state, state == ESTABLISHED, false))
 }
 
-/// Whether `fd` is a TCP socket never connected: closed with neither
-/// direction shut, as a closed connection is.
-pub(super) fn unconnected(fd: RawFd) -> bool {
-    state(fd) == Some(CLOSED)
-        && super::net::shut_directions(fd).is_some_and(|shut| !shut.receive && !shut.send)
-}
-
 /// Whether `fd` has room to send now: its EVFILT_WRITE, which Darwin's
 /// poll hides behind HUP.
 pub(super) fn writable(fd: RawFd) -> bool {

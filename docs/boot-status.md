@@ -147,12 +147,16 @@ received datagrams keeps a later error for the next call, which poll reports
 (not inherited by a fork child); a closed TCP connection
 polls IN|OUT|HUP as `tcp_done` shuts it both ways (#2713), never Darwin's
 POLLPRI|POLLRDBAND at EOF, nor a TCP socket's POLLWRBAND (#2918), to select as
-well. A TCP socket never connected
-(`TCP_CLOSE`, bound or not) is OUT|HUP to poll, select and epoll at once, which
-Darwin reports as nothing; edge-triggered once per change, a shutdown included:
-its shutdown fails with ENOTCONN but is recorded, as `inet_shutdown` does, so
-SHUT_RD adds IN|RDHUP; a waiter already blocked is not woken by it, and a fork
-child does not inherit the record (#2781). A poll with no event
+well. A TCP, AF_UNIX stream or
+AF_UNIX seqpacket socket never connected (`TCP_CLOSE`, bound or not, or after a
+refused connect) is OUT|HUP to poll, select and epoll at once (an AF_UNIX one
+with POLLWRBAND), which Darwin reports as nothing; edge-triggered once per
+change, a shutdown included: its shutdown is recorded, as `inet_shutdown` (with
+ENOTCONN) and `unix_shutdown` (with success) do, so SHUT_RD adds IN|RDHUP; a
+waiter already blocked is not woken by it, and a fork child does not inherit
+the record (#2781, #2919). A shut AF_UNIX or datagram socket that is writable is
+POLLWRBAND too. A stream or seqpacket peer's close with data unread is not
+ECONNRESET/POLLERR, as Linux's `unix_release_sock` makes it. A poll with no event
 on a socket or pipe reports its hangup and error too, waking for one that
 arrives during the wait without spinning on a full buffer or a TCP half-close
 (#2779). A pipe or named FIFO is never POLLPRI, POLLRDBAND, POLLWRBAND or
