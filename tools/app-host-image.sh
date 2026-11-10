@@ -7,18 +7,24 @@
 # Usage: tools/app-host-image.sh [DERIVED_ROOT [OUT]]
 #   DERIVED_ROOT  default: target/aim/derived/root
 #   OUT           default: target/aim/app-host/root (replaced)
+# The image's translation cache (docs/storage.md) goes beside OUT, as the
+# derived image's is beside its root: a clone of it, indexed for OUT's
+# files and with the agent translated.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 derived="${1:-$root/target/aim/derived/root}"
 out="${2:-$root/target/aim/app-host/root}"
 agent="$root/target/aim/daemons/bin/aim-app-host-agent"
-[[ -d "$derived" && -x "$agent" ]] || {
-  echo "app-host-image needs the derived image and daemon/aim-app-host-agent (cargo aim build)" >&2; exit 2;
+translate="$root/target/release/linux-translate"
+translated="$(dirname "$derived")/translated"
+[[ -d "$derived" && -d "$translated" && -x "$agent" && -x "$translate" ]] || {
+  echo "app-host-image needs the derived image with its translation cache, daemon/aim-app-host-agent and host/linux-translate (cargo aim build)" >&2; exit 2;
 }
-rm -rf "$out"
+rm -rf "$out" "$(dirname "$out")/translated"
 mkdir -p "$(dirname "$out")"
 cp -c -R "$derived" "$out"
+cp -c -R "$translated" "$(dirname "$out")/translated"
 zygote="$out/system/etc/init/hw/init.zygote64.rc"
 grep -q -- ' --start-system-server' "$zygote" || { echo "$zygote: no --start-system-server" >&2; exit 1; }
 sed -i '' 's/ --start-system-server//' "$zygote"
@@ -33,4 +39,5 @@ cp "$root/image/app-host/services" "$out/system/etc/aim/app-host-services"
 printf 'activity         com.android.server.am.ActivityManagerService$Lifecycle\n' >> "$out/system/etc/aim/native-services"
 # The native package boot the app host runs (#2022).
 printf 'package          com.android.server.pm.PackageManagerService\n' >> "$out/system/etc/aim/native-services"
+"$translate" --image "$(dirname "$out")" > /dev/null
 echo "$out"

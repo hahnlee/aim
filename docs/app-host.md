@@ -127,7 +127,7 @@ Mac window of its own. By hand:
 
 ```
 cargo aim build
-tools/app-host-image.sh                 # target/aim/app-host/root
+tools/app-host-image.sh                 # target/aim/app-host/{root,translated}
 guest-init --image target/aim/app-host/root --data <data> --run \
     --only "$(grep -v '^#' image/app-host/services | paste -sd, -)" \
     [--gpu ... --vulkan ... --display ...]
