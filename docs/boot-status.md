@@ -138,8 +138,11 @@ F_SETSIG or F_SETFL in either reaches both; each event is signalled once, by
 the process holding a POSIX record lock on that file, and another takes the
 lock once that process stops watching (clears O_ASYNC, hands the owner to
 Darwin), closes the file or exits; changes to the record hold a second lock
-on it, so concurrent ones from two processes are not lost (#2861). An evdev
-signals its owner the same way, POLL_IN on events and POLL_HUP when the device goes, and a
+on it, so concurrent ones from two processes are not lost (#2861). An exec
+that runs linux-run again carries the record and the registration of each fd
+it keeps (an exec in place keeps them anyway); SCM_RIGHTS does not carry them
+yet, so a receiver sees no owner and no F_SETSIG (#2878). An evdev signals its
+owner the same way, POLL_IN on events and POLL_HUP when the device goes, and a
 pty POLL_IN on input and POLL_OUT on write space; a pty's O_ASYNC is its
 description's in the pty keeper, and both keep every owner in the layer
 (#2877). A fork child

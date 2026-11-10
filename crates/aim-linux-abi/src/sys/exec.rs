@@ -96,6 +96,8 @@ pub struct ExecState {
     /// The armed interval timers (`itimer::exec_text`).
     pub itimers: String,
     pub regular_fds: String,
+    /// The owners of O_ASYNC files kept in the layer (`fasync::exec_text`).
+    pub fasync: String,
     pub close_receipt: Option<i32>,
 }
 
@@ -134,6 +136,8 @@ impl ExecState {
         super::itimer::exec_restore(&self.itimers);
         super::fdtab::restore_regular_exec(&self.regular_fds)
             .map_err(|error| format!("regular exec inheritance: errno {error}"))?;
+        super::fasync::exec_restore(&self.fasync)
+            .map_err(|error| format!("O_ASYNC owner inheritance: errno {error}"))?;
         Ok(())
     }
 
@@ -158,6 +162,7 @@ impl ExecState {
             itimers: super::itimer::exec_text(),
             // Descriptor receipts are captured under the final exec admission.
             regular_fds: String::new(),
+            fasync: String::new(),
             close_receipt: None,
         }
     }
@@ -580,6 +585,16 @@ fn relaunch(program: &str, argv: &[CString], envp: &[CString], execfn: &[u8]) ->
     if !regular.is_empty() {
         options.extend([arg("--regular-fds"), arg(regular)]);
     }
+    let (fasync, records) = match super::fasync::exec_text() {
+        Ok(text) => text,
+        Err(error) => {
+            drop(guard);
+            return -(error as i64);
+        }
+    };
+    if !fasync.is_empty() {
+        options.extend([arg("--fasync"), arg(fasync)]);
+    }
     if let Some(receipt) = &receipt {
         options.extend([arg("--exec-close-receipt"), arg(receipt.fd().to_string())]);
     }
@@ -614,6 +629,7 @@ fn relaunch(program: &str, argv: &[CString], envp: &[CString], execfn: &[u8]) ->
     drop(guard);
     drop(cloexec_flags);
     drop(writer_flags);
+    drop(records);
     drop(receipt);
     -(error as i64)
 }

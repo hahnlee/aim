@@ -236,6 +236,7 @@ fn main() {
                         })
             }
             "--regular-fds" => state.regular_fds = value().to_string_lossy().into_owned(),
+            "--fasync" => state.fasync = value().to_string_lossy().into_owned(),
             "--exec-close-receipt" => {
                 let fd = value()
                     .to_string_lossy()
