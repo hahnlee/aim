@@ -384,9 +384,9 @@ impl AppWidgetService {
         };
         if self.flag(REMOTE_VIEWS_PROTO)? {
             // `loadGeneratedPreviewCategoriesLocked`, its directory made
-            // by `getWidgetPreviewsDirectory`.
+            // by `getWidgetPreviewsDirectory` (`File.mkdirs`).
             let previews = data.join(format!("system_ce/{user}/appwidget/previews"));
-            if let Err(e) = std::fs::create_dir_all(&previews) {
+            if let Err(e) = super::usage_database::mkdirs(&previews) {
                 eprintln!("app host: appwidget: Failed to read preview categories: {e}");
             }
             for p in &group.providers {
@@ -1323,6 +1323,34 @@ mod tests {
             service.with_group(0, |_| Ok(())).unwrap();
             assert!(service.group.lock().unwrap().is_some());
         });
+    }
+
+    /// `getWidgetPreviewsDirectory`: `appwidget/previews` in CE storage,
+    /// made by `File.mkdirs` as the system (umask 077).
+    #[test]
+    fn widget_previews_directory_is_the_systems() {
+        crate::system::with_discovery_binders_flags(
+            &[(REMOTE_VIEWS_PROTO, true)],
+            true,
+            |host, _, _, _| {
+                let service = AppWidgetService::new(host.clone());
+                host.set_user_unlocked_for_package_test(0, true);
+                service.with_group(0, |_| Ok(())).unwrap();
+                let appwidget = host.data().unwrap().join("system_ce/0/appwidget");
+                for dir in [appwidget.clone(), appwidget.join("previews")] {
+                    assert_eq!(
+                        aim_storage::guest_inode::read(&dir).unwrap(),
+                        Some(aim_storage::guest_inode::GuestInode {
+                            uid: Some(1000),
+                            gid: Some(1000),
+                            mode: Some(0o700),
+                        }),
+                        "{}",
+                        dir.display()
+                    );
+                }
+            },
+        );
     }
 
     /// AppWidgetServiceImpl's package receiver updates the loaded providers

@@ -386,5 +386,29 @@ fn publisher_calls_wait_for_the_users_unlock() {
         service.with_user(|_| Ok(())).unwrap();
         assert!(dir.join("shortcuts.xml").exists());
         reset_time().unwrap();
+        // `File.mkdirs` as the system (umask 077); each `ResilientAtomicFile`
+        // and its reserve copy of ShortcutService's file mode.
+        let system = |mode| {
+            Some(aim_storage::guest_inode::GuestInode {
+                uid: Some(1000),
+                gid: Some(1000),
+                mode: Some(mode),
+            })
+        };
+        let base = host.data().unwrap().join("system/shortcut_service.xml");
+        for (path, mode) in [
+            (dir.clone(), 0o700),
+            (dir.join("shortcuts.xml"), 0o771),
+            (dir.join("shortcuts.xml.reservecopy"), 0o771),
+            (base.clone(), 0o771),
+            (base.with_extension("xml.reservecopy"), 0o771),
+        ] {
+            assert_eq!(
+                aim_storage::guest_inode::read(&path).unwrap(),
+                system(mode),
+                "{}",
+                path.display()
+            );
+        }
     });
 }

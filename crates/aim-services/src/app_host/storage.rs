@@ -1188,9 +1188,18 @@ impl AppHost {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as i64),
             Err(_) => {
-                if let Err(e) =
-                    std::fs::File::create(&file).and_then(|_| aim_storage::fscrypt::adopt(&file))
-                {
+                // `new FileOutputStream(...)` as the system, umask 077.
+                let created = std::fs::File::create(&file).and_then(|_| {
+                    aim_storage::guest_inode::record(
+                        &file,
+                        aim_storage::guest_inode::GuestInode {
+                            uid: Some(1000),
+                            gid: Some(1000),
+                            mode: Some(0o600),
+                        },
+                    )
+                });
+                if let Err(e) = created {
                     eprintln!(
                         "app host: mount: Unable to create fstrim record {}: {e}",
                         file.display()
@@ -1846,6 +1855,26 @@ impl Service for TrimListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `getLastMaintenance` of no record: an empty `last-fstrim`, the
+    /// system's under its umask (077).
+    #[test]
+    fn a_missing_fstrim_record_is_made_the_systems() {
+        let data = super::super::test_temp_dir("storage-last-fstrim");
+        std::fs::create_dir_all(data.join("system")).unwrap();
+        let host = AppHost::new(crate::test_process(1000));
+        super::super::configure_test_host(&host, &data, &data, &data, Box::new(|_| None));
+        assert_eq!(host.last_maintenance().unwrap(), 0);
+        assert_eq!(
+            aim_storage::guest_inode::read(&data.join(LAST_FSTRIM_FILE)).unwrap(),
+            Some(aim_storage::guest_inode::GuestInode {
+                uid: Some(1000),
+                gid: Some(1000),
+                mode: Some(0o600),
+            })
+        );
+        std::fs::remove_dir_all(data).unwrap();
+    }
 
     #[test]
     fn storage_read_errors_name_guest_files_in_the_exception_and_cause() {

@@ -1139,7 +1139,7 @@ impl Package {
         } else {
             std::slice::from_ref(&self.root)
         };
-        write_resilient(&self.file, roots, 0o600)
+        write_resilient(&self.file, roots, FILE_MODE)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", self.file.display())))
     }
 
@@ -1497,10 +1497,16 @@ fn read_resilient(file: &Path) -> Result<Option<Element>, String> {
     }
 }
 
-/// `ResilientAtomicFile.finishWrite`: the file, then its reserve copy, as
-/// the system's, of `mode`.
+/// The `fileMode` ShortcutService gives each `ResilientAtomicFile`
+/// (`S_IRWXU | S_IRWXG | S_IXOTH`).
+const FILE_MODE: u32 = 0o771;
+
+/// `ResilientAtomicFile.startWrite`, its parent made as `File.mkdirs`
+/// makes it, then `finishWrite`: the file, then its reserve copy, as the
+/// system's, of `mode`.
 pub(super) fn write_resilient(file: &Path, roots: &[Element], mode: u32) -> std::io::Result<()> {
     let bytes = aim_android_xml::abx::write_sequence(roots).map_err(std::io::Error::other)?;
+    super::usage_database::mkdirs(file.parent().unwrap())?;
     let mut reserve = file.as_os_str().to_owned();
     reserve.push(".reservecopy");
     for path in [file.to_path_buf(), PathBuf::from(reserve)] {
@@ -2351,9 +2357,7 @@ impl ShortcutManager {
         user.root
             .attrs
             .push(("last-app-scan-fp".into(), Xml::String(fingerprint)));
-        std::fs::create_dir_all(user.file.parent().unwrap())
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e.to_string()))?;
-        write_resilient(&user.file, std::slice::from_ref(&user.root), 0o600)
+        write_resilient(&user.file, std::slice::from_ref(&user.root), FILE_MODE)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", user.file.display())))
     }
 
@@ -2538,8 +2542,6 @@ impl ShortcutManager {
                 ("allow-backup-initialized".into(), Xml::Bool(true)),
             ]);
         }
-        std::fs::create_dir_all(p.file.parent().unwrap())
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e.to_string()))?;
         p.save()?;
         user.packages.insert(name.clone(), p);
         Ok(())
@@ -2585,7 +2587,7 @@ impl ShortcutManager {
                 attrs: Vec::new(),
                 content: vec![Node::Element(value)],
             };
-            write_resilient(&file, &[root], 0o600).map_err(|e| {
+            write_resilient(&file, &[root], FILE_MODE).map_err(|e| {
                 Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", file.display()))
             })?;
         }
