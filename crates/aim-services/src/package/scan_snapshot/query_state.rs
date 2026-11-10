@@ -1585,7 +1585,7 @@ fn package(
         runtime,
         code.map(Arc::as_ref),
         stored,
-        owner
+        snapshot
             .install_permissions_fixed(&s.name, factory)?
             .ok_or("missing query install permission owner")?,
         owner
