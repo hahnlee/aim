@@ -2148,14 +2148,19 @@ mod tests {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped());
         use std::os::unix::process::CommandExt;
-        // Block before exec so every libtest thread inherits the wait set.
+        // Block before exec so every libtest thread inherits the wait set,
+        // with the default actions: Darwin discards a blocked signal whose
+        // action is SIG_IGN (as `nohup` leaves SIGHUP).
         unsafe {
             command.pre_exec(|| {
                 let mut mask: libc::sigset_t = std::mem::zeroed();
                 libc::sigemptyset(&mut mask);
                 libc::sigaddset(&mut mask, libc::SIGHUP);
                 libc::sigaddset(&mut mask, libc::SIGCONT);
-                if libc::sigprocmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut()) < 0 {
+                if libc::sigprocmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut()) < 0
+                    || libc::signal(libc::SIGHUP, libc::SIG_DFL) == libc::SIG_ERR
+                    || libc::signal(libc::SIGCONT, libc::SIG_DFL) == libc::SIG_ERR
+                {
                     Err(io::Error::last_os_error())
                 } else {
                     Ok(())
