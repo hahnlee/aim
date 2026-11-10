@@ -4567,6 +4567,25 @@ pub(super) mod tests {
         });
     }
 
+    /// The fullscreen root home task brought to the front in window mode
+    /// is the Mac desktop: the focused app's tasks go behind it, but
+    /// another app's task stays visible, as its Mac window does.
+    #[test]
+    fn the_root_home_task_in_front_hides_only_the_focused_app() {
+        use super::super::activity_stack::Visibility;
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            enable_freeform(host);
+            let (_thread, _, _receive, _) = wct_tasks(host, export, Rect::default());
+            let (home, _) = home_task(host);
+            let mut stack = host.activities.stack.lock().unwrap();
+            stack.tasks.iter_mut().find(|t| t.id == 8).unwrap().package = "q".into();
+            stack.bring_to_front(7);
+            stack.bring_to_front(home);
+            assert_eq!(stack.visibility(7), Visibility::Invisible);
+            assert_eq!(stack.visibility(8), Visibility::Visible);
+        });
+    }
+
     /// A reused root task whose mode changes takes the launch bounds in the
     /// same change: its Mac window moves once, to them.
     #[test]
