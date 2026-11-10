@@ -29,7 +29,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::slice;
-use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak, mpsc};
 use std::time::{Duration, Instant};
 
 use aim_binder_host::local::{Call, Strong};
@@ -59,6 +59,7 @@ const RECEIVER_EXPORTED: i32 = 0x2;
 const RECEIVER_NOT_EXPORTED: i32 = 0x4;
 /// `Intent.FLAG_RECEIVER_*`, `EXTENDED_FLAG_FILTER_MISMATCH`.
 const FLAG_RECEIVER_REGISTERED_ONLY: i32 = 0x4000_0000;
+const FLAG_RECEIVER_REPLACE_PENDING: i32 = 0x2000_0000;
 const FLAG_RECEIVER_NO_ABORT: i32 = 0x0800_0000;
 const FLAG_RECEIVER_BOOT_UPGRADE: i32 = 0x0200_0000;
 const FLAG_RECEIVER_INCLUDE_BACKGROUND: i32 = 0x0100_0000;
@@ -200,9 +201,19 @@ struct Record {
     temp_allowlist: Option<TempAllowlist>,
     /// `BroadcastRecord.isUrgent`.
     urgent: bool,
+    /// `BroadcastRecord.receivers`, as `isReceiverEquals` tells them
+    /// apart: set when enqueued to them, not one at a time in a chain.
+    receivers: OnceLock<Vec<ReceiverId>>,
 }
 
 impl Record {
+    /// `isReplacePending` without a delivery group policy of its sender's
+    /// (`BroadcastProcessQueue.enqueueOrReplaceBroadcast`).
+    fn replaces_pending(&self) -> bool {
+        self.intent.intent.flags & FLAG_RECEIVER_REPLACE_PENDING != 0
+            && self.sender.delivery_group.is_none()
+    }
+
     /// `BroadcastRecord.timeoutExempt`: PRE_BOOT_COMPLETED's receivers
     /// take as long as they need (`BroadcastController.broadcastIntentLocked`).
     fn timeout_exempt(&self) -> bool {
@@ -256,7 +267,26 @@ enum Target {
     Manifest(Arc<Manifest>),
 }
 
+/// A receiver by `BroadcastRecord.isReceiverEquals`: a registered one by
+/// its registration (its binder's, and which of its filters), a manifest
+/// one by its component.
+#[derive(Debug, PartialEq)]
+enum ReceiverId {
+    Registered(u32, usize),
+    Manifest(Option<String>, Option<String>),
+}
+
 impl Target {
+    fn id(&self) -> ReceiverId {
+        match self {
+            Target::Registered(r) => ReceiverId::Registered(r.handle, r.filter),
+            Target::Manifest(m) => {
+                let item = &m.info.info.item;
+                ReceiverId::Manifest(item.package_name.clone(), item.name.clone())
+            }
+        }
+    }
+
     /// `BroadcastRecord.getReceiverPriority`.
     fn priority(&self) -> i32 {
         match self {
@@ -518,7 +548,7 @@ fn next_to_run(
 #[derive(Default)]
 pub struct Broadcasts {
     state: Mutex<State>,
-    limits: std::sync::OnceLock<Limits>,
+    limits: OnceLock<Limits>,
     changed: Condvar,
     /// The worker that fires the delivery timeouts once due.
     timer: Mutex<Option<mpsc::Sender<Started>>>,
@@ -561,6 +591,70 @@ impl State {
             Delivery::Once(r, _, at) | Delivery::Manifest(r, _, _, at) => Some((r.enqueue_id, *at)),
             Delivery::Chained(id, _, at) => self.chains.get(id).map(|c| (c.record.enqueue_id, *at)),
         }
+    }
+
+    /// `allReceiversPending` of an unchained `record`: none of its
+    /// receivers sent it or skipped, each still queued and not sent.
+    fn all_pending(&self, record: &Arc<Record>) -> bool {
+        let Some(receivers) = record.receivers.get() else {
+            return false;
+        };
+        let mut pending = vec![false; receivers.len()];
+        let warm = self
+            .queues
+            .iter()
+            .flat_map(|(seq, q)| q.iter().skip(usize::from(self.busy.contains(seq))));
+        for d in warm.chain(self.cold.iter().flat_map(|c| &c.deliveries)) {
+            if let Delivery::Once(r, _, at) | Delivery::Manifest(r, _, None, at) = d
+                && Arc::ptr_eq(r, record)
+            {
+                pending[*at] = true;
+            }
+        }
+        pending.into_iter().all(|p| p)
+    }
+
+    /// `replaceBroadcastInQueue`: of `queue`, newest first, the position of
+    /// the delivery `new` replaces in place, if any: the same receiver's of
+    /// a filter-equal broadcast from the same sender and user to the same
+    /// receivers, all pending (or `replaced` already by `new`'s broadcast,
+    /// pending as it was). One of `new`'s own broadcast ends the search, as
+    /// a replacement past it would invert their order.
+    fn replace_pending(
+        &self,
+        queue: &VecDeque<Delivery>,
+        new: &Delivery,
+        replaced: &[Arc<Record>],
+    ) -> Option<usize> {
+        let (Delivery::Once(record, _, at) | Delivery::Manifest(record, _, None, at)) = new else {
+            return None;
+        };
+        let receivers = record.receivers.get()?;
+        if !record.replaces_pending() {
+            return None;
+        }
+        for (i, d) in queue.iter().enumerate().rev() {
+            if self
+                .receiver(d)
+                .is_some_and(|(id, _)| id == record.enqueue_id)
+            {
+                return None;
+            }
+            let (Delivery::Once(old, _, old_at) | Delivery::Manifest(old, _, None, old_at)) = d
+            else {
+                continue;
+            };
+            if old.sender.uid == record.sender.uid
+                && old.user == record.user
+                && filter_equals(&old.intent.intent, &record.intent.intent)
+                && old.receivers.get() == Some(receivers)
+                && receivers[*old_at] == receivers[*at]
+                && (replaced.iter().any(|r| Arc::ptr_eq(r, old)) || self.all_pending(old))
+            {
+                return Some(i);
+            }
+        }
+        None
     }
 
     /// `isBlocked`: whether `d` waits for receivers of its broadcast before
@@ -1166,6 +1260,7 @@ impl Broadcasts {
                     id_for_response_event: 0,
                     temp_allowlist: None,
                     urgent: urgent(r.intent.intent.flags, 0),
+                    receivers: OnceLock::new(),
                 };
                 st.queues
                     .entry(start_seq)
@@ -1528,6 +1623,7 @@ impl Broadcasts {
                 kind: options.temporary_allowlist_type,
                 reason: options.temporary_allowlist_reason,
             }),
+            receivers: OnceLock::new(),
         });
         if args.sticky {
             if !host.check_component_permission(Some(BROADCAST_STICKY), calling_uid, -1, true)? {
@@ -1930,6 +2026,7 @@ impl Broadcasts {
             result_extras: None,
             id_for_response_event: 0,
             temp_allowlist,
+            receivers: OnceLock::new(),
         });
         let i = &record.intent.intent;
         let allowed = |uid: i32| {
@@ -2267,14 +2364,54 @@ impl Broadcasts {
         }
     }
 
-    /// Puts `delivery` on the queue it goes to, which becomes runnable.
+    /// Puts `delivery` on the queue it goes to, which becomes runnable: in
+    /// place of a pending one it replaces, whose broadcast it returns.
     fn queue_delivery(
         &self,
         st: &mut State,
         to: QueueId,
         m: Option<&Manifest>,
         delivery: Delivery,
-    ) {
+    ) -> Option<Arc<Record>> {
+        self.enqueue_or_replace(st, to, m, delivery, &[])
+    }
+
+    /// `enqueueOrReplaceBroadcast`: [`Self::queue_delivery`], with the
+    /// broadcasts that the broadcast of `delivery` already `replaced` for
+    /// its other receivers.
+    fn enqueue_or_replace(
+        &self,
+        st: &mut State,
+        to: QueueId,
+        m: Option<&Manifest>,
+        delivery: Delivery,
+        replaced: &[Arc<Record>],
+    ) -> Option<Arc<Record>> {
+        let queue = match &to {
+            QueueId::Warm(seq) => st.queues.get(seq),
+            QueueId::Cold(process, uid) => st
+                .cold
+                .iter()
+                .find(|c| &c.process == process && c.uid == *uid)
+                .map(|c| &c.deliveries),
+        };
+        if let Some(at) = queue.and_then(|q| st.replace_pending(q, &delivery, replaced)) {
+            let queue = match &to {
+                QueueId::Warm(seq) => st.queues.get_mut(seq),
+                QueueId::Cold(process, uid) => st
+                    .cold
+                    .iter_mut()
+                    .find(|c| &c.process == process && c.uid == *uid)
+                    .map(|c| &mut c.deliveries),
+            };
+            let old = std::mem::replace(&mut queue.unwrap()[at], delivery);
+            Self::delivered(st, &old);
+            Self::make_runnable(st, to);
+            let (Delivery::Once(record, ..) | Delivery::Manifest(record, ..)) = old else {
+                unreachable!()
+            };
+            return Some(record);
+        }
         let push = |queue: &mut VecDeque<Delivery>, delivery: Delivery| {
             // DELIVERY_GROUP_POLICY_MOST_RECENT, per receiver: the replaced
             // are skipped. Already sent deliveries are absent from these
@@ -2309,6 +2446,7 @@ impl Broadcasts {
             Self::delivered(st, &old);
         }
         Self::make_runnable(st, to);
+        None
     }
 
     /// `updateRunnableList`: the queue waits its turn, unless it runs or
@@ -2564,22 +2702,64 @@ impl Broadcasts {
     /// Queues `record` to each of `targets`, assumed delivered to the
     /// registered ones, and sends each process what it has next.
     fn enqueue(&self, host: &AppHost, st: &mut State, record: &Arc<Record>, targets: Vec<Target>) {
+        let receivers = targets.iter().map(Target::id).collect();
+        if record.receivers.set(receivers).is_err() {
+            unreachable!("a broadcast is enqueued once");
+        }
+        let mut replaced = Vec::new();
         for (at, target) in targets.into_iter().enumerate() {
-            match target {
-                Target::Registered(r) => self.queue_delivery(
+            let old = match target {
+                Target::Registered(r) => self.enqueue_or_replace(
                     st,
                     QueueId::Warm(r.start_seq),
                     None,
                     Delivery::Once(record.clone(), r, at),
+                    &replaced,
                 ),
                 Target::Manifest(m) => {
                     let to = self.manifest_queue(host, &m);
                     let delivery = Delivery::Manifest(record.clone(), m.clone(), None, at);
-                    self.queue_delivery(st, to, Some(&m), delivery);
+                    self.enqueue_or_replace(st, to, Some(&m), delivery, &replaced)
                 }
-            }
+            };
+            replaced.extend(old.filter(|old| !replaced.iter().any(|r| Arc::ptr_eq(r, old))));
         }
+        Self::skip_replaced(st, &replaced);
         self.update_running(host, st);
+    }
+
+    /// `skipAndCancelReplacedBroadcasts`: the replaced broadcasts' other
+    /// receivers, all pending, are skipped.
+    fn skip_replaced(st: &mut State, replaced: &[Arc<Record>]) {
+        if replaced.is_empty() {
+            return;
+        }
+        let of_replaced = |d: &Delivery| match d {
+            Delivery::Once(r, ..) | Delivery::Manifest(r, _, None, _) => {
+                replaced.iter().any(|old| Arc::ptr_eq(old, r))
+            }
+            _ => false,
+        };
+        let mut skipped = Vec::new();
+        let queues = st.queues.values_mut();
+        for queue in queues.chain(st.cold.iter_mut().map(|c| &mut c.deliveries)) {
+            let (out, kept): (VecDeque<_>, _) =
+                std::mem::take(queue).into_iter().partition(&of_replaced);
+            *queue = kept;
+            skipped.extend(out);
+        }
+        // A process left nothing to deliver is not started for it.
+        st.cold.retain(|c| !c.deliveries.is_empty());
+        let State { runnable, cold, .. } = st;
+        runnable.retain(|q| match q {
+            QueueId::Warm(_) => true,
+            QueueId::Cold(process, uid) => {
+                cold.iter().any(|c| &c.process == process && c.uid == *uid)
+            }
+        });
+        for d in skipped {
+            Self::delivered(st, &d);
+        }
     }
 
     /// Keeps the tranches of `record` to `targets` if it is prioritized
@@ -2733,6 +2913,7 @@ impl Broadcasts {
             id_for_response_event: 0,
             temp_allowlist: None,
             urgent: urgent(flags, 0),
+            receivers: OnceLock::new(),
         });
         {
             let mut st = self.state.lock().unwrap();
@@ -3974,6 +4155,162 @@ mod wait_tests {
         ));
     }
 
+    /// A broadcast not ordered of action `a` and data `data`, its extra
+    /// `n`, flagged `flags`, to registered receivers `handles`.
+    fn replacing(id: u64, data: &str, n: i32, flags: i32, handles: &[u32]) -> Arc<Record> {
+        let mut r = record(id);
+        let r_mut = Arc::get_mut(&mut r).unwrap();
+        r_mut.ordered = false;
+        r_mut.intent = RawIntent::with_data(
+            Some("a"),
+            Some(&crate::package::uri::Uri::parse(data)),
+            None,
+            flags,
+            &[("n", Value::Int(n))],
+        );
+        let ids = handles
+            .iter()
+            .map(|h| ReceiverId::Registered(*h, 0))
+            .collect();
+        r_mut.receivers.set(ids).unwrap();
+        r
+    }
+
+    fn queued(state: &State, seq: i64) -> Vec<u64> {
+        state.queues[&seq]
+            .iter()
+            .map(|d| state.receiver(d).unwrap().0)
+            .collect()
+    }
+
+    #[test]
+    fn replace_pending_replaces_a_pending_filter_equal_broadcast_in_place() {
+        let broadcasts = Broadcasts::default();
+        let mut state = State::default();
+        const P: i32 = FLAG_RECEIVER_REPLACE_PENDING;
+        // The receiver's process is busy with the first, sent already.
+        state.busy.insert(1);
+        for (id, data, n, flags) in [
+            (1, "content://x", 0, P),
+            (2, "content://x", 1, P),
+            (3, "content://y", 0, P),
+            (4, "content://x", 0, 0),
+            (5, "content://x", 2, P), // extras differ: still filter-equal
+            (6, "content://y", 0, 0),
+        ] {
+            let replaced = broadcasts.queue_delivery(
+                &mut state,
+                QueueId::Warm(1),
+                None,
+                Delivery::Once(replacing(id, data, n, flags, &[1]), registered(1), 0),
+            );
+            assert_eq!(replaced.map(|r| r.enqueue_id), (id == 5).then_some(4));
+        }
+        // 5 took 4's place, the newest filter-equal pending; 2 stays, as do
+        // the sent 1 and those of other data.
+        assert_eq!(queued(&state, 1), [1, 2, 3, 5, 6]);
+        let replaced = broadcasts.queue_delivery(
+            &mut state,
+            QueueId::Warm(1),
+            None,
+            Delivery::Once(replacing(7, "content://y", 0, 0, &[1]), registered(1), 0),
+        );
+        assert!(replaced.is_none());
+        assert_eq!(queued(&state, 1), [1, 2, 3, 5, 6, 7]);
+    }
+
+    #[test]
+    fn replace_pending_needs_the_same_receivers_all_pending() {
+        let broadcasts = Broadcasts::default();
+        let mut state = State::default();
+        const P: i32 = FLAG_RECEIVER_REPLACE_PENDING;
+        let mut second = registered(2);
+        second.handle = 2;
+        // 1 went to receiver 2, its process busy with it, and waits for 1.
+        let sent = replacing(1, "content://x", 0, P, &[1, 2]);
+        state.busy.insert(2);
+        state
+            .queues
+            .insert(2, VecDeque::from([Delivery::Once(sent.clone(), second, 1)]));
+        state
+            .queues
+            .insert(1, VecDeque::from([Delivery::Once(sent, registered(1), 0)]));
+        // 2 goes to receiver 1 alone.
+        let only = replacing(2, "content://x", 0, P, &[1]);
+        let replaced = broadcasts.queue_delivery(
+            &mut state,
+            QueueId::Warm(1),
+            None,
+            Delivery::Once(only, registered(1), 0),
+        );
+        assert!(replaced.is_none());
+        let both = replacing(3, "content://x", 0, P, &[1, 2]);
+        let replaced = broadcasts.queue_delivery(
+            &mut state,
+            QueueId::Warm(1),
+            None,
+            Delivery::Once(both.clone(), registered(1), 0),
+        );
+        assert!(replaced.is_none());
+        assert_eq!(queued(&state, 1), [1, 2, 3]);
+
+        // Of one all pending, each receiver's delivery is replaced, and
+        // what the replacement does not reach is skipped.
+        let mut state = State::default();
+        let old = replacing(1, "content://x", 0, P, &[1, 2]);
+        state.queues.insert(
+            1,
+            VecDeque::from([Delivery::Once(old.clone(), registered(1), 0)]),
+        );
+        state
+            .queues
+            .insert(2, VecDeque::from([Delivery::Once(old, second, 1)]));
+        let new = replacing(2, "content://x", 0, P, &[1, 2]);
+        let replaced = broadcasts
+            .queue_delivery(
+                &mut state,
+                QueueId::Warm(1),
+                None,
+                Delivery::Once(new, registered(1), 0),
+            )
+            .unwrap();
+        assert_eq!(queued(&state, 1), [2]);
+        Broadcasts::skip_replaced(&mut state, &[replaced]);
+        assert!(state.queues[&2].is_empty());
+
+        // Its next receiver's is replaced in place too, though the first
+        // one's no longer pends.
+        let mut state = State::default();
+        let old = replacing(1, "content://x", 0, P, &[1, 2]);
+        let later = replacing(2, "content://z", 0, 0, &[2]);
+        state.queues.insert(
+            1,
+            VecDeque::from([Delivery::Once(old.clone(), registered(1), 0)]),
+        );
+        state.queues.insert(
+            2,
+            VecDeque::from([
+                Delivery::Once(old, second, 1),
+                Delivery::Once(later, second, 0),
+            ]),
+        );
+        let new = replacing(3, "content://x", 0, P, &[1, 2]);
+        let mut replaced = Vec::new();
+        for (seq, to, at) in [(1, registered(1), 0), (2, second, 1)] {
+            let old = broadcasts.enqueue_or_replace(
+                &mut state,
+                QueueId::Warm(seq),
+                None,
+                Delivery::Once(new.clone(), to, at),
+                &replaced,
+            );
+            assert_eq!(old.as_ref().map(|r| r.enqueue_id), Some(1));
+            replaced.extend(old);
+        }
+        assert_eq!(queued(&state, 1), [3]);
+        assert_eq!(queued(&state, 2), [3, 2]);
+    }
+
     fn record(enqueue_id: u64) -> Arc<Record> {
         Arc::new(Record {
             enqueue_id,
@@ -3990,6 +4327,7 @@ mod wait_tests {
             id_for_response_event: 0,
             temp_allowlist: None,
             urgent: false,
+            receivers: OnceLock::new(),
         })
     }
     fn registered(start_seq: i64) -> Registered {
