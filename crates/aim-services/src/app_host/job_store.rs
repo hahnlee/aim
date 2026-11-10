@@ -320,7 +320,7 @@ fn restore_job(
             job.extras
                 .entries
                 .iter()
-                .find(|(n, _)| n.as_deref() == Some(k))
+                .find(|(n, _)| n.as_ref().is_some_and(|n| *n == *k))
                 .map(|(_, v)| v)
         };
         if matches!(
@@ -328,7 +328,7 @@ fn restore_job(
             Some(persistable::Value::Bool(true))
         ) && let Some(persistable::Value::String(owner)) = entry("owningPackage")
         {
-            source_package = Some(owner.clone());
+            source_package = Some(owner.to_rust()?);
         }
     }
     Ok(Stored {

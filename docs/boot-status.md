@@ -4453,8 +4453,13 @@ Native enabled-state persistence preserves text CDATA extras across an ABX
 write and reread. XML document identity compares floating-point payload bits,
 allowing unchanged NaNs and rejecting external signed-zero changes. All 386
 units pass (3.14s), as do 11 XML units; the ignored
-integration test was not run. Unpaired UTF-16 string code units remain
-unsupported (#843). A private snapshot lease now carries persisted and runtime user-state
+integration test was not run. Binary XML strings decode as ART's JNI
+`NewStringUTF` does (to the first zero byte, sequences sized by the lead byte,
+a cut-short tail as '?') and encode as `GetStringUTFRegion`; a string with an
+unpaired surrogate is an explicit error in ordinary reads and a `JavaString`
+in `read_next_lossless`, which PersistableBundle keys, strings and string
+arrays carry to XML and Parcel. Package-restrictions reads, Parcel reads and
+the other XML owners still reject such strings (#843). A private snapshot lease now carries persisted and runtime user-state
 inputs through generated AIDL methods 9/10 in 64 KiB chunks, with active/factory
 scope and user ID pinned to its captured version. The real Binder test retains
 a large old user state after publication and rejects invalid request ranges.
@@ -6480,7 +6485,7 @@ The first expanded oracle exposed ART's four-byte supplementary ABX strings.
 Native ABX now reads both those and legacy six-byte surrogate pairs, and writes the
 pinned ArtFastDataOutput form. Original ABX contains f0 9f 98 80 for the emoji;
 the full original oracle passes with those group states and exact Bundle replies
-(40.76s, no skips). Unpaired UTF-16 remains unsupported (#843). XML tests pass (15),
+(40.76s, no skips). XML tests pass (15),
 as do 488 service units (0.50s; five excluded by default) and the native publisher
 (0.89s), including unrestricted foreign-UID reads and trailing-input rejection.
 Original ART reads the actual native Bundle and all six filter values through its

@@ -3,15 +3,29 @@ import android.os.Parcel;
 import android.util.Xml;
 import com.android.server.pm.pkg.SuspendParams;
 import java.io.*;
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 public final class PersistableBundleOracle {
+    // UTF-16 units, so unpaired surrogates are compared as they are.
     private static void text(DataOutputStream out, String value) throws Exception {
         if (value == null) { out.writeInt(-1); return; }
-        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
-        out.writeInt(bytes.length);
-        out.write(bytes);
+        out.writeInt(value.length());
+        out.writeChars(value);
+    }
+    // saveToXml through the binary serializer, or nothing when it throws.
+    private static byte[] save(PersistableBundle bundle) {
+        var bytes = new ByteArrayOutputStream();
+        try {
+            var serializer = Xml.resolveSerializer(bytes);
+            serializer.startDocument(null, true);
+            serializer.startTag(null, "app-extras");
+            bundle.saveToXml(serializer);
+            serializer.endTag(null, "app-extras");
+            serializer.endDocument();
+            return bytes.toByteArray();
+        } catch (Exception error) {
+            return new byte[0];
+        }
     }
     private static void bundle(DataOutputStream out, PersistableBundle bundle) throws Exception {
         if (bundle == null) { out.writeInt(-1); return; }
@@ -67,6 +81,7 @@ public final class PersistableBundleOracle {
                     var bundle = PersistableBundle.restoreFromXml(parser);
                     out.writeByte(0);
                     bundle(out, bundle);
+                    java.nio.file.Files.write(java.nio.file.Path.of(args[0], "extras-" + i + ".abx"), save(bundle));
                 }
             } catch (Exception error) {
                 bytes.reset();

@@ -109,7 +109,7 @@ impl<'a> Reader<'a> {
             return Err("document capture has not reached root end or EOF".into());
         }
         if let Some(root) = &mut document.root {
-            crate::normalize_next(root, matches!(self.input, Input::Binary(_)))?;
+            crate::normalize_next(root, matches!(self.input, Input::Binary(_)), false)?;
         }
         Ok(document.root)
     }
@@ -203,7 +203,9 @@ impl<'a> Reader<'a> {
     }
 }
 
-pub(crate) fn entity(name: &str) -> Result<String, String> {
+/// BinaryXmlPullParser.resolveEntity: a decimal reference is cast to one
+/// UTF-16 unit, which may be a lone surrogate.
+pub(crate) fn entity(name: &str) -> Result<crate::JavaString, String> {
     Ok(match name {
         "lt" => "<".into(),
         "gt" => ">".into(),
@@ -211,14 +213,12 @@ pub(crate) fn entity(name: &str) -> Result<String, String> {
         "apos" => "'".into(),
         "quot" => "\"".into(),
         _ => {
-            // BinaryXmlPullParser parses decimal references and casts to char.
             let value: i32 = name
                 .strip_prefix('#')
                 .ok_or_else(|| format!("ABX: unknown entity {name}"))?
                 .parse()
                 .map_err(|_| format!("ABX: unknown entity {name}"))?;
-            String::from_utf16(&[value as u16])
-                .map_err(|_| format!("ABX: unpaired entity surrogate {name}"))?
+            crate::JavaString::from_units(vec![value as u16])
         }
     })
 }

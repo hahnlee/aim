@@ -3,13 +3,12 @@
 //! type in the high nibble) and the token's data, big-endian. Element and
 //! attribute names, and values written with `attributeInterned`, are
 //! interned: a string's first use carries it and gets the next index,
-//! later uses carry the index. Strings have a 16-bit byte length and use
-//! ArtFastDataOutput's modified UTF-8, including four-byte supplementary
-//! characters; the reader also accepts legacy six-byte surrogate pairs.
+//! later uses carry the index. Strings have a 16-bit byte length and are
+//! Java strings in ART's JNI UTF-8 ([`decode_utf`], [`encode_utf`]).
 
 use std::collections::HashMap;
 
-use crate::{Element, Node, Value};
+use crate::{Element, JavaString, Node, Value};
 
 pub const MAGIC: &[u8] = b"ABX\0";
 
@@ -40,7 +39,10 @@ const NEW: u16 = u16::MAX;
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
-    interned: Vec<String>,
+    /// `Value::Interned` or `Value::InternedUtf16`.
+    interned: Vec<Value>,
+    /// Keep strings that are not well-formed UTF-16 as `Value::Utf16`.
+    lossless: bool,
 }
 
 impl Reader<'_> {
@@ -61,26 +63,65 @@ impl Reader<'_> {
         Ok(u16::from_be_bytes(self.take()?))
     }
 
-    fn utf(&mut self) -> Result<String, String> {
+    fn utf16(&mut self) -> Result<JavaString, String> {
         let len = self.u16()? as usize;
-        let at = self.at;
-        decode_utf(self.slice(len)?).ok_or_else(|| format!("ABX: bad string at {at}"))
+        Ok(JavaString::from_units(decode_utf(self.slice(len)?)))
     }
 
-    fn interned(&mut self) -> Result<String, String> {
-        match self.u16()? {
+    /// A string the model holds as a Rust `String`: names, and other strings
+    /// outside a lossless read.
+    fn utf(&mut self) -> Result<String, String> {
+        let at = self.at;
+        self.utf16()?
+            .to_rust()
+            .map_err(|e| format!("ABX: string at {at}: {e}"))
+    }
+
+    /// A `Value::String` or, in a lossless read, `Value::Utf16`.
+    fn string(&mut self) -> Result<Value, String> {
+        let at = self.at;
+        let value = self.utf16()?.value(false);
+        self.admit(at, value)
+    }
+
+    /// `value`, unless it is `Utf16` outside a lossless read.
+    fn admit(&self, at: usize, value: Value) -> Result<Value, String> {
+        match &value {
+            Value::Utf16(s) | Value::InternedUtf16(s) if !self.lossless => {
+                Err(format!("ABX: string at {at}: {}", s.to_rust().unwrap_err()))
+            }
+            _ => Ok(value),
+        }
+    }
+
+    fn interned_value(&mut self) -> Result<Value, String> {
+        let at = self.at;
+        let value = match self.u16()? {
             NEW => {
-                let s = self.utf()?;
+                let value = self.utf16()?.value(true);
                 if self.interned.len() < NEW as usize {
-                    self.interned.push(s.clone());
+                    self.interned.push(value.clone());
                 }
-                Ok(s)
+                value
             }
             i => self
                 .interned
                 .get(i as usize)
                 .cloned()
-                .ok_or_else(|| format!("ABX: no interned string {i}")),
+                .ok_or_else(|| format!("ABX: no interned string {i}"))?,
+        };
+        self.admit(at, value)
+    }
+
+    /// An interned name: always a Rust `String`.
+    fn interned(&mut self) -> Result<String, String> {
+        let at = self.at;
+        match self.interned_value()? {
+            Value::Interned(s) => Ok(s),
+            Value::InternedUtf16(s) => {
+                Err(format!("ABX: name at {at}: {}", s.to_rust().unwrap_err()))
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -92,8 +133,8 @@ impl Reader<'_> {
     fn value(&mut self, kind: u8) -> Result<Value, String> {
         Ok(match kind {
             TYPE_NULL => Value::Null,
-            TYPE_STRING => Value::String(self.utf()?),
-            TYPE_STRING_INTERNED => Value::Interned(self.interned()?),
+            TYPE_STRING => self.string()?,
+            TYPE_STRING_INTERNED => self.interned_value()?,
             TYPE_BYTES_HEX => Value::BytesHex(self.bytes()?),
             TYPE_BYTES_BASE64 => Value::BytesBase64(self.bytes()?),
             TYPE_INT => Value::Int(i32::from_be_bytes(self.take()?)),
@@ -127,6 +168,10 @@ pub fn read_optional(bytes: &[u8]) -> Result<Option<Element>, String> {
 /// independent sibling sections ([`write_sequence`]), as SettingsState
 /// does after its settings.
 pub fn read_sequence(bytes: &[u8]) -> Result<Vec<Element>, String> {
+    read_sequence_with(bytes, false)
+}
+
+pub(crate) fn read_sequence_with(bytes: &[u8], lossless: bool) -> Result<Vec<Element>, String> {
     if !bytes.starts_with(MAGIC) {
         return Err("not ABX".into());
     }
@@ -134,6 +179,7 @@ pub fn read_sequence(bytes: &[u8]) -> Result<Vec<Element>, String> {
         bytes,
         at: MAGIC.len(),
         interned: Vec::new(),
+        lossless,
     };
     let mut open: Vec<Element> = Vec::new();
     let mut roots = Vec::new();
@@ -168,13 +214,14 @@ pub fn read_sequence(bytes: &[u8]) -> Result<Vec<Element>, String> {
             START_DOCUMENT => {}
             END_DOCUMENT => break,
             _ => {
-                let text = match r.value(kind)? {
-                    Value::Null => None,
-                    Value::String(s) => Some(s),
+                let node = match r.value(kind)? {
+                    Value::Null => Node::Token(event, None),
+                    Value::String(s) => Node::Token(event, Some(s)),
+                    Value::Utf16(s) => Node::Utf16(event, s),
                     other => return Err(format!("ABX: token {event} with {other:?}")),
                 };
                 if let Some(parent) = open.last_mut() {
-                    parent.content.push(Node::Token(event, text));
+                    parent.content.push(node);
                 }
             }
         }
@@ -205,6 +252,9 @@ pub fn write_sequence(roots: &[Element]) -> Result<Vec<u8>, String> {
 pub struct Writer {
     out: Vec<u8>,
     interned: HashMap<String, u16>,
+    /// Interned strings that are not well-formed UTF-16; they never equal
+    /// one in `interned`, and share its index sequence.
+    interned_utf16: HashMap<JavaString, u16>,
 }
 
 impl Default for Writer {
@@ -214,6 +264,7 @@ impl Default for Writer {
         Self {
             out,
             interned: HashMap::new(),
+            interned_utf16: HashMap::new(),
         }
     }
 }
@@ -230,8 +281,8 @@ impl Writer {
         Ok(())
     }
 
-    fn utf(&mut self, s: &str) -> Result<(), String> {
-        let bytes = encode_utf(s);
+    fn utf(&mut self, units: impl Iterator<Item = u16>) -> Result<(), String> {
+        let bytes = encode_utf(units);
         self.len(bytes.len())?;
         self.out.extend(bytes);
         Ok(())
@@ -243,10 +294,24 @@ impl Writer {
             return Ok(());
         }
         self.out.extend(NEW.to_be_bytes());
-        self.utf(s)?;
-        let next = self.interned.len();
+        self.utf(s.encode_utf16())?;
+        let next = self.interned.len() + self.interned_utf16.len();
         if next < NEW as usize {
             self.interned.insert(s.to_owned(), next as u16);
+        }
+        Ok(())
+    }
+
+    fn interned_utf16(&mut self, s: &JavaString) -> Result<(), String> {
+        if let Some(i) = self.interned_utf16.get(s) {
+            self.out.extend(i.to_be_bytes());
+            return Ok(());
+        }
+        self.out.extend(NEW.to_be_bytes());
+        self.utf(s.units().iter().copied())?;
+        let next = self.interned.len() + self.interned_utf16.len();
+        if next < NEW as usize {
+            self.interned_utf16.insert(s.clone(), next as u16);
         }
         Ok(())
     }
@@ -273,7 +338,11 @@ impl Writer {
                 Node::Token(event, None) => self.out.push(event | TYPE_NULL),
                 Node::Token(event, Some(text)) => {
                     self.out.push(event | TYPE_STRING);
-                    self.utf(text)?;
+                    self.utf(text.encode_utf16())?;
+                }
+                Node::Utf16(event, text) => {
+                    self.out.push(event | TYPE_STRING);
+                    self.utf(text.units().iter().copied())?;
                 }
             }
         }
@@ -283,8 +352,8 @@ impl Writer {
     fn attribute(&mut self, name: &str, value: &Value) -> Result<(), String> {
         let kind = match value {
             Value::Null => TYPE_NULL,
-            Value::String(_) => TYPE_STRING,
-            Value::Interned(_) => TYPE_STRING_INTERNED,
+            Value::String(_) | Value::Utf16(_) => TYPE_STRING,
+            Value::Interned(_) | Value::InternedUtf16(_) => TYPE_STRING_INTERNED,
             Value::BytesHex(_) => TYPE_BYTES_HEX,
             Value::BytesBase64(_) => TYPE_BYTES_BASE64,
             Value::Int(_) => TYPE_INT,
@@ -300,8 +369,10 @@ impl Writer {
         self.interned(name)?;
         match value {
             Value::Null | Value::Bool(_) => {}
-            Value::String(s) => self.utf(s)?,
+            Value::String(s) => self.utf(s.encode_utf16())?,
             Value::Interned(s) => self.interned(s)?,
+            Value::Utf16(s) => self.utf(s.units().iter().copied())?,
+            Value::InternedUtf16(s) => self.interned_utf16(s)?,
             Value::BytesHex(b) | Value::BytesBase64(b) => {
                 self.len(b.len())?;
                 self.out.extend(b);
@@ -315,55 +386,75 @@ impl Writer {
     }
 }
 
-/// Java's modified UTF-8 (`ModifiedUtf8`): UTF-16 units, NUL in two
-/// bytes, a supplementary character as its two surrogates in three bytes
-/// each. ArtFastDataInput/Output also accept/emit ART's non-standard four-byte
-/// supplementary form (CharsetUtils, android-16.0.0_r1).
-fn decode_utf(b: &[u8]) -> Option<String> {
+/// `ArtFastDataInput.readUTF`: CharsetUtils.fromModifiedUtf8Bytes hands
+/// the bytes, NUL-terminated, to JNI `NewStringUTF` (art
+/// runtime/jni/jni_internal.cc, android-16.0.0_r1), which reads up to the
+/// first zero byte, sizes each sequence by its lead byte alone without
+/// checking continuation bytes, turns a four-byte sequence into a surrogate
+/// pair, and ends the string with '?' when a sequence is cut short. Any
+/// unit, an unpaired surrogate included, is kept.
+pub fn decode_utf(b: &[u8]) -> Vec<u16> {
+    let b = &b[..b.iter().position(|c| *c == 0).unwrap_or(b.len())];
     let mut units = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        let cont = |j: usize| {
-            b.get(j)
-                .filter(|c| *c & 0xc0 == 0x80)
-                .map(|c| (c & 0x3f) as u16)
+        let lead = b[i];
+        let n = match lead {
+            _ if lead & 0x80 == 0 => 1,
+            _ if lead & 0x20 == 0 => 2,
+            _ if lead & 0x10 == 0 => 3,
+            _ => 4,
         };
-        if matches!(b[i], 0xf0..=0xf4) {
-            let scalar = ((b[i] & 7) as u32) << 18
-                | (cont(i + 1)? as u32) << 12
-                | (cont(i + 2)? as u32) << 6
-                | cont(i + 3)? as u32;
-            let c = char::from_u32(scalar).filter(|c| *c as u32 >= 0x10000)?;
-            let mut pair = [0; 2];
-            units.extend_from_slice(c.encode_utf16(&mut pair));
-            i += 4;
-            continue;
+        let Some(s) = b.get(i..i + n) else {
+            units.push(u16::from(b'?'));
+            break;
+        };
+        let low = |j: usize| u16::from(s[j] & 0x3f);
+        match n {
+            1 => units.push(lead.into()),
+            2 => units.push(u16::from(lead & 0x1f) << 6 | low(1)),
+            3 => units.push(u16::from(lead & 0x0f) << 12 | low(1) << 6 | low(2)),
+            _ => {
+                let code_point = u32::from(lead & 0x0f) << 18
+                    | u32::from(low(1)) << 12
+                    | u32::from(low(2)) << 6
+                    | u32::from(low(3));
+                let bits = code_point.wrapping_sub(0x10000);
+                units.push(0xd800 | (bits >> 10 & 0x3ff) as u16);
+                units.push(0xdc00 | (bits & 0x3ff) as u16);
+            }
         }
-        let (unit, n) = match b[i] {
-            c @ 0x01..=0x7f => (c as u16, 1),
-            c @ 0xc0..=0xdf => (((c & 0x1f) as u16) << 6 | cont(i + 1)?, 2),
-            c @ 0xe0..=0xef => (
-                ((c & 0x0f) as u16) << 12 | cont(i + 1)? << 6 | cont(i + 2)?,
-                3,
-            ),
-            _ => return None,
-        };
-        units.push(unit);
         i += n;
     }
-    String::from_utf16(&units).ok()
+    units
 }
 
-fn encode_utf(s: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(s.len());
-    // ArtFastDataOutput/CharsetUtils use ART's four-byte supplementary form.
-    // NUL remains modified UTF-8; the reader also accepts surrogate pairs.
-    for c in s.chars() {
-        if c == '\0' {
-            out.extend([0xc0, 0x80]);
-        } else {
-            let mut bytes = [0; 4];
-            out.extend_from_slice(c.encode_utf8(&mut bytes).as_bytes());
+/// `ArtFastDataOutput.writeUTF`: JNI `GetStringUTFRegion`, ART's
+/// `ConvertUtf16ToUtf8<kUtfUseShortZero = false, kUtfUse4ByteSequence =
+/// true, kUtfReplaceBadSurrogates = false>`: NUL in two bytes, a surrogate
+/// pair in four, any other unit (an unpaired surrogate too) in up to three.
+pub fn encode_utf(units: impl Iterator<Item = u16>) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut units = units.peekable();
+    while let Some(unit) = units.next() {
+        let trail = units.next_if(|t| unit & 0xfc00 == 0xd800 && t & 0xfc00 == 0xdc00);
+        match (unit, trail) {
+            (1..=0x7f, _) => out.push(unit as u8),
+            (0..=0x7ff, _) => out.extend([(unit >> 6) as u8 | 0xc0, (unit & 0x3f) as u8 | 0x80]),
+            (_, Some(trail)) => {
+                let c = 0x10000 + ((u32::from(unit) & 0x3ff) << 10 | u32::from(trail) & 0x3ff);
+                out.extend([
+                    (c >> 18) as u8 | 0xf0,
+                    (c >> 12 & 0x3f) as u8 | 0x80,
+                    (c >> 6 & 0x3f) as u8 | 0x80,
+                    (c & 0x3f) as u8 | 0x80,
+                ]);
+            }
+            _ => out.extend([
+                (unit >> 12) as u8 | 0xe0,
+                (unit >> 6 & 0x3f) as u8 | 0x80,
+                (unit & 0x3f) as u8 | 0x80,
+            ]),
         }
     }
     out
@@ -481,27 +572,93 @@ mod tests {
         assert!(read(&unknown).is_err());
     }
 
+    fn units(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
     #[test]
-    fn strings_are_modified_utf8() {
+    fn strings_are_art_jni_utf8() {
         for s in ["", "a\u{0}b", "é", "한", "😀"] {
-            let b = encode_utf(s);
-            assert_eq!(decode_utf(&b).as_deref(), Some(s));
+            let b = encode_utf(s.encode_utf16());
+            assert_eq!(decode_utf(&b), units(s));
         }
-        assert_eq!(encode_utf("\u{0}"), [0xc0, 0x80]);
-        assert_eq!(encode_utf("😀"), [0xf0, 0x9f, 0x98, 0x80]);
+        assert_eq!(encode_utf(units("\u{0}").into_iter()), [0xc0, 0x80]);
         assert_eq!(
-            decode_utf(&[0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80]).as_deref(),
-            Some("😀")
+            encode_utf(units("😀").into_iter()),
+            [0xf0, 0x9f, 0x98, 0x80]
         );
-        assert_eq!(decode_utf(&[0x00]), None);
-        assert_eq!(decode_utf(&[0xf0, 0x9f, 0x98, 0x80]).as_deref(), Some("😀"));
-        for bad in [
-            &[0xf0, 0x80, 0x80, 0x80][..],
-            &[0xf4, 0x90, 0x80, 0x80],
-            &[0xf0, 0x9f, 0x98],
+        // Legacy six-byte surrogate pairs decode to the same units.
+        assert_eq!(
+            decode_utf(&[0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80]),
+            units("😀")
+        );
+        // Unpaired surrogates, either order, are three bytes each way.
+        for (lone, bytes) in [
+            (vec![0xd83d], vec![0xed, 0xa0, 0xbd]),
+            (vec![0xde00, 0x61], vec![0xed, 0xb8, 0x80, 0x61]),
+            (
+                vec![0xde00, 0xd83d],
+                vec![0xed, 0xb8, 0x80, 0xed, 0xa0, 0xbd],
+            ),
         ] {
-            assert_eq!(decode_utf(bad), None);
+            assert_eq!(encode_utf(lone.iter().copied()), bytes);
+            assert_eq!(decode_utf(&bytes), lone);
         }
+        // NewStringUTF reads to the first zero byte.
+        assert_eq!(decode_utf(&[0x61, 0x00, 0x62]), [0x61]);
+        // A sequence cut short ends the string with '?'.
+        assert_eq!(decode_utf(&[0x61, 0xf0, 0x9f, 0x98]), [0x61, 0x3f]);
+        assert_eq!(decode_utf(&[0xc3]), [0x3f]);
+        // Lead bytes alone size a sequence; continuation bits are unchecked
+        // and four-byte code points below U+10000 still become two units.
+        assert_eq!(decode_utf(&[0xc1, 0x41]), [0x41]);
+        assert_eq!(decode_utf(&[0x80, 0x80]), [0]);
+        assert_eq!(decode_utf(&[0xf0, 0x80, 0x80, 0x80]), [0xdbc0, 0xdc00]);
+        assert_eq!(decode_utf(&[0xf4, 0x90, 0x80, 0x80]), [0xd800, 0xdc00]);
+    }
+
+    #[test]
+    fn unpaired_surrogates_are_explicit_or_lossless() {
+        let mut bytes = MAGIC.to_vec();
+        bytes.push(START_DOCUMENT | TYPE_NULL);
+        bytes.push(START_TAG | TYPE_STRING_INTERNED);
+        new(&mut bytes, "string");
+        bytes.push(ATTRIBUTE | TYPE_STRING);
+        new(&mut bytes, "name");
+        bytes.extend(3u16.to_be_bytes());
+        bytes.extend([0xed, 0xa0, 0xbd]);
+        bytes.push(ATTRIBUTE | TYPE_STRING_INTERNED);
+        new(&mut bytes, "kind");
+        bytes.extend(NEW.to_be_bytes());
+        bytes.extend(4u16.to_be_bytes());
+        bytes.extend([0xed, 0xb8, 0x80, 0x61]);
+        bytes.push(crate::TEXT | TYPE_STRING);
+        bytes.extend(6u16.to_be_bytes());
+        bytes.extend([0x61, 0xc0, 0x80, 0xed, 0xa0, 0xbd]);
+        bytes.push(END_TAG | TYPE_STRING_INTERNED);
+        bytes.extend(0u16.to_be_bytes());
+        bytes.push(END_DOCUMENT | TYPE_NULL);
+
+        let error = read(&bytes).unwrap_err();
+        assert!(
+            error.contains("0xd83d") && error.contains("#843"),
+            "{error}"
+        );
+        let root = crate::read_next_lossless(&bytes).unwrap();
+        let lone = |u: &[u16]| JavaString::from_units(u.to_vec());
+        assert_eq!(root.attr("name"), Some(&Value::Utf16(lone(&[0xd83d]))));
+        assert_eq!(root.string("name"), None);
+        assert_eq!(root.java_string("name"), Some(lone(&[0xd83d])));
+        assert_eq!(
+            root.attr("kind"),
+            Some(&Value::InternedUtf16(lone(&[0xde00, 0x61])))
+        );
+        assert_eq!(
+            root.content,
+            [Node::Utf16(crate::TEXT, lone(&[0x61, 0, 0xd83d]))]
+        );
+        // The interned value shares the name table's indices.
+        assert_eq!(write(&root).unwrap(), bytes);
     }
 }
 
@@ -515,6 +672,7 @@ impl<'a> Pull<'a> {
             bytes,
             at: MAGIC.len(),
             interned: Vec::new(),
+            lossless: false,
         };
         // setInput peeks the first token, so magic alone is an input error.
         let token = *bytes.get(reader.at).ok_or("ABX: truncated header")?;
@@ -549,7 +707,11 @@ impl<'a> Pull<'a> {
                 END_DOCUMENT => Token::EndDocument,
                 START_DOCUMENT => Token::Content(START_DOCUMENT, None),
                 crate::ENTITY_REF => {
-                    Token::Content(crate::CDSECT, Some(crate::pull::entity(&r.utf()?)?))
+                    let name = r.utf()?;
+                    let text = crate::pull::entity(&name)?
+                        .to_rust()
+                        .map_err(|e| format!("ABX: entity {name}: {e}"))?;
+                    Token::Content(crate::CDSECT, Some(text))
                 }
                 crate::TEXT
                 | crate::CDSECT

@@ -65,7 +65,7 @@ fn periodic_schedule_retry_and_completion_keep_the_original_window_and_extras() 
             job.set_periodic(h, flex);
             job.constraint_flags = CONSTRAINT_STORAGE_NOT_LOW;
             for (k, v) in &mut job.extras.entries {
-                match k.as_deref() {
+                match k.as_ref().map(|k| k.to_rust().unwrap()).as_deref() {
                     Some("isPeriodic") => *v = V::Bool(true),
                     Some("periodMillis") => *v = V::Long(h),
                     Some("flexMillis") => *v = V::Long(flex),
@@ -385,7 +385,7 @@ fn expedited_sync_is_admitted_and_runs_with_preserved_extras() {
         expedited.constraint_flags = CONSTRAINT_STORAGE_NOT_LOW;
         expedited.network = Some(job_info::restored_request(&[12], &[], &[]));
         for (k, v) in &mut expedited.extras.entries {
-            match (k.as_deref(), v) {
+            match (k.as_ref().map(|k| k.to_rust().unwrap()).as_deref(), v) {
                 (Some("ejDowngradedToRegular"), v) => *v = V::Bool(false),
                 (Some("syncExtras"), V::Bundle(b)) => b
                     .entries

@@ -1,5 +1,5 @@
 //! Compare the native XML owner with the pinned original SuspendDialogInfo.
-use aim_android_xml::{Element, Value};
+use aim_android_xml::{Element, JavaString, Value};
 use aim_services::package::restrictions::dialog::DialogInfo;
 use std::{fs, process::Command, time::Duration};
 mod common {
@@ -280,6 +280,9 @@ fn check_extras(boot: &Boot, directory: &std::path::Path) {
     }
     let mut expected = Vec::new();
     let mut parcels = Vec::new();
+    // `saveToXml` bytes of the lossless cases, whose entries are already in
+    // ArrayMap order.
+    let mut saved = Vec::new();
     // Run both text and ABX parsers on every fixture.
     for case in &cases {
         let root = aim_android_xml::read(case.as_bytes()).unwrap();
@@ -331,6 +334,21 @@ fn check_extras(boot: &Boot, directory: &std::path::Path) {
             parcels.push(value);
         }
     }
+    for bytes in java_string_cases() {
+        let index = expected.len();
+        fs::write(directory.join(format!("extras-{index}.xml")), &bytes).unwrap();
+        let root = aim_android_xml::read_next_lossless(&bytes).unwrap();
+        expected.push(native_extras(&root));
+        let value = aim_services::package::restrictions::persistable::Bundle::restore(&root)
+            .expect("lossless case restores");
+        let save = value
+            .save("app-extras")
+            .ok()
+            .and_then(|e| aim_android_xml::abx::write(&e).ok())
+            .unwrap_or_default();
+        saved.push((index, save));
+        parcels.push(value);
+    }
     let count = expected.len().to_string();
     let mut parcel_expected = Vec::new();
     for (index, value) in parcels.iter().enumerate() {
@@ -362,6 +380,13 @@ fn check_extras(boot: &Boot, directory: &std::path::Path) {
                 .unwrap_or("typed ABX")
         );
     }
+    for (index, bytes) in saved {
+        assert_eq!(
+            bytes,
+            fs::read(directory.join(format!("extras-{index}.abx"))).unwrap(),
+            "saveToXml of extras case {index}"
+        );
+    }
     eprintln!("verified {count} original extras/parameter cases");
     for (index, (bytes, semantic)) in parcel_expected.into_iter().enumerate() {
         assert_eq!(
@@ -378,11 +403,99 @@ fn check_extras(boot: &Boot, directory: &std::path::Path) {
     eprintln!("verified {parcel_count} native bundles through original Parcel read/write");
 }
 
+/// The oracle's text: UTF-16 units, so unpaired surrogates compare as kept.
 fn text(out: &mut Vec<u8>, value: Option<&str>) {
-    out.extend_from_slice(&value.map_or(-1, |s| s.len() as i32).to_be_bytes());
-    if let Some(value) = value {
-        out.extend_from_slice(value.as_bytes());
+    text16(out, value.map(JavaString::from).as_ref());
+}
+
+fn text16(out: &mut Vec<u8>, value: Option<&JavaString>) {
+    out.extend_from_slice(&value.map_or(-1, |s| s.units().len() as i32).to_be_bytes());
+    for unit in value.map_or(&[][..], JavaString::units) {
+        out.extend_from_slice(&unit.to_be_bytes());
     }
+}
+
+/// Binary `<app-extras>` documents with Java strings a Rust `String` cannot
+/// hold, and byte forms only the original's NewStringUTF decoding defines.
+fn java_string_cases() -> Vec<Vec<u8>> {
+    const NEW: [u8; 2] = [0xff, 0xff];
+    let utf = |b: &mut Vec<u8>, bytes: &[u8]| {
+        b.extend((bytes.len() as u16).to_be_bytes());
+        b.extend(bytes);
+    };
+    let document = |body: &dyn Fn(&mut Vec<u8>)| {
+        let mut b = b"ABX\0\x10\x32".to_vec();
+        b.extend(NEW);
+        utf(&mut b, b"app-extras");
+        body(&mut b);
+        b.extend([0x33, 0, 0, 0x11]);
+        b
+    };
+    let string = |key: &'static [u8], tokens: Vec<(u8, &'static [u8])>| {
+        document(&move |b: &mut Vec<u8>| {
+            b.push(0x32);
+            b.extend(NEW);
+            utf(b, b"string");
+            b.push(0x2f);
+            b.extend(NEW);
+            utf(b, b"name");
+            utf(b, key);
+            for (event, bytes) in &tokens {
+                b.push(event | 0x20);
+                utf(b, bytes);
+            }
+            b.extend([0x33, 0, 1]);
+        })
+    };
+    const TEXT: u8 = 4;
+    const ENTITY: u8 = 6;
+    let mut cases = vec![
+        string(&[0xed, 0xa0, 0xbd], vec![(TEXT, b"lone lead key")]),
+        string(b"k", vec![(TEXT, &[0xed, 0xb8, 0x80])]),
+        string(b"k", vec![(TEXT, &[0xed, 0xb8, 0x80, 0xed, 0xa0, 0xbd])]),
+        string(b"k", vec![(TEXT, &[0x61, 0xc0, 0x80, 0x62])]),
+        string(b"k", vec![(TEXT, &[0x61, 0x00, 0x62])]),
+        string(&[0x00, 0x6b], vec![(TEXT, b"raw NUL key")]),
+        string(b"k", vec![(TEXT, &[0x61, 0xf0, 0x9f, 0x98])]),
+        string(b"k", vec![(TEXT, &[0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80])]),
+        string(b"k", vec![(TEXT, &[0xf0, 0x9f, 0x98, 0x80])]),
+        string(b"k", vec![(TEXT, &[0xc1, 0x41, 0x80, 0x80])]),
+        string(b"k", vec![(TEXT, &[0xed, 0xa0]), (TEXT, &[0xbd])]),
+        string(b"k", vec![(TEXT, b"x"), (ENTITY, b"#55357")]),
+        string(
+            b"k",
+            vec![(TEXT, b"x"), (ENTITY, b"#55357"), (ENTITY, b"#56832")],
+        ),
+        string(
+            b"k",
+            vec![(TEXT, &[0xed, 0xa0, 0xbd]), (TEXT, &[0xed, 0xb8, 0x80])],
+        ),
+    ];
+    cases.push(document(&|b: &mut Vec<u8>| {
+        b.push(0x32);
+        b.extend(NEW);
+        utf(b, b"string-array");
+        b.push(0x2f);
+        b.extend(NEW);
+        utf(b, b"name");
+        utf(b, &[0xed, 0xb8, 0x80]);
+        b.push(0x6f);
+        b.extend(NEW);
+        utf(b, b"num");
+        b.extend(3i32.to_be_bytes());
+        for value in [&[0xed, 0xa0, 0xbd][..], &[0x61, 0xc0, 0x80]] {
+            b.push(0x32);
+            b.extend(NEW);
+            utf(b, b"item");
+            b.push(0x2f);
+            b.extend(NEW);
+            utf(b, b"value");
+            utf(b, value);
+            b.extend([0x33, 0, 4]);
+        }
+        b.extend([0x33, 0, 1]);
+    }));
+    cases
 }
 
 fn bundle(
@@ -398,7 +511,7 @@ fn bundle(
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     out.extend_from_slice(&(entries.len() as i32).to_be_bytes());
     for (key, value) in entries {
-        text(out, key.as_deref());
+        text16(out, key.as_ref());
         match value {
             Value::Null => out.push(0),
             Value::Int(v) => {
@@ -419,7 +532,7 @@ fn bundle(
             }
             Value::String(v) => {
                 out.push(5);
-                text(out, Some(v));
+                text16(out, Some(v));
             }
             Value::Ints(v) => {
                 out.push(6);
@@ -453,7 +566,7 @@ fn bundle(
                 out.push(10);
                 out.extend_from_slice(&(v.len() as i32).to_be_bytes());
                 for x in v {
-                    text(out, x.as_deref());
+                    text16(out, x.as_ref());
                 }
             }
             Value::Bundle(v) => {

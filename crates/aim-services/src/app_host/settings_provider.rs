@@ -304,11 +304,11 @@ fn schedule_write_fallback_files_job(host: &AppHost) -> Result<(), Exception> {
     );
     // `getSettingsFile` of each type for `USER_SYSTEM`.
     let file = |name: &str| {
-        persistable::Value::String(format!("/data/system/users/0/settings_{name}.xml"))
+        persistable::Value::String(format!("/data/system/users/0/settings_{name}.xml").into())
     };
     job.extras.entries = ["global", "system", "secure", "ssaid", "config"]
         .into_iter()
-        .map(|table| (Some(table.to_string()), file(table)))
+        .map(|table| (Some(table.into()), file(table)))
         .collect();
     job.set_periodic(ONE_DAY_INTERVAL_MILLIS, ONE_DAY_INTERVAL_MILLIS);
     job.constraint_flags |= CONSTRAINT_FLAG_CHARGING;

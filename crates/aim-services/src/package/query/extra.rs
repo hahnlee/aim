@@ -1322,8 +1322,8 @@ impl Query<'_> {
             {
                 let mut entries = extras.entries.iter().collect::<Vec<_>>();
                 entries.sort_by_key(|(key, _)| {
-                    key.as_deref()
-                        .map_or(0, super::super::parse::parcel::java_hash)
+                    key.as_ref()
+                        .map_or(0, aim_android_xml::JavaString::hash_code)
                 });
                 for (key, value) in entries {
                     if let Some((_, old)) = bundle.entries.iter_mut().find(|(name, _)| name == key)

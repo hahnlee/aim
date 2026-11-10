@@ -183,7 +183,7 @@ impl Owners {
                 }
                 use crate::package::restrictions::persistable::Value as V;
                 for (key, value) in &mut job.extras.entries {
-                    *value = match key.as_deref().unwrap() {
+                    *value = match key.as_ref().unwrap().to_rust().unwrap().as_str() {
                         "jobId" => V::Int(job.id),
                         "syncExemptionFlag" => V::Int(number(9)),
                         "expectedRuntime" => V::Long(fields[10].parse().unwrap()),
