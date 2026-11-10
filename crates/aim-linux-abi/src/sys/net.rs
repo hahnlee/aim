@@ -1873,11 +1873,12 @@ pub fn shutdown(a: [u64; 6]) -> i64 {
     let r = errno::check(unsafe { libc::shutdown(input.fd(), a[1] as i32) } as i64);
     // Darwin's fails with ENOTCONN where Linux records the shutdown and
     // wakes the waiters: `unix_shutdown` in any state, and succeeds;
-    // `inet_shutdown` of a `TCP_CLOSE` socket, and fails.
+    // `inet_shutdown` of a `TCP_CLOSE` socket, an unconnected TCP or
+    // datagram one, and fails.
     if r == -107
         && let Some(s) = any_sock(&input)
         && let unix = matches!(s.family, Family::Unix)
-        && (unix || unconnected(&s, input.fd()).is_some())
+        && (unix || s.datagram() || unconnected(&s, input.fd()).is_some())
     {
         let how = a[1] as u32 + 1;
         let _ = s
@@ -2919,10 +2920,18 @@ fn recv(
         name: None,
     };
     let shut = socket.as_ref().is_some_and(|s| received_shut(s));
-    // `__skb_recv_datagram`: a datagram socket shut for receiving is at
-    // end of file once its queue is empty, where Darwin's receive waits.
+    // A datagram socket shut for receiving is at end of file once its
+    // queue is empty, where Darwin's receive waits: an AF_UNIX one's
+    // (`unix_dgram_recvmsg`), and an IP one's that would wait
+    // (`__skb_wait_for_more_packets`), a non-blocking one failing with
+    // EAGAIN as Darwin's does.
+    let waits = flags & L_MSG_DONTWAIT == 0
+        // SAFETY: F_GETFL on the socket.
+        && unsafe { libc::fcntl(input.fd(), libc::F_GETFL) } & libc::O_NONBLOCK == 0;
     if shut
-        && socket.as_ref().is_some_and(|s| s.ty == SockType::Dgram)
+        && socket
+            .as_ref()
+            .is_some_and(|s| s.ty == SockType::Dgram && (matches!(s.family, Family::Unix) || waits))
         && socket_info(input.fd()).is_some_and(|info| {
             u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap()) == 0
         })

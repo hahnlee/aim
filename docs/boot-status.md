@@ -152,7 +152,7 @@ AF_UNIX seqpacket socket never connected (`TCP_CLOSE`, bound or not, or after a
 refused connect) is OUT|HUP to poll, select and epoll at once (an AF_UNIX one
 with POLLWRBAND), which Darwin reports as nothing; edge-triggered once per
 change, a shutdown included: its shutdown is recorded, as `inet_shutdown` (with
-ENOTCONN) and `unix_shutdown` (with success, in any state Darwin's fails in:
+ENOTCONN, an unconnected UDP socket's too, #2921) and `unix_shutdown` (with success, in any state Darwin's fails in:
 unconnected, listening, its peer closed) do, so SHUT_RD adds IN|RDHUP; a
 waiter already blocked is not woken by it; a fork child copies the record and
 a recvmmsg's kept error, an exec or SCM_RIGHTS receiver does not (#2781,

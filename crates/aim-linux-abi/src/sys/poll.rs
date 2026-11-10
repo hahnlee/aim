@@ -2055,6 +2055,50 @@ mod reportable_tests {
         }
     }
 
+    /// `inet_shutdown` of an unconnected UDP socket fails with ENOTCONN
+    /// but records the shutdown and wakes its waiters, which
+    /// `datagram_poll` reports: shut for receiving readable and RDHUP,
+    /// both ways also hung up; a receive that would wait reads end of file
+    /// (`__skb_wait_for_more_packets`), a non-blocking one EAGAIN.
+    #[test]
+    fn an_unconnected_udp_socket_shutdown_is_recorded() {
+        let _view = crate::vfs::test_view();
+        const EPOLLET: u32 = 1 << 31;
+        let writable = POLLOUT | POLLWRNORM | POLLWRBAND;
+        let read = POLLIN | POLLRDNORM | POLLRDHUP;
+        let shutdown = |fd: i64, how: u64| crate::sys::net::shutdown([fd as u64, how, 0, 0, 0, 0]);
+        let fd = crate::sys::net::socket([2, 2 | O_NONBLOCK, 0, 0, 0, 0]);
+        assert!(fd >= 0, "socket {fd}");
+        let level = watching(fd, 0x1);
+        let edge = watching(fd, 0x1 | 0x2000 | EPOLLET);
+        assert_eq!(polled(fd, ALL | POLLRDHUP), (1, writable));
+        assert_eq!(waited(level, 0).0, 0);
+        assert_eq!(shutdown(fd, 0), -107);
+        assert_eq!(polled(fd, ALL | POLLRDHUP), (1, read | writable));
+        assert_eq!(selected(fd), (2, true, true));
+        assert_eq!(waited(level, 0), (1, 0x1));
+        assert_eq!(waited(level, 0), (1, 0x1));
+        assert_eq!(waited(edge, 0), (1, 0x1 | 0x2000));
+        assert_eq!(waited(edge, 0).0, 0);
+        let mut buffer = [0u8; 4];
+        assert_eq!(received(fd, &mut buffer), -11);
+        assert_eq!(shutdown(fd, 1), -107);
+        assert_eq!(polled(fd, ALL | POLLRDHUP), (1, read | writable | POLLHUP));
+        assert_eq!(waited(edge, 0), (1, 0x1 | 0x2000 | 0x10));
+        close(&[fd, level, edge]);
+
+        let blocking = crate::sys::net::socket([2, 2, 0, 0, 0, 0]);
+        // A receive that waited would time out rather than hang.
+        let timeout = [1i64, 0];
+        assert_eq!(
+            crate::sys::net::setsockopt([blocking as u64, 1, 20, timeout.as_ptr() as u64, 16, 0]),
+            0
+        );
+        assert_eq!(shutdown(blocking, 0), -107);
+        assert_eq!(received(blocking, &mut buffer), 0);
+        close(&[blocking]);
+    }
+
     /// `POLLEX_SET` is EPOLLPRI alone: select sleeps for its timeout on an
     /// unconnected TCP socket asked only for exceptions, which `tcp_poll`
     /// reports hung up and writable.
