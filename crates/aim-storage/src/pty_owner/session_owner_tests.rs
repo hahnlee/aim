@@ -1,79 +1,231 @@
 use super::*;
 use std::{
-    fs,
-    io::{BufRead, BufReader, Write},
-    os::unix::fs::DirBuilderExt,
-    process::{Child, Command, Stdio},
+    fs, io,
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::fs::DirBuilderExt,
+    },
+    time::Duration,
 };
+/// How long an actor may take to answer; it never waits for a signal.
+const ANSWER: Duration = Duration::from_secs(10);
+const PENDING: u8 = b'p';
+const EXIT: u8 = b'x';
+fn hangup_set() -> libc::sigset_t {
+    let mut set = 0;
+    unsafe {
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGHUP);
+        libc::sigaddset(&mut set, libc::SIGCONT);
+    }
+    set
+}
+fn pipe() -> [OwnedFd; 2] {
+    let mut fds = [0; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    fds.map(|fd| {
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+            0
+        );
+        unsafe { OwnedFd::from_raw_fd(fd) }
+    })
+}
+/// Close every descriptor of this forked child but `keep`, as closefrom
+/// would: a fork without exec keeps even close-on-exec ones, and a
+/// concurrent test waiting for a last close must not wait for an actor.
+unsafe fn close_others(keep: [i32; 2]) {
+    let mut fds = [libc::proc_fdinfo {
+        proc_fd: 0,
+        proc_fdtype: 0,
+    }; 256];
+    loop {
+        let size = unsafe {
+            libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDLISTFDS,
+                0,
+                fds.as_mut_ptr().cast(),
+                std::mem::size_of_val(&fds) as i32,
+            )
+        };
+        if size <= 0 {
+            unsafe { libc::_exit(5) };
+        }
+        let listed = &fds[..size as usize / std::mem::size_of::<libc::proc_fdinfo>()];
+        let mut closed = false;
+        for fd in listed
+            .iter()
+            .map(|f| f.proc_fd)
+            .filter(|fd| !keep.contains(fd))
+        {
+            unsafe { libc::close(fd) };
+            closed = true;
+        }
+        if !closed {
+            return;
+        }
+    }
+}
+/// The actor's side of the fork: async-signal-safe calls only, since the
+/// test process is multi-threaded. It blocks SIGHUP and SIGCONT with their
+/// default actions, because Darwin discards a blocked signal whose action
+/// is SIG_IGN (as `nohup` leaves SIGHUP), and answers each command with its
+/// pending set, so no read waits for a signal to arrive.
+unsafe fn serve(leader: bool, parent: libc::pid_t, commands: i32, answers: i32) -> ! {
+    unsafe {
+        close_others([commands, answers]);
+        let set = hangup_set();
+        if leader && libc::setsid() < 0
+            || libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) != 0
+            || libc::signal(libc::SIGHUP, libc::SIG_DFL) == libc::SIG_ERR
+            || libc::signal(libc::SIGCONT, libc::SIG_DFL) == libc::SIG_ERR
+        {
+            libc::_exit(2);
+        }
+        loop {
+            let mut pending = 0;
+            libc::sigpending(&mut pending);
+            pending &= set;
+            let size = std::mem::size_of_val(&pending);
+            if libc::write(answers, (&raw const pending).cast(), size) != size as isize {
+                libc::_exit(3);
+            }
+            // A session leader escapes the process-group kill of a timed-out
+            // test binary: it leaves with its parent instead.
+            let mut command = libc::pollfd {
+                fd: commands,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            loop {
+                let polled = libc::poll(&mut command, 1, 100);
+                if polled > 0 {
+                    break;
+                }
+                if polled < 0 && *libc::__error() != libc::EINTR || libc::getppid() != parent {
+                    libc::_exit(4);
+                }
+            }
+            let mut command = 0u8;
+            if libc::read(commands, (&raw mut command).cast(), 1) != 1 || command != PENDING {
+                libc::_exit(0);
+            }
+        }
+    }
+}
+/// A real process that the owner signals.
 struct Actor {
-    child: Child,
-    output: BufReader<std::process::ChildStdout>,
+    commands: OwnedFd,
+    answers: OwnedFd,
     identity: ProcessIdentity,
+    reaped: bool,
 }
 impl Actor {
     fn new(leader: bool) -> Self {
-        let script = r#"import os,signal,sys
-if sys.argv[1]=='leader': os.setsid()
-signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGHUP,signal.SIGCONT})
-print(os.getpid(),os.getuid(),os.geteuid(),flush=True)
-for line in sys.stdin:
- if line.strip()=='exit': break
- if line.strip()=='pending': print(int(bool(signal.sigpending() & {signal.SIGHUP,signal.SIGCONT})),flush=True)
- if line.strip()=='signals':
-  signal.alarm(5)
-  found=[]
-  for _ in range(2):
-   found.append(signal.sigwait({signal.SIGHUP,signal.SIGCONT}))
-  signal.alarm(0)
-  print(','.join(map(str,sorted(found))),flush=True)
-"#;
-        let mut child = Command::new("python3")
-            .args(["-u", "-c", script, if leader { "leader" } else { "member" }])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut output = BufReader::new(child.stdout.take().unwrap());
-        let mut line = String::new();
-        assert!(output.read_line(&mut line).unwrap() > 0);
-        let fields = line
-            .split_whitespace()
-            .map(|s| s.parse::<u32>().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(fields[0], child.id());
-        assert_eq!(fields[1], unsafe { libc::getuid() });
-        assert_eq!(fields[2], unsafe { libc::geteuid() });
-        let identity = ProcessIdentity::running(child.id() as i32).unwrap();
-        println!(
-            "ACTUAL_ACTOR {:?} sid={} pgid={} uid={} euid={}",
-            identity,
-            unsafe { libc::getsid(identity.host_pid) },
-            unsafe { libc::getpgid(identity.host_pid) },
-            fields[1],
-            fields[2]
-        );
-        Self {
-            child,
-            output,
-            identity,
+        let [command_reader, commands] = pipe();
+        let [answers, answer_writer] = pipe();
+        let parent = unsafe { libc::getpid() };
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork: {}", io::Error::last_os_error());
+        if pid == 0 {
+            unsafe {
+                serve(
+                    leader,
+                    parent,
+                    command_reader.as_raw_fd(),
+                    answer_writer.as_raw_fd(),
+                )
+            }
         }
+        let mut actor = Self {
+            commands,
+            answers,
+            identity: ProcessIdentity {
+                host_pid: pid,
+                start_seconds: 0,
+                start_microseconds: 0,
+            },
+            reaped: false,
+        };
+        drop((command_reader, answer_writer));
+        assert_eq!(actor.answer(), 0, "SIGHUP or SIGCONT pending at start");
+        actor.identity = ProcessIdentity::running(pid).unwrap();
+        println!(
+            "ACTUAL_ACTOR {:?} sid={} pgid={}",
+            actor.identity,
+            unsafe { libc::getsid(pid) },
+            unsafe { libc::getpgid(pid) },
+        );
+        actor
     }
-    fn command(&mut self, text: &str) {
-        writeln!(self.child.stdin.as_mut().unwrap(), "{text}").unwrap();
+    fn command(&self, command: u8) {
+        assert_eq!(
+            unsafe { libc::write(self.commands.as_raw_fd(), (&raw const command).cast(), 1) },
+            1,
+            "command to actor {:?}: {}",
+            self.identity,
+            io::Error::last_os_error()
+        );
+    }
+    /// The actor's pending SIGHUP and SIGCONT.
+    fn pending(&self) -> libc::sigset_t {
+        self.command(PENDING);
+        self.answer()
+    }
+    fn answer(&self) -> libc::sigset_t {
+        let mut ready = libc::pollfd {
+            fd: self.answers.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let polled = loop {
+            let polled = unsafe { libc::poll(&mut ready, 1, ANSWER.as_millis() as i32) };
+            if polled >= 0 || io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                break polled;
+            }
+        };
+        assert!(
+            polled > 0,
+            "actor {:?} did not answer within {ANSWER:?}: poll {polled}, {}",
+            self.identity,
+            io::Error::last_os_error()
+        );
+        let mut pending: libc::sigset_t = 0;
+        let size = std::mem::size_of_val(&pending);
+        let read = unsafe { libc::read(self.answers.as_raw_fd(), (&raw mut pending).cast(), size) };
+        assert_eq!(
+            read, size as isize,
+            "actor {:?} ended without answering",
+            self.identity
+        );
+        pending
     }
     fn exit(&mut self) {
-        self.command("exit");
-        assert!(self.child.wait().unwrap().success());
+        self.command(EXIT);
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(self.identity.host_pid, &mut status, 0) },
+            self.identity.host_pid
+        );
+        self.reaped = true;
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "actor {:?} status {status:#x}",
+            self.identity
+        );
         assert!(!self.identity.is_live());
         println!("REAPED {:?}", self.identity);
     }
 }
 impl Drop for Actor {
     fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
+        if !self.reaped {
+            unsafe {
+                libc::kill(self.identity.host_pid, libc::SIGKILL);
+                libc::waitpid(self.identity.host_pid, std::ptr::null_mut(), 0);
+            }
         }
-        let _ = self.child.wait();
     }
 }
 struct Cleanup(PathBuf);
@@ -259,10 +411,7 @@ fn actual_owned_leader_detach_delivers_native_hup_and_cont() {
             .unwrap()
     );
     f.sessions.detach(&f.pair, leader.identity).unwrap();
-    leader.command("signals");
-    let mut line = String::new();
-    assert!(leader.output.read_line(&mut line).unwrap() > 0);
-    assert_eq!(line.trim(), format!("{},{}", libc::SIGHUP, libc::SIGCONT));
+    assert_eq!(leader.pending(), hangup_set());
     assert_eq!(
         f.sessions
             .state(&f.pair, leader.identity, false)
@@ -297,15 +446,35 @@ fn retained_binding_signals_after_credential_directory_teardown_without_adopting
         Some(libc::ENOENT)
     );
     f.sessions.master_closed(&f.pair).unwrap();
-    leader.command("signals");
-    let mut line = String::new();
-    assert!(leader.output.read_line(&mut line).unwrap() > 0);
-    assert_eq!(line.trim(), format!("{},{}", libc::SIGHUP, libc::SIGCONT));
-    foreign.command("pending");
-    line.clear();
-    assert!(foreign.output.read_line(&mut line).unwrap() > 0);
-    assert_eq!(line.trim(), "0");
+    assert_eq!(leader.pending(), hangup_set());
+    assert_eq!(foreign.pending(), 0);
     assert!(f.sessions.bindings.is_empty());
     leader.exit();
     foreign.exit();
+}
+#[test]
+fn actor_keeps_no_descriptor_of_the_test_process() {
+    let [_reader, _writer] = pipe();
+    let mut actor = Actor::new(false);
+    let mut fds = [libc::proc_fdinfo {
+        proc_fd: 0,
+        proc_fdtype: 0,
+    }; 16];
+    let size = unsafe {
+        libc::proc_pidinfo(
+            actor.identity.host_pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            fds.as_mut_ptr().cast(),
+            std::mem::size_of_val(&fds) as i32,
+        )
+    };
+    // Its command and answer pipes only.
+    assert_eq!(
+        size as usize / std::mem::size_of::<libc::proc_fdinfo>(),
+        2,
+        "{:?}",
+        io::Error::last_os_error()
+    );
+    actor.exit();
 }
