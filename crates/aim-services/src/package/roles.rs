@@ -106,7 +106,7 @@ impl Owner {
                 .and_then(|id| resources.resource_string(id))
                 .ok_or_else(|| format!("configured role resource unavailable: {name}"))
         };
-        let filter = AppsFilter::new(
+        let filter = AppsFilter::latest(
             state,
             &FilterConfig {
                 force_system_packages_queryable: state.system.force_system_packages_queryable,
@@ -116,7 +116,7 @@ impl Owner {
         .map_err(|e| format!("configured role visibility: {e:?}"))?;
         let query = Query {
             state,
-            filter: &filter,
+            filter: filter.as_ref(),
             calling_uid: 1000,
         };
         let mut frozen = BTreeMap::new();
@@ -256,11 +256,9 @@ impl Owner {
         };
         let resolution = Resolution::new(state.clone(), &filter_config)
             .map_err(|error| format!("known package resolution: {error:?}"))?;
-        let filter = AppsFilter::new(state, &filter_config)
-            .map_err(|error| format!("known package visibility: {error:?}"))?;
         let query = Query {
             state,
-            filter: &filter,
+            filter: &resolution.apps_filter,
             calling_uid: 1000,
         };
         let flags = MATCH_SYSTEM_ONLY | MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE;
