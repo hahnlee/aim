@@ -177,13 +177,19 @@ turns FBE on and depends on slice 4's CE protection: it lands after it.
    `rm -rf /data/per_boot` removes the previous boot's directory, whose
    per-boot key is gone, before it is made again.
    The migration (decision 4): `mount_all` refuses a `/data` with entries
-   none of whose directories ever got a policy (`DataMount::predates_fbe`),
-   so a data directory from before is recreated, never mixed. A data
+   that no earlier `mount_all` marked encrypted (`DataMount::predates_fbe`;
+   the mark, `Owner::encrypt`, comes before the first directory is made, so
+   a boot that ends between a directory and its policy is not taken for one
+   from before), so a data directory from before is recreated, never
+   mixed. A policy set again on a directory that has it records its root,
+   which a boot that ended after storing it did not. A data
    template's files cannot be in `/data`, whose directories get their
    policies from the new directory's own keys; the template keeps them
    beside it (`template/`), and guest-init moves them in after
-   `init_user0`, each taking its new directory's policy, as if their
-   owners had written them; copies (`aim_storage::copy`) never carry a
+   `init_user0`, each taking its new directory's policy before it moves,
+   as if their owners had written them, so a boot that stops part way
+   leaves the rest staged for the next and none in `/data` without one;
+   copies (`aim_storage::copy`) never carry a
    context, which names a key of its own volume.
 4. **App host**: CE protection per decision 2 in `lock_settings` and the
    user's unlock. Implemented (#2849), in the original's order for an
@@ -220,8 +226,24 @@ turns FBE on and depends on slice 4's CE protection: it lands after it.
    aimctl's default, or one booted with `guest-init --ce-keychain`) keeps
    its secrets in a keychain file of its own beside it
    (`aim_storage::data::keychain_of`, `<data>.keychain`, out of the
-   user's search list), which `data::remove` removes with it, so nothing
-   of it reaches the user's login keychain (#2882). With slice 3 the FBE
+   user's search list, taken out again at each open, the list's read and
+   write serialized among aim's processes by a lock file of the user's),
+   which `data::remove` removes with it, so nothing of it reaches the
+   user's login keychain (#2882).
+   A data directory has one CE protector. The derived image runs the
+   original LockSettingsService, which protects user 0's CE key with its
+   synthetic password (a blob under `system_de/0/spblob`, sealed by
+   Keystore), and the app host image the keychain's secret; neither can
+   open the other's, and both record the migration done in
+   `locksettings.db`, so a data directory booted by one and then the other
+   would leave user 0 in Direct Boot. guest-init's `mount_all` records,
+   with the fscrypt owner's state (`fscrypt/ce-protector`), the protector
+   of the image that first mounts a data directory (the app host's in an
+   image with `/system/etc/aim/app-host-services`), and refuses the other
+   image's with both named. Unwrapping the original's protector in the app
+   host (as `SyntheticPasswordManager` does for an unsecured user) would
+   let the original's data directories move to the app host, but not back;
+   it is not done. With slice 3 the FBE
    branches of the ported `fixAppsDataOnBoot` and `UserDataPreparer` run
    as on a device. Remaining: CTS `EncryptionTest` and
    `FileBasedEncryptionPolicyTest`.

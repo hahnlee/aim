@@ -10,9 +10,15 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use aim_android_image::identity::read_tree_identity;
+use aim_android_image::system_server::APP_HOST_SERVICES;
 use aim_storage::data::{self, DataImage};
 
 use crate::paths::{Layout, Sweep};
+
+/// What protects the users' CE keys: the app host's LockSettings, or the
+/// original LockSettingsService.
+const APP_HOST: &str = "the app host";
+const ORIGINAL: &str = "the original LockSettingsService";
 
 pub struct DataMount {
     layout: Layout,
@@ -109,9 +115,10 @@ impl DataMount {
     /// Whether `/data` was written without file-based encryption: it has
     /// entries, other than the mount point of `/data/user/0` this mount
     /// makes and the `/data/unencrypted` of an `installkey` that never got
-    /// further, yet no directory was ever given a policy. Its directories
-    /// cannot get one (ENOTEMPTY), so the data is recreated, never mixed
-    /// (ADR 0016, the breaking migration).
+    /// further, yet no `mount_all` ever marked it encrypted
+    /// (`Owner::encrypt`). Its directories cannot get a policy
+    /// (ENOTEMPTY), so the data is recreated, never mixed (ADR 0016, the
+    /// breaking migration).
     pub fn predates_fbe(&self) -> Result<bool, String> {
         let data = self.layout.data.join("data");
         let failed = |e: std::io::Error| format!("{}: {e}", data.display());
@@ -123,6 +130,30 @@ impl DataMount {
             .iter()
             .any(|name| name != "user" && name != "unencrypted");
         Ok(written && !self.fscrypt()?.has_policies().map_err(failed)?)
+    }
+
+    /// Claims the protection of the users' CE keys for the image's
+    /// LockSettings (ADR 0016): the app host's in an app host image
+    /// (`APP_HOST_SERVICES`), else the original LockSettingsService. Each
+    /// keeps the protector of a CE key where the other cannot open it (a
+    /// keychain item; a synthetic password blob in `system_de`), so a data
+    /// directory the other protected is refused here rather than leaving
+    /// its users locked (Direct Boot).
+    pub fn claim_ce_protection(&self) -> Result<(), String> {
+        let image = aim_android_init::ImageRoot::new(&self.layout.image);
+        let protector = match image.host_path(APP_HOST_SERVICES).try_exists() {
+            Ok(true) => APP_HOST,
+            Ok(false) => ORIGINAL,
+            Err(e) => return Err(format!("{APP_HOST_SERVICES}: {e}")),
+        };
+        match self.fscrypt()?.claim_ce_protection(protector) {
+            Ok(None) => Ok(()),
+            Ok(Some(other)) => Err(format!(
+                "{}: its CE storage is protected by {other}, and this image's is {protector}, which cannot unlock it: boot it with an image of {other}, or use another data directory (ADR 0016)",
+                self.layout.data.display()
+            )),
+            Err(e) => Err(format!("fscrypt: {e}")),
+        }
     }
 
     /// Places the data template's files (`data::TEMPLATE_FILES`) in the
@@ -174,7 +205,9 @@ impl DataMount {
 }
 
 /// Moves what `from` holds into `to`, merging into the directories `to`
-/// already has.
+/// already has. Each entry takes its policies before it moves, so one that
+/// is in `to` has them; a boot that stops part way adopts what is left
+/// again at the next.
 fn place(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<usize> {
     let mut moved = 0;
     for entry in std::fs::read_dir(from)? {
@@ -185,21 +218,21 @@ fn place(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<usize>
         {
             moved += place(&source, &target)?;
         } else {
+            moved += adopt(to, &source)?;
             std::fs::rename(&source, &target)?;
-            moved += adopt(to, &target)?;
         }
     }
     Ok(moved)
 }
 
-/// `target`, just moved into `dir`, and what it holds take the policies
+/// `entry`, to be moved into `dir`, and what it holds take the policies
 /// they would have had if made there.
-fn adopt(dir: &std::path::Path, target: &std::path::Path) -> std::io::Result<usize> {
-    aim_storage::fscrypt::inherit(dir, target)?;
+fn adopt(dir: &std::path::Path, entry: &std::path::Path) -> std::io::Result<usize> {
+    aim_storage::fscrypt::inherit(dir, entry)?;
     let mut adopted = 1;
-    if std::fs::symlink_metadata(target)?.is_dir() {
-        for entry in std::fs::read_dir(target)? {
-            adopted += adopt(target, &entry?.path())?;
+    if std::fs::symlink_metadata(entry)?.is_dir() {
+        for child in std::fs::read_dir(entry)? {
+            adopted += adopt(entry, &child?.path())?;
         }
     }
     Ok(adopted)
@@ -240,6 +273,62 @@ mod tests {
         let policy = [&[2u8, 1, 4, 2, 0, 0, 0, 0][..], &[7; 16]].concat();
         mount.fscrypt().unwrap().set_policy(&misc, &policy).unwrap();
         assert!(!mount.predates_fbe().unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A boot that ends after `mount_all` accepted a new /data, its first
+    /// encrypted directory made but given no policy yet, leaves a /data
+    /// the next boot accepts.
+    #[test]
+    fn a_data_directory_marked_encrypted_is_not_taken_for_one_from_before() {
+        let dir = std::env::temp_dir().join(format!("aim-marked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layout = Layout::new(dir.join("image"), dir.join("data"), Some(dir.join("run")));
+        std::fs::create_dir_all(&layout.runtime).unwrap();
+        let mut mount = DataMount::start(layout, None, None, None, Instant::now()).unwrap();
+        mount.mount().unwrap();
+        assert!(!mount.predates_fbe().unwrap());
+        mount.fscrypt().unwrap().encrypt().unwrap();
+        std::fs::create_dir(dir.join("data/data/bootchart")).unwrap();
+        assert!(!mount.predates_fbe().unwrap());
+        // Marking again keeps what was recorded.
+        let misc = dir.join("data/data/misc");
+        std::fs::create_dir(&misc).unwrap();
+        let policy = [&[2u8, 1, 4, 2, 0, 0, 0, 0][..], &[7; 16]].concat();
+        let owner = mount.fscrypt().unwrap();
+        owner.set_policy(&misc, &policy).unwrap();
+        owner.encrypt().unwrap();
+        assert!(owner.locking());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The first image to mount a data directory protects its CE storage;
+    /// an image whose LockSettings is the other's is refused.
+    #[test]
+    fn a_data_directory_stays_with_its_ce_protection() {
+        let dir = std::env::temp_dir().join(format!("aim-ce-owner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mount = |image: &str| {
+            let layout = Layout::new(dir.join(image), dir.join("data"), Some(dir.join("run")));
+            std::fs::create_dir_all(&layout.runtime).unwrap();
+            let mut mount = DataMount::start(layout, None, None, None, Instant::now()).unwrap();
+            mount.mount().unwrap();
+            mount
+        };
+        let services = dir.join("app-host").join(&APP_HOST_SERVICES[1..]);
+        std::fs::create_dir_all(services.parent().unwrap()).unwrap();
+        std::fs::write(services, "vold\n").unwrap();
+        std::fs::create_dir_all(dir.join("derived/system")).unwrap();
+        mount("derived").claim_ce_protection().unwrap();
+        mount("derived").claim_ce_protection().unwrap();
+        let refused = mount("app-host").claim_ce_protection().unwrap_err();
+        assert!(
+            refused.contains("protected by the original LockSettingsService"),
+            "{refused}"
+        );
+        std::fs::remove_dir_all(dir.join("data")).unwrap();
+        mount("app-host").claim_ce_protection().unwrap();
+        assert!(mount("derived").claim_ce_protection().is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -291,6 +380,15 @@ mod tests {
         // /data/app has no policy here, so neither has what moved into it.
         assert_eq!(policy("data/app/~~a/pkg-b/base.apk"), None);
         assert!(volume.join("data/app/~~a/pkg-b/oat").is_dir());
+        // An entry that cannot move stays staged, with its policy already:
+        // nothing in the volume lacks one.
+        std::fs::write(staged.join("data/system/settings.xml"), "settings").unwrap();
+        std::fs::create_dir_all(volume.join("data/system/settings.xml/x")).unwrap();
+        assert!(place(&staged, &volume).is_err());
+        let left = aim_storage::fscrypt::context(&staged.join("data/system/settings.xml"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(left[..24], context[..24]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

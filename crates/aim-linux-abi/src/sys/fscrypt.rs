@@ -80,8 +80,8 @@ fn owner() -> Result<Option<&'static Owner>, Errno> {
         .map_err(|error| *error)
 }
 
-/// Whether any directory has a policy. Policies are never removed, so a
-/// process asks the owner only until one exists.
+/// Whether the filesystem is encrypted, so that a directory may have a
+/// policy. It stays so, so a process asks the owner only until it is.
 pub(super) fn active() -> Result<bool, Errno> {
     static ACTIVE: AtomicBool = AtomicBool::new(false);
     if ACTIVE.load(Ordering::Relaxed) {

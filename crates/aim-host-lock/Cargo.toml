@@ -8,4 +8,5 @@ description = "The Mac's lock as Android sees it: whether the Mac's user has a p
 
 [dependencies]
 aim-hostcall.workspace = true
+libc.workspace = true
 zeroize = "1.9"

@@ -45,6 +45,8 @@ const KEYRING_NEXT: &str = "fscrypt-keyring.next";
 const STATE: &str = "fscrypt-state";
 const TABLE: &str = "policies";
 const TABLE_NEXT: &str = "policies.next";
+const CE_PROTECTOR: &str = "ce-protector";
+const CE_PROTECTOR_NEXT: &str = "ce-protector.next";
 const SECRET: &str = "secret";
 const SECRET_NEXT: &str = "secret.next";
 const MAGIC: &[u8] = b"AIMFSCRYPT01\0";
@@ -376,8 +378,39 @@ impl Owner {
         self.device
     }
 
-    /// Whether any directory of the filesystem was given a policy: until
-    /// one is, no inode has one to read or inherit.
+    /// Marks the filesystem as encrypted (`mount_all` of a `/data` with
+    /// `fileencryption=`) before any directory gets a policy: from then on
+    /// [`has_policies`](Self::has_policies) answers true, so a boot that
+    /// ends between making the first encrypted directory and recording its
+    /// policy is not taken for one from before file-based encryption.
+    pub fn encrypt(&self) -> io::Result<()> {
+        let _lock = Lock::exclusive(&open(&self.runtime.join(KEYRING_LOCK), false)?)?;
+        if self.has_policies()? {
+            return Ok(());
+        }
+        replace(&self.table.with_file_name(TABLE_NEXT), &self.table, "")
+    }
+
+    /// Records `name` as what protects the users' CE keys of the
+    /// filesystem (the LockSettings of the image that first mounts it),
+    /// unless something is already: returns that one if it is another.
+    pub fn claim_ce_protection(&self, name: &str) -> io::Result<Option<String>> {
+        let path = self.table.with_file_name(CE_PROTECTOR);
+        let mut recorded = String::new();
+        match open(&path, false) {
+            Ok(mut file) => file.read_to_string(&mut recorded)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                replace(&self.table.with_file_name(CE_PROTECTOR_NEXT), &path, name)?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        Ok((recorded != name).then_some(recorded))
+    }
+
+    /// Whether the filesystem is encrypted ([`encrypt`](Self::encrypt), or
+    /// a directory was given a policy): until it is, no inode has a policy
+    /// to read or inherit.
     pub fn has_policies(&self) -> io::Result<bool> {
         match fs::symlink_metadata(&self.table) {
             Ok(_) => Ok(true),
@@ -414,10 +447,20 @@ impl Owner {
         };
         let metadata = fs::symlink_metadata(dir)?;
         if let Some(existing) = context(dir)? {
-            return match self::policy(&existing) {
-                Some(existing) if existing == policy => Ok(()),
-                _ => Err(error(libc::EEXIST)),
-            };
+            if self::policy(&existing).as_deref() != Some(policy) {
+                return Err(error(libc::EEXIST));
+            }
+            // A boot that ended between storing the policy and recording
+            // it leaves the root to record now.
+            let spec = Spec::of_context(&existing).ok_or_else(|| error(libc::EINVAL))?;
+            let recorded = self
+                .roots()?
+                .iter()
+                .any(|root| root.inode == metadata.ino());
+            if recorded || dir.parent().map(context).transpose()?.flatten().is_some() {
+                return Ok(());
+            }
+            return self.policy_root(spec, metadata.ino());
         }
         if !metadata.is_dir() {
             return Err(error(libc::ENOTDIR));
@@ -863,6 +906,35 @@ mod tests {
         let again = Owner::locate(&runtime).unwrap().unwrap();
         again.cipher(&[0; 16], &mut name);
         assert_eq!(&name, b"name");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A policy stored on a directory whose recording a boot did not
+    /// reach is recorded when it is set again, and only for a root.
+    #[test]
+    fn a_policy_set_again_records_its_root() {
+        let dir = crate::scratch_dir("fscrypt-rerecord");
+        let (runtime, data) = (dir.join("run"), dir.join("data"));
+        fs::create_dir_all(&runtime).unwrap();
+        fs::create_dir_all(data.join("misc/vold")).unwrap();
+        Owner::prepare(&runtime, &data).unwrap();
+        let owner = Owner::locate(&runtime).unwrap().unwrap();
+        owner.encrypt().unwrap();
+        assert!(owner.has_policies().unwrap());
+        assert!(owner.roots().unwrap().is_empty());
+        let policy = [&[2u8, 1, 4, 2, 0, 0, 0, 0][..], &[7; 16]].concat();
+        let misc = data.join("misc");
+        store(&misc, &[&policy[..], &[0; NONCE]].concat()).unwrap();
+        inherit(&misc, &misc.join("vold")).unwrap();
+        owner.set_policy(&misc.join("vold"), &policy).unwrap();
+        assert!(owner.roots().unwrap().is_empty());
+        owner.set_policy(&misc, &policy).unwrap();
+        let roots = owner.roots().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].inode, fs::metadata(&misc).unwrap().ino());
+        assert!(owner.locking());
+        owner.set_policy(&misc, &policy).unwrap();
+        assert!(owner.roots().unwrap() == roots);
         fs::remove_dir_all(dir).unwrap();
     }
 

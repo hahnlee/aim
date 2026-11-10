@@ -113,6 +113,31 @@ fn excluded_services_are_not_started() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `installkey`'s vdc left out is the failure it reboots for: the boot
+/// shuts down there, before any encrypted directory is made without the
+/// system DE key.
+#[test]
+fn a_boot_without_installkey_s_vdc_ends_there() {
+    let Some(image) = derived_image() else { return };
+    let root = common::temp_dir("boot-no-vdc");
+    let mut options = BootOptions::new(image, root.join("data"), RunMode::DryRun);
+    options.exclude = BTreeSet::from(["vdc".to_string()]);
+    let mut boot = Boot::prepare(options).unwrap();
+    let report = boot.run().clone();
+    assert_eq!(
+        report.shutdown.as_deref(),
+        Some("reboot,recovery --prompt_and_wipe_data --reason=enablefilecrypto_failed")
+    );
+    assert!(
+        !report
+            .commands
+            .iter()
+            .any(|record| record.executed.command.starts_with("mkdir /data/misc "))
+    );
+    common::make_writable(&root);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The full boot of the derived image as a dry run. Prints the statistics.
 #[test]
 fn real_image_dry_run_boot() {

@@ -262,6 +262,7 @@ name = "aim-host-lock"
 version = "0.1.0"
 dependencies = [
  "aim-hostcall",
+ "libc",
  "zeroize",
 ]
 

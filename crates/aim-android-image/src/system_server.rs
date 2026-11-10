@@ -34,6 +34,9 @@ const SYSTEM_SERVER_METHODS: [&str; 3] = [
 
 /// Where the derived image has `image/native-services`, for guest-init.
 pub const NATIVE_SERVICES: &str = "/system/etc/aim/native-services";
+/// Where an app host image (`tools/app-host-image.sh`) lists the services
+/// init starts for it; an image without it runs the original SystemServer.
+pub const APP_HOST_SERVICES: &str = "/system/etc/aim/app-host-services";
 
 /// A service of `image/native-services`.
 #[derive(Clone, Debug, PartialEq, Eq)]

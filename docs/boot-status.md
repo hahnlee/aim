@@ -458,12 +458,15 @@ been remeasured; no guest boot was run (2026-10-28).
 ```
 cargo aim build        # <derived> is target/aim/derived/root
 guest-init --image <derived> --data <data> --run \
-    --exclude zygote,surfaceflinger,vold,bpfloader --timeout 45
+    --exclude zygote,surfaceflinger,bpfloader --timeout 45
 ```
 
 - `--exclude` keeps services (and `exec` programs) from starting. A
   `wait_for_prop` or `exec` that only an excluded service would end is
-  satisfied after two seconds, as with `--only`.
+  satisfied after two seconds, as with `--only`. An `exec` whose failure
+  reboots (`installkey`'s and `init_user0`'s `vdc`) left out is a failure:
+  the boot ends, as /data cannot be encrypted without vold, vdc,
+  keystore2 and the KeyMint HAL (ADR 0016).
 - SIGINT, SIGTERM or SIGHUP to `cargo aim boot` stops the guest and
   leaves no guest process. `cargo aim boot` catches those signals rather
   than blocking them (a blocked mask survives exec, so guest-init would
@@ -1011,7 +1014,10 @@ boot of a data directory installs the same system DE, user 0 DE and CE keys
 fresh directory the app host has written `/data/system_ce/0` before vold
 prepares user 0's CE storage, so `prepareUserStorage` fails ENOTEMPTY and
 the original `UserDataPreparer` recovers by destroying and preparing it
-again. Settings'
+again. A data directory's CE storage belongs to the image that first
+mounts it: `mount_all` refuses a data directory the derived image
+(the original LockSettingsService) booted to the app host image, and the
+reverse, naming both (ADR 0016). Settings'
 warm median first presented frame was 1.094 s after open (2026-10-30). Raw capture now waits for user-0 DE storage
 about 0.2 s on warm data; fresh data also waits for init to apply the locale.
 Full modes, HDR/color/refresh and DisplayManager information still query

@@ -455,13 +455,22 @@ impl GuestExecutor {
         blocking: bool,
         reboot_on_failure: Option<String>,
     ) -> Result<CommandFlow, String> {
-        let name = self
-            .supervisor
-            .add_exec_service(spec, &self.planner.ids, reboot_on_failure)?;
+        let name =
+            self.supervisor
+                .add_exec_service(spec, &self.planner.ids, reboot_on_failure.clone())?;
         let program = spec.args[0].rsplit('/').next().unwrap_or("").to_string();
         if let Some(reason) = self.filtered(&program) {
             self.supervisor.discard_temporary(&name);
             self.effect(Effect::Skipped(format!("{name}: {reason}")));
+            // One the boot cannot go on without did not succeed: the
+            // boot shuts down as its failure asks, rather than going on
+            // without what it makes (installkey's system DE key).
+            if let Some(target) = reboot_on_failure {
+                self.log.push(format!(
+                    "{name} did not run ({reason}), and the boot needs it: shutting down"
+                ));
+                self.shutdown.get_or_insert(target);
+            }
             return Ok(CommandFlow::Done);
         }
         let props = self.props.clone();
@@ -736,13 +745,23 @@ impl GuestExecutor {
                 "mount_all ({mode}): partitions are pre-extracted and /data has no fileencryption=; ro.crypto.state=unencrypted, trigger nonencrypted"
             )));
         };
-        if let Some(data) = &self.data
-            && data.borrow().predates_fbe()?
-        {
-            let reason = "a data directory made without file-based encryption cannot get it (ADR 0016): recreate it";
-            self.fatal
-                .get_or_insert_with(|| format!("mount_all: {reason}"));
-            return Err(reason.to_string());
+        if let Some(data) = self.data.clone() {
+            if data.borrow().predates_fbe()? {
+                let reason = "a data directory made without file-based encryption cannot get it (ADR 0016): recreate it";
+                self.fatal
+                    .get_or_insert_with(|| format!("mount_all: {reason}"));
+                return Err(reason.to_string());
+            }
+            let claimed = data.borrow().claim_ce_protection();
+            if let Err(reason) = claimed {
+                self.fatal
+                    .get_or_insert_with(|| format!("mount_all: {reason}"));
+                return Err(reason);
+            }
+            data.borrow()
+                .fscrypt()?
+                .encrypt()
+                .map_err(|e| format!("fscrypt: {e}"))?;
         }
         // FS_MGR_MNTALL_DEV_FILE_ENCRYPTED.
         self.set_property("ro.crypto.state", "encrypted")?;

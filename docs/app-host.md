@@ -135,9 +135,14 @@ tools/guest-shell.sh <data> 'service call aim.app_host 1 s16 com.android.calcula
 ```
 
 `startActivity` takes a component (`package/.Class`) or a package, whose
-launch activity it starts. `<data>` must be one Android booted once with its original image (the
-app host reads the package and settings state it persisted), with the app
-installed. `image/app-host/services` (in the image as
+launch activity it starts. `<data>` is a new data directory, which starts
+from the data template (`--userdata`), or one the app host image booted
+before, with the app installed. It cannot be one the original image
+booted: with file-based encryption the LockSettings of the first image to
+mount a data directory protects its CE storage, the original's with a
+synthetic password the app host cannot open and the app host's with a
+keychain item the original cannot, so guest-init's `mount_all` refuses the
+other image with the owner it found (ADR 0016). `image/app-host/services` (in the image as
 `/system/etc/aim/app-host-services`) leaves out what an app's start does
 not need, and says why the rest stays. The agent waits for zygote to
 listen, as `ZygoteProcess.waitForConnectionToZygote` does.

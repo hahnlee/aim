@@ -17,8 +17,10 @@
 //! user's search list and removed with the directory, so that nothing of
 //! it reaches the user's keychain.
 
-use std::ffi::{CString, c_char, c_void};
+use std::ffi::{CStr, CString, OsStr, c_char, c_void};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use zeroize::Zeroizing;
@@ -112,10 +114,11 @@ aim_hostcall::dylib! {
 
 /// `kCFStringEncodingUTF8`.
 const UTF8: u32 = 0x0800_0100;
-/// `errSecItemNotFound`, `errSecAllocate`, `errSecParam`.
+/// `errSecItemNotFound`, `errSecAllocate`, `errSecParam`, `errSecIO`.
 pub const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 const ERR_SEC_ALLOCATE: i32 = -108;
 const ERR_SEC_PARAM: i32 = -50;
+const ERR_SEC_IO: i32 = -36;
 /// `kSecPreferencesDomainUser`.
 const DOMAIN_USER: i32 = 0;
 /// The password of a keychain file: it guards nothing from the user, who
@@ -189,11 +192,13 @@ impl Keychain {
         Keychain(None)
     }
 
-    /// The keychain file `path`, made if there is none, never in the
-    /// user's search list, and unlocked.
+    /// The keychain file `path`, made if there is none, unlocked, and
+    /// taken out of the user's search list, where creating it puts it:
+    /// each open does, so a file whose maker was stopped before is too.
     pub fn file(path: &Path) -> Result<Self, i32> {
         let name = CString::new(path.as_os_str().as_bytes()).map_err(|_| ERR_SEC_PARAM)?;
         let (password, len) = (FILE_PASSWORD.as_ptr().cast(), FILE_PASSWORD.len() as u32);
+        let _search_list = SearchListLock::take()?;
         let created = !path.exists();
         let mut keychain = std::ptr::null();
         // SAFETY: a NUL-terminated path, the password's bytes; the keychain
@@ -213,9 +218,7 @@ impl Keychain {
             })?;
             Owned::new(keychain)?
         };
-        if created {
-            unlist(keychain.0)?;
-        }
+        unlist(keychain.0)?;
         // SAFETY: the keychain and the password's bytes.
         check(unsafe { SecKeychainUnlock(keychain.0, len, password, true) })?;
         Ok(Keychain(Some(keychain)))
@@ -315,8 +318,48 @@ impl Keychain {
     }
 }
 
-/// Takes `keychain` out of the user's keychain search list, if creating
-/// it put it there.
+/// The user's search list is read and written back whole, by
+/// `SecKeychainCreate` as by [`unlist`]: an exclusive `flock` on a lock
+/// file of the user's makes aim's processes do it one at a time, so none
+/// loses another's change. Closing the file releases it.
+struct SearchListLock {
+    _file: std::fs::File,
+}
+
+impl SearchListLock {
+    fn take() -> Result<Self, i32> {
+        let mut dir = [0 as c_char; libc::PATH_MAX as usize];
+        // SAFETY: the buffer and its length.
+        let n =
+            unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, dir.as_mut_ptr(), dir.len()) };
+        if n == 0 || n > dir.len() {
+            return Err(ERR_SEC_IO);
+        }
+        // SAFETY: confstr NUL-terminated what it wrote.
+        let dir = unsafe { CStr::from_ptr(dir.as_ptr()) };
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(
+                Path::new(OsStr::from_bytes(dir.to_bytes()))
+                    .join("dev.aim.keychain-search-list.lock"),
+            )
+            .map_err(|_| ERR_SEC_IO)?;
+        loop {
+            // SAFETY: an open file of ours.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                return Ok(Self { _file: file });
+            }
+            if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                return Err(ERR_SEC_IO);
+            }
+        }
+    }
+}
+
+/// Takes `keychain` out of the user's keychain search list if it is
+/// there, keeping every other entry.
 fn unlist(keychain: CFTypeRef) -> Result<(), i32> {
     // SAFETY: the copied list and the filtered one are released as Owned;
     // the list holds SecKeychainRefs.
@@ -353,6 +396,84 @@ mod tests {
             fn SecKeychainLock(keychain: CFTypeRef) -> i32;
             fn SecItemDelete(query: CFTypeRef) -> i32;
         }
+    }
+
+    aim_hostcall::dylib! {
+        static TEST_CORE_FOUNDATION = c"/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation" {
+            fn CFArrayCreateMutableCopy(alloc: CFTypeRef, capacity: isize, array: CFTypeRef) -> CFTypeRef;
+        }
+    }
+
+    /// The user's search list.
+    fn search_list() -> Owned {
+        let mut list = std::ptr::null();
+        // SAFETY: the copied list is released as an Owned.
+        check(unsafe { SecKeychainCopyDomainSearchList(DOMAIN_USER, &mut list) }).unwrap();
+        Owned::new(list).unwrap()
+    }
+
+    /// Whether the user's search list holds the keychain file `path`.
+    fn listed(path: &Path) -> bool {
+        let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let mut keychain = std::ptr::null();
+        // SAFETY: a NUL-terminated path; the reference is released as an
+        // Owned, the list's entries compared with it.
+        unsafe {
+            check(SecKeychainOpen(name.as_ptr(), &mut keychain)).unwrap();
+            let keychain = Owned::new(keychain).unwrap();
+            let list = search_list();
+            (0..CFArrayGetCount(list.0))
+                .any(|i| CFEqual(CFArrayGetValueAtIndex(list.0, i), keychain.0))
+        }
+    }
+
+    /// Keychain files made at once stay out of the user's search list and
+    /// take nothing else out of it; one its maker left there (stopped
+    /// before taking it out) is taken out when it is opened again. It
+    /// creates and deletes keychain files, so it runs only when asked.
+    #[test]
+    #[ignore]
+    fn keychain_files_stay_out_of_the_search_list() {
+        let dir = std::env::temp_dir().join(format!("aim-keychain-list-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<_> = (0..4).map(|i| dir.join(format!("{i}.keychain"))).collect();
+        // SAFETY: the user's list, read for its length.
+        let before = unsafe { CFArrayGetCount(search_list().0) };
+        std::thread::scope(|scope| {
+            for path in &paths {
+                scope.spawn(|| drop(Keychain::file(path).unwrap()));
+            }
+        });
+        assert!(paths.iter().all(|path| !listed(path)));
+        // SAFETY: as above.
+        assert_eq!(unsafe { CFArrayGetCount(search_list().0) }, before);
+        // Back in the list, as SecKeychainCreate puts it there.
+        let left = Keychain::file(&paths[0]).unwrap();
+        {
+            let _lock = SearchListLock::take().unwrap();
+            let list = search_list();
+            // SAFETY: a mutable copy of the list, the keychain appended.
+            unsafe {
+                let list =
+                    Owned::new(CFArrayCreateMutableCopy(std::ptr::null(), 0, list.0)).unwrap();
+                CFArrayAppendValue(list.0, left.0.as_ref().unwrap().0);
+                check(SecKeychainSetDomainSearchList(DOMAIN_USER, list.0)).unwrap();
+            }
+        }
+        assert!(listed(&paths[0]));
+        drop(Keychain::file(&paths[0]).unwrap());
+        assert!(!listed(&paths[0]));
+        for path in &paths {
+            let keychain = Keychain::file(path).unwrap();
+            // SAFETY: a keychain this test created.
+            assert_eq!(
+                unsafe { SecKeychainDelete(keychain.0.as_ref().unwrap().0) },
+                0
+            );
+        }
+        // SAFETY: as above.
+        assert_eq!(unsafe { CFArrayGetCount(search_list().0) }, before);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// `errAuthorizationInternal`, `errSecDuplicateItem`.
