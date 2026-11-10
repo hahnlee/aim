@@ -2369,22 +2369,40 @@ fn wait_connect(fd: i32, flags: u64) -> Result<(), i64> {
             &mut len,
         )
     };
-    let ms = timeout.tv_sec * 1000 + (timeout.tv_usec as i64 + 999) / 1000;
-    let mut ready = libc::pollfd {
-        fd,
-        events: libc::POLLOUT,
-        revents: 0,
-    };
-    // SAFETY: one pollfd of ours.
-    match unsafe { libc::poll(&mut ready, 1, if ms == 0 { -1 } else { ms as i32 }) } {
-        0 => Err(-(EAGAIN as i64)),
-        n if n > 0 => Ok(()),
-        _ => {
-            let error = errno::last();
-            if error == crate::errno::EINTR && ms != 0 {
-                super::signal::not_restarted();
+    let timed = timeout.tv_sec != 0 || timeout.tv_usec != 0;
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::new(timeout.tv_sec as u64, timeout.tv_usec as u32 * 1000);
+    loop {
+        // Waited in chunks poll's int milliseconds can hold.
+        let ms = if timed {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Err(-(EAGAIN as i64));
             }
-            Err(-(error as i64))
+            left.as_millis().clamp(1, i32::MAX as u128) as i32
+        } else {
+            -1
+        };
+        let mut ready = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: one pollfd of ours.
+        match unsafe { libc::poll(&mut ready, 1, ms) } {
+            0 => {}
+            n if n > 0 => return Ok(()),
+            _ => {
+                let error = errno::last();
+                // A host signal with no guest signal due goes on waiting.
+                if error == crate::errno::EINTR && !super::signal::due() {
+                    continue;
+                }
+                if error == crate::errno::EINTR && timed {
+                    super::signal::not_restarted();
+                }
+                return Err(-(error as i64));
+            }
         }
     }
 }

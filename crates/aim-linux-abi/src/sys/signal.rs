@@ -876,8 +876,15 @@ const RESTART_ALWAYS: u64 = 1 << 62;
 /// A call whose EINTR is plain: never restarted ([`not_restarted`]).
 const RESTART_NEVER: u64 = 1 << 61;
 
+/// Whether a guest signal is due on the calling thread: what ends a wait
+/// with EINTR on Linux (`signal_pending`), where a host signal alone
+/// interrupts the host call.
+pub(super) fn due() -> bool {
+    thread::current().is_some_and(interrupted)
+}
+
 /// The current syscall's EINTR is Linux's plain -EINTR, not -ERESTARTSYS:
-/// it is not restarted, with or without a handler.
+/// a handler that runs for it does not restart it, SA_RESTART or not.
 pub(super) fn not_restarted() {
     if let Some(th) = thread::current() {
         th.sig.no_restart.store(true, Relaxed);
@@ -910,7 +917,7 @@ pub fn after_syscall(ctx: &GuestContext, nr: u64, a: &[u64; 6], r: i64) -> bool 
     }
     th.sig.restart_nr.store((nr + 1) | flags, Relaxed);
     th.sig.restart_a0.store(a[0], Relaxed);
-    if r != -(EINTR as i64) || flags == RESTART_NEVER {
+    if r != -(EINTR as i64) {
         return false;
     }
     // A ptrace stop that interrupted the call sees it about to restart,

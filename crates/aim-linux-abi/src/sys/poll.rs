@@ -2228,6 +2228,61 @@ mod reportable_tests {
         close(&[fd]);
     }
 
+    /// A host signal with no guest signal due does not end the wait for a
+    /// TCP connection (`signal_pending` is what does on Linux).
+    #[test]
+    fn a_connecting_send_waits_past_a_host_signal() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_connecting_send_waits_past_a_host_signal",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        extern "C" fn ignore(_: i32) {}
+        // SAFETY: a handler that does nothing, without SA_RESTART, so the
+        // host poll fails with EINTR.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = ignore as usize;
+            libc::sigaction(libc::SIGUSR2, &action, std::ptr::null_mut());
+        }
+        let fd = crate::sys::net::socket([2, 1 | O_NONBLOCK, 0, 0, 0, 0]);
+        let mut address = [0u8; 16];
+        address[..2].copy_from_slice(&2u16.to_le_bytes());
+        address[2..4].copy_from_slice(&9u16.to_be_bytes());
+        address[4..8].copy_from_slice(&[192, 0, 2, 1]);
+        assert_eq!(
+            crate::sys::net::connect([fd as u64, address.as_ptr() as u64, 16, 0, 0, 0]),
+            -115,
+            "TEST-NET-1 needs a route"
+        );
+        assert_eq!(fs::fcntl([fd as u64, 4, 0, 0, 0, 0]), 0);
+        let timeout = [0i64, 500_000];
+        assert_eq!(
+            crate::sys::net::setsockopt([fd as u64, 1, 21, timeout.as_ptr() as u64, 16, 0]),
+            0
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sender = std::thread::spawn(move || {
+            // SAFETY: this thread's own handle.
+            tx.send(unsafe { libc::pthread_self() } as usize).unwrap();
+            let started = std::time::Instant::now();
+            let r = crate::sys::net::sendto([fd as u64, b"x".as_ptr() as u64, 1, 0, 0, 0]);
+            (r, started.elapsed())
+        });
+        let thread = rx.recv().unwrap() as libc::pthread_t;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // SAFETY: a live thread of this process, joined below.
+        unsafe { libc::pthread_kill(thread, libc::SIGUSR2) };
+        let (r, waited) = sender.join().unwrap();
+        assert_eq!(r, -11);
+        assert!(
+            waited >= std::time::Duration::from_millis(450),
+            "{waited:?}"
+        );
+        close(&[fd]);
+    }
+
     /// `POLLEX_SET` is EPOLLPRI alone: select sleeps for its timeout on an
     /// unconnected TCP socket asked only for exceptions, which `tcp_poll`
     /// reports hung up and writable.
