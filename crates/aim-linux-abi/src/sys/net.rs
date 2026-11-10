@@ -3287,6 +3287,12 @@ pub(super) fn read_pinned(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i6
         && !o.icmp4.load(Ordering::Relaxed)
         && !o.link_udp.load(Ordering::Relaxed)
     {
+        // A raw socket's read is `raw_recvmsg`'s.
+        if s.datagram()
+            && let Err(error) = take_error(&s, input.fd())
+        {
+            return Some(error);
+        }
         // SAFETY: the guest's iovec buffers.
         let r =
             errno::check(unsafe { libc::readv(input.fd(), iov.as_ptr(), iov.len() as i32) } as i64);
@@ -4168,6 +4174,28 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    /// A raw socket's read() is `raw_recvmsg`'s, which returns a pending
+    /// error before any datagram (`skb_recv_datagram`). Darwin opens raw
+    /// sockets only for root, so the raw socket here is a UDP host socket
+    /// with a raw socket's Linux state, and its error one a recvmmsg kept.
+    #[test]
+    fn a_raw_socket_read_returns_its_pending_error_first() {
+        use super::*;
+        let _view = crate::vfs::test_view();
+        let fd = socket([2, 2 | 0o4000, 0, 0, 0, 0]);
+        assert!(fd >= 0, "socket {fd}");
+        let raw = Sock::of(SockType::Raw, Family::Inet(InetOpts::default()));
+        raw.kept_error.store(111, Ordering::Relaxed);
+        fdtab::insert(fd as i32, Kind::Sock(raw));
+        let mut buffer = [0u8; 4];
+        let read = |buffer: &mut [u8; 4]| {
+            super::super::fs::read([fd as u64, buffer.as_mut_ptr() as u64, 4, 0, 0, 0])
+        };
+        assert_eq!(read(&mut buffer), -111);
+        assert_eq!(read(&mut buffer), -11);
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+    }
+
     #[test]
     fn proxy_scm_receipt_reexport_dup_and_revocation_keep_owner_class() {
         if super::super::fdtab::isolated_kernel_test(
