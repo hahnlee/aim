@@ -1784,6 +1784,40 @@ pub fn init() {
     super::host_descriptors::init();
     sync_file::init();
     adopt_inherited();
+    hold_table_top();
+}
+
+/// Keep a descriptor at the top of the hidden range for the process's
+/// life. A descriptor that is the process's highest costs Darwin about
+/// 5 µs to open and close again, against 0.25 µs below another one:
+/// Darwin trims its descriptor table to the highest descriptor and grows
+/// it back on the next. A pin (`pin_guest`) is such a descriptor in every
+/// ioctl, fcntl and blocking read or write, and is the highest one unless
+/// something is held above it.
+fn hold_table_top() {
+    // SAFETY: plain getdtablesize.
+    let top = unsafe { libc::getdtablesize() }.min(OPEN_MAX) - 1;
+    if top < hidden_base() {
+        return;
+    }
+    // SAFETY: a new descriptor of our own, moved to the top.
+    let held = unsafe {
+        let fd = libc::kqueue();
+        if fd < 0 {
+            crate::diag!(
+                "descriptor table top: kqueue errno {}",
+                crate::errno::last()
+            );
+            return;
+        }
+        let held = libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, top);
+        libc::close(fd);
+        held
+    };
+    // Taken already: the table stays at full size either way.
+    if held >= 0 {
+        keep_hidden(held);
+    }
 }
 
 /// Every fd in the table whose kind matches `f`.
@@ -1878,14 +1912,15 @@ pub fn hide(fd: i32) -> i32 {
     fd
 }
 
+/// <sys/syslimits.h>.
+const OPEN_MAX: i32 = 10240;
+
 /// Where the layer's own fds go: high up, but below `OPEN_MAX` (10240),
 /// the highest fd `posix_spawn` can pass to a fork child
 /// (`posix_spawn_file_actions_addinherit_np` refuses the rest with EBADF),
 /// and within the descriptor table: F_DUPFD fails above it, as it does at
 /// 3/4 of a soft RLIMIT_NOFILE beyond kern.maxfilesperproc.
 pub fn hidden_base() -> i32 {
-    // <sys/syslimits.h>.
-    const OPEN_MAX: i32 = 10240;
     // SAFETY: plain getdtablesize.
     let table = unsafe { libc::getdtablesize() };
     (table.min(OPEN_MAX) * 3 / 4).max(64)
