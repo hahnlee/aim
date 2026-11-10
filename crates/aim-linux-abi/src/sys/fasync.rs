@@ -16,13 +16,19 @@
 //! file's own wakeups, where a readiness check on SIGIO would signal every
 //! ready descriptor again; wakeups before the watcher reads them are one
 //! signal each way, where Linux queues one real-time signal each. A
-//! socket's write knote wakes on every freeing of space, where Linux sends
-//! POLL_OUT only once a send found the buffer full (SOCKWQ_ASYNC_NOSPACE).
+//! socket's or tty's write knote wakes on every freeing of space, where
+//! Linux sends POLL_OUT only once a write found the buffer full
+//! (SOCKWQ_ASYNC_NOSPACE, TTY_DO_WRITE_WAKEUP).
 //! The private kqueue is drained once the knotes are in it, so readiness
 //! that is already there raises nothing, as on Linux. The registration
 //! lasts until the last guest fd of the file known here closes (Linux
 //! removes the fasync entry at the last reference), and a fork child gets
 //! a copy of each owner, as an inotify's.
+//!
+//! An evdev (its socket is the layer's transport) and a pty (Darwin's
+//! F_SETOWN of a tty sets its foreground group, and the description's
+//! O_ASYNC is the pty keeper's) are signalled the same way, with their
+//! owner always kept here.
 //!
 //! The descriptors this layer implements whose Linux files have no fasync
 //! (eventfd, timerfd, signalfd, epoll, pidfd, ...) and host files without
@@ -198,12 +204,76 @@ pub fn close_private(fd: i32) {
 /// The owner of an open file that is kept here, shared by its dups.
 struct File {
     fown: Fown,
-    /// A host file, which the watcher signals for; else one without fasync.
-    host: bool,
+    source: Source,
     armed: Mutex<Option<Armed>>,
 }
 
-/// The host files with a Linux fasync, by what their wakeups signal.
+/// Who holds and signals the owner of an open file.
+#[derive(Clone, Copy)]
+pub struct Source {
+    /// The Linux fasync of the file, which the watcher delivers while
+    /// Darwin cannot; None for a file without one, whose owner is kept
+    /// here and never signalled.
+    fasync: Option<Fasync>,
+    /// The host file is the Linux file, whose fown Darwin holds when it
+    /// can; else Darwin's fown of it is never used.
+    darwin: bool,
+}
+
+impl Source {
+    /// The source of the open file behind host descriptor `fd`, of `kind`.
+    pub fn of(fd: i32, kind: Option<&fdtab::Kind>) -> Result<Source, Errno> {
+        use fdtab::Kind;
+        let (fasync, darwin) = match kind {
+            // `evdev_fasync`; its socket is the layer's transport.
+            Some(Kind::Evdev(_)) => (Some(Fasync::Evdev), false),
+            // `tty_fasync`; Darwin's F_SETOWN of a tty would set its
+            // foreground group, and the description's O_ASYNC is the pty
+            // keeper's.
+            Some(Kind::Pty(_)) => (Some(Fasync::Tty), false),
+            None | Some(Kind::Sock(_) | Kind::Regular(_) | Kind::Memfd(_))
+                if super::fuse_client::get(fd).is_none() =>
+            {
+                (Fasync::of(fd)?, true)
+            }
+            _ => (None, false),
+        };
+        Ok(Source { fasync, darwin })
+    }
+
+    /// Whether the file has a Linux fasync, which FIOASYNC may change.
+    pub fn has_fasync(&self) -> bool {
+        self.fasync.is_some()
+    }
+
+    /// Darwin's owner of the file for `owner` when Darwin holds it.
+    fn darwin_owner(&self, owner: &super::fown::Owner) -> Option<i32> {
+        match self.fasync {
+            Some(fasync) if self.darwin => owner.host(fasync == Fasync::Socket),
+            _ => None,
+        }
+    }
+
+    fn save(&self, w: &mut super::fork_state::Writer) {
+        w.opt(self.fasync.as_ref(), |w, fasync| w.u32(*fasync as u32));
+        w.bool(self.darwin);
+    }
+
+    fn load(r: &mut super::fork_state::Reader) -> Source {
+        let fasync = r.opt(|r| match r.u32() {
+            0 => Fasync::Pipe,
+            1 => Fasync::Socket,
+            2 => Fasync::Tty,
+            _ => Fasync::Evdev,
+        });
+        Source {
+            fasync,
+            darwin: r.bool(),
+        }
+    }
+}
+
+/// The files with a Linux fasync, by what their wakeups signal.
 #[derive(Clone, Copy, PartialEq)]
 enum Fasync {
     /// `pipe_fasync`: POLL_IN to readers on a write, POLL_OUT to writers
@@ -215,6 +285,9 @@ enum Fasync {
     /// `tty_fasync`: POLL_IN on input, POLL_OUT on write space; a hangup
     /// drops the registration without a signal.
     Tty,
+    /// `evdev_fasync`: POLL_IN on events (`evdev_pass_values`), POLL_HUP
+    /// when the device goes away (`evdev_hangup`).
+    Evdev,
 }
 
 impl Fasync {
@@ -249,6 +322,7 @@ impl Fasync {
                 *space = e.data;
                 (freed || eof).then_some(POLL_OUT)
             }
+            Fasync::Evdev => Some(if eof { POLL_HUP } else { POLL_IN }),
             _ if !eof => Some(if read { POLL_IN } else { POLL_OUT }),
             // A peer gone for good is POLL_HUP; one that only shut down
             // its writing is POLL_IN (`unix_shutdown`, `tcp_fin`). Its
@@ -323,10 +397,9 @@ fn file(fd: i32) -> Option<Arc<File>> {
 }
 
 /// fcntl's owner commands (F_SETOWN, F_SETSIG, ...) on guest fd `guest`,
-/// whose host descriptor is `fd`; None for other commands. `host`: the
-/// host file is the Linux file, whose fown Darwin holds when it can if it
-/// has a fasync.
-pub fn fcntl(fd: i32, guest: i32, host: bool, cmd: u64, arg: u64) -> Option<i64> {
+/// whose host descriptor is `fd` and whose file's owner `source` holds;
+/// None for other commands.
+pub fn fcntl(fd: i32, guest: i32, source: Source, cmd: u64, arg: u64) -> Option<i64> {
     if !matches!(
         cmd,
         F_SETOWN | F_GETOWN | F_SETOWN_EX | F_GETOWN_EX | F_SETSIG | F_GETSIG
@@ -334,13 +407,14 @@ pub fn fcntl(fd: i32, guest: i32, host: bool, cmd: u64, arg: u64) -> Option<i64>
         return None;
     }
     // A host file without a Linux fasync keeps its owner here, unsignalled.
-    let host = match Fasync::of(fd) {
-        Ok(fasync) => host && fasync.is_some(),
-        Err(error) => return Some(-(error as i64)),
-    };
+    let host = source.darwin && source.fasync.is_some();
     let (file, kept) = match file(guest) {
         Some(file) => (file, true),
-        None if host && (cmd == F_GETOWN || cmd == F_SETOWN && darwin_owns(fd, arg as i32)) => {
+        None if host
+            && (cmd == F_GETOWN
+                || cmd == F_SETOWN
+                    && (arg as i32 <= 0 || source.fasync == Some(Fasync::Socket))) =>
+        {
             return Some(host_fcntl(fd, cmd, arg));
         }
         None => {
@@ -354,7 +428,7 @@ pub fn fcntl(fd: i32, guest: i32, host: bool, cmd: u64, arg: u64) -> Option<i64>
             };
             let file = Arc::new(File {
                 fown,
-                host,
+                source,
                 armed: Mutex::new(None),
             });
             (file, false)
@@ -369,20 +443,12 @@ pub fn fcntl(fd: i32, guest: i32, host: bool, cmd: u64, arg: u64) -> Option<i64>
             .get_or_insert_default()
             .insert(guest, file.clone());
     }
-    if host && let Err(error) = project(fd, guest, &file) {
+    if source.fasync.is_some()
+        && let Err(error) = project(fd, guest, &file)
+    {
         return Some(-(error as i64));
     }
     Some(0)
-}
-
-/// Whether F_SETOWN's `owner` (a pid, a negated group, or 0) of host
-/// descriptor `fd` is one Darwin's fown holds.
-fn darwin_owns(fd: i32, owner: i32) -> bool {
-    owner <= 0 || is_socket(fd)
-}
-
-fn is_socket(fd: i32) -> bool {
-    matches!(Fasync::of(fd), Ok(Some(Fasync::Socket)))
 }
 
 /// Darwin's owner of host descriptor `fd`: a pid, or a negated group.
@@ -426,9 +492,9 @@ fn host_fcntl(fd: i32, cmd: u64, arg: u64) -> i64 {
 /// file leaves this table; otherwise Darwin's is cleared and the watcher
 /// delivers while O_ASYNC is set.
 fn project(fd: i32, guest: i32, file: &Arc<File>) -> Result<(), Errno> {
-    let host = file.fown.owner().host(is_socket(fd));
+    let host = file.source.darwin_owner(&file.fown.owner());
     // SAFETY: plain fcntl.
-    if unsafe { libc::fcntl(fd, libc::F_SETOWN, host.unwrap_or(0)) } < 0 {
+    if file.source.darwin && unsafe { libc::fcntl(fd, libc::F_SETOWN, host.unwrap_or(0)) } < 0 {
         return Err(errno::last());
     }
     if host.is_some() {
@@ -441,15 +507,25 @@ fn project(fd: i32, guest: i32, file: &Arc<File>) -> Result<(), Errno> {
     refresh(fd, guest, file)
 }
 
-/// Arm or disarm host file `file` (descriptor `fd`, guest fd `guest`) as
-/// its O_ASYNC flag now says.
-fn refresh(fd: i32, guest: i32, file: &Arc<File>) -> Result<(), Errno> {
+/// The status flags of host descriptor `fd`, as Darwin's F_GETFL gives
+/// them: a pty's are its keeper's.
+fn status(fd: i32) -> Result<i32, Errno> {
+    if let Some(fdtab::Kind::Pty(description)) = fdtab::get(fd) {
+        return Ok(super::fs::open_flags_to_host(description.flags()));
+    }
     // SAFETY: plain fcntl.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
         return Err(errno::last());
     }
-    let fasync = match Fasync::of(fd)? {
+    Ok(flags)
+}
+
+/// Arm or disarm file `file` (descriptor `fd`, guest fd `guest`) as its
+/// O_ASYNC flag now says.
+fn refresh(fd: i32, guest: i32, file: &Arc<File>) -> Result<(), Errno> {
+    let flags = status(fd)?;
+    let fasync = match file.source.fasync {
         Some(fasync) if flags & libc::O_ASYNC != 0 => fasync,
         _ => {
             file.disarm();
@@ -472,7 +548,10 @@ fn refresh(fd: i32, guest: i32, file: &Arc<File>) -> Result<(), Errno> {
         let mode = flags & libc::O_ACCMODE;
         let filters = [
             (libc::EVFILT_READ, mode != libc::O_WRONLY),
-            (libc::EVFILT_WRITE, mode != libc::O_RDONLY),
+            (
+                libc::EVFILT_WRITE,
+                mode != libc::O_RDONLY && fasync != Fasync::Evdev,
+            ),
         ];
         for (filter, _) in filters.into_iter().filter(|(_, wanted)| *wanted) {
             let k = libc::kevent {
@@ -519,7 +598,10 @@ fn refresh(fd: i32, guest: i32, file: &Arc<File>) -> Result<(), Errno> {
 /// here follows its O_ASYNC flag.
 pub fn status_changed(fd: i32, guest: i32) -> Result<(), Errno> {
     match file(guest) {
-        Some(file) if file.host && file.fown.owner().host(is_socket(fd)).is_none() => {
+        Some(file)
+            if file.source.fasync.is_some()
+                && file.source.darwin_owner(&file.fown.owner()).is_none() =>
+        {
             refresh(fd, guest, &file)
         }
         _ => Ok(()),
@@ -571,7 +653,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
     w.seq(groups.iter(), |w, (fds, file)| {
         w.seq(fds.iter(), |w, fd| w.i32(*fd));
         file.fown.save(w);
-        w.bool(file.host);
+        file.source.save(w);
         w.opt(lock(&file.armed).as_ref(), |w, armed| w.i32(armed.fd));
     });
 }
@@ -584,7 +666,7 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
         let fds = r.seq(|r| r.i32());
         let file = Arc::new(File {
             fown: Fown::load(r),
-            host: r.bool(),
+            source: Source::load(r),
             armed: Mutex::new(None),
         });
         (fds, file, r.opt(|r| r.i32()))

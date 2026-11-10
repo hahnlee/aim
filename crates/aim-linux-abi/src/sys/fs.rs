@@ -41,7 +41,7 @@ const ESPIPE: i64 = 29;
 const EROFS: i64 = 30;
 const EPERM: i64 = 1;
 
-fn open_flags_to_host(f: u64) -> i32 {
+pub(super) fn open_flags_to_host(f: u64) -> i32 {
     let mut h = match f & O_ACCMODE {
         0 => libc::O_RDONLY,
         1 => libc::O_WRONLY,
@@ -2632,8 +2632,8 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
         if cmd == F_SETFL {
             return description
                 .set_flags(arg)
-                .map(|_| 0)
-                .unwrap_or_else(|error| -(error as i64));
+                .and_then(|()| super::fasync::status_changed(fd, original))
+                .map_or_else(|error| -(error as i64), |()| 0);
         }
     }
     if let Some(Kind::Inotify(ino)) = pin.kind() {
@@ -2646,14 +2646,11 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
             return -(error as i64);
         }
     } else {
-        // The host file is the Linux one, whose fown Darwin holds as far
-        // as it can; the layer's other descriptors (a pty's broker refuses
-        // O_ASYNC, #2877) have no fasync.
-        let host = matches!(
-            pin.kind(),
-            None | Some(Kind::Sock(_) | Kind::Regular(_) | Kind::Memfd(_))
-        ) && super::fuse_client::get(fd).is_none();
-        if let Some(result) = super::fasync::fcntl(fd, original, host, cmd, arg) {
+        let source = match super::fasync::Source::of(fd, pin.kind()) {
+            Ok(source) => source,
+            Err(error) => return -(error as i64),
+        };
+        if let Some(result) = super::fasync::fcntl(fd, original, source, cmd, arg) {
             return result;
         }
     }
@@ -2747,14 +2744,12 @@ pub fn ioctl(a: [u64; 6]) -> i64 {
     }
     let (req, arg) = (a[1], a[2]);
     if req == FIOASYNC {
-        // Sockets, pipes and inotify have fasync; a pty has none yet (#2877).
         let fasync = match pin.kind() {
-            Some(Kind::Sock(_) | Kind::Inotify(_)) => true,
-            None if super::fuse_client::get(fd).is_none() => match stat_fd_kernel(fd) {
-                Ok(st) => matches!(st.st_mode & libc::S_IFMT, libc::S_IFSOCK | libc::S_IFIFO),
-                Err(error) => return error,
+            Some(Kind::Inotify(_)) => true,
+            kind => match super::fasync::Source::of(fd, kind) {
+                Ok(source) => source.has_fasync(),
+                Err(error) => return -(error as i64),
             },
-            _ => false,
         };
         return fioasync(a[0] as i32, arg, fasync);
     }

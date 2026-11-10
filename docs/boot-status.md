@@ -126,11 +126,14 @@ write space (a pipe writer on its reader's reads and close), POLL_HUP when a
 socket's peer is gone, each with its band and the si_fd that set O_ASYNC,
 until the file's last guest fd closes. Wakeups before the watcher reads them
 are one signal, where Linux queues one real-time signal each, and a socket's
-POLL_OUT comes on every freeing of space, not only after a send found it full.
+or tty's POLL_OUT comes on every freeing of space, not only after a write found
+it full.
 eventfd, timerfd, signalfd, epoll, pidfd, regular files and memfds keep their
 owner in the layer and, as on Linux, never signal it; a fork child copies these
-owners (#2858, #2859, #2860). A pty's broker refuses O_ASYNC, and FIOASYNC on
-it is ENOTTY (#2877). A fork child
+owners (#2858, #2859, #2860). An evdev signals its owner the same way, POLL_IN
+on events and POLL_HUP when the device goes, and a pty POLL_IN on input and
+POLL_OUT on write space; a pty's O_ASYNC is its description's in the pty
+keeper, and both keep every owner in the layer (#2877). A fork child
 gives each rebuilt pidfd, epoll and inotify fd its own close-on-exec flag
 (#2840) and its open file's O_NONBLOCK, and a pidfd (a kqueue) cannot
 be sent over SCM_RIGHTS (#2838). Darwin attaches no `NOTE_REAP` to a zombie, so a pidfd opened (or inherited

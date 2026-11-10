@@ -1469,4 +1469,57 @@ mod tests {
         drop(_replacement);
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    /// `evdev_fasync`: FIOASYNC is the open file's O_ASYNC, events signal
+    /// the F_SETSIG owner with POLL_IN, and the device going away with
+    /// POLL_HUP (`evdev_hangup`).
+    #[test]
+    fn o_async_signals_events_and_hangup() {
+        if fdtab::isolated_kernel_test("sys::evdev::tests::o_async_signals_events_and_hangup") {
+            return;
+        }
+        use super::super::fs::{fcntl, ioctl};
+        use super::super::signal::take_process;
+        use aim_host_display::input::{MOUSE, devices, server::Devices};
+        const SIGRT: i32 = 44;
+        fdtab::init();
+        super::super::signal::install_host_handlers();
+        let dir = std::env::temp_dir().join(format!("ev-async-{}", std::process::id()));
+        let devs = Devices::create(&dir, devices(100, 200, 160.0, 160.0)).unwrap();
+        let node = dir.join(format!("event{MOUSE}"));
+        let r = Resolved {
+            host: std::ffi::CString::new(node.to_str().unwrap()).unwrap(),
+            guest: format!("/dev/input/event{MOUSE}"),
+            area: Area::Input,
+        };
+        let fd = open(&r, 2).unwrap() as i32;
+        assert!(fd >= 0);
+        let pid = unsafe { libc::getpid() } as u64;
+        assert_eq!(fcntl([fd as u64, 8, pid, 0, 0, 0]), 0);
+        assert_eq!(fcntl([fd as u64, 10, SIGRT as u64, 0, 0, 0]), 0);
+        let on = 1i32;
+        assert_eq!(
+            ioctl([fd as u64, 0x5452, &on as *const i32 as u64, 0, 0, 0]),
+            0
+        );
+        assert_ne!(fcntl([fd as u64, 3, 0, 0, 0, 0]) & 0o20000, 0);
+        let next = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(info) = take_process(SIGRT) {
+                    assert_eq!(info.fields[1] as i32, fd);
+                    return (info.code, info.fields[0]);
+                }
+                assert!(std::time::Instant::now() < deadline, "no F_SETSIG signal");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        devs.emit(MOUSE, 1, &[(EV_ABS, ABS_X, 42)]);
+        assert_eq!(next(), (1, 0x41));
+        devs.close();
+        assert_eq!(next(), (6, 0x18));
+        fdtab::close_owned_guest(fd, false).unwrap();
+        drop(devs);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
