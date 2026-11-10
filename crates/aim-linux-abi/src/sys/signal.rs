@@ -263,6 +263,9 @@ pub struct ThreadSignals {
     restart_a0: AtomicU64,
     /// After `rt_sigreturn`: the context must be resumed exactly.
     exact: AtomicBool,
+    /// The syscall's EINTR is Linux's plain EINTR, never restarted: a
+    /// wait with a timeout (`sock_intr_errno`).
+    no_restart: AtomicBool,
     /// Set while the thread blocks in [`interruptible`].
     waker: Mutex<Option<Waker>>,
 }
@@ -294,6 +297,7 @@ impl ThreadSignals {
             restart_nr: AtomicU64::new(0),
             restart_a0: AtomicU64::new(0),
             exact: AtomicBool::new(false),
+            no_restart: AtomicBool::new(false),
             waker: Mutex::new(None),
         }
     }
@@ -863,6 +867,16 @@ fn restartable(nr: u64, timed: bool) -> bool {
 /// FUTEX_LOCK_PI(2), which Linux always restarts (-ERESTARTNOINTR).
 const RESTART_TIMED: u64 = 1 << 63;
 const RESTART_ALWAYS: u64 = 1 << 62;
+/// A call whose EINTR is plain: never restarted ([`not_restarted`]).
+const RESTART_NEVER: u64 = 1 << 61;
+
+/// The current syscall's EINTR is Linux's plain -EINTR, not -ERESTARTSYS:
+/// it is not restarted, with or without a handler.
+pub(super) fn not_restarted() {
+    if let Some(th) = thread::current() {
+        th.sig.no_restart.store(true, Relaxed);
+    }
+}
 
 /// Called after every syscall the dispatcher ran (`a` are its arguments).
 /// Returns true when the syscall was interrupted by a host signal but no
@@ -885,9 +899,12 @@ pub fn after_syscall(ctx: &GuestContext, nr: u64, a: &[u64; 6], r: i64) -> bool 
             _ => {}
         }
     }
+    if th.sig.no_restart.swap(false, Relaxed) {
+        flags = RESTART_NEVER;
+    }
     th.sig.restart_nr.store((nr + 1) | flags, Relaxed);
     th.sig.restart_a0.store(a[0], Relaxed);
-    if r != -(EINTR as i64) {
+    if r != -(EINTR as i64) || flags == RESTART_NEVER {
         return false;
     }
     // A ptrace stop that interrupted the call sees it about to restart,
@@ -961,8 +978,9 @@ extern "C" fn linux_abi_deliver(ctx: *mut GuestContext) {
             return;
         };
         let mut cpu = Cpu::from_ctx(ctx);
-        let nr = (restart & !(RESTART_TIMED | RESTART_ALWAYS)).wrapping_sub(1);
+        let nr = (restart & !(RESTART_TIMED | RESTART_ALWAYS | RESTART_NEVER)).wrapping_sub(1);
         if restart != 0
+            && restart & RESTART_NEVER == 0
             && ctx.x[0] as i64 == -(EINTR as i64)
             && (restart & RESTART_ALWAYS != 0
                 || t.act.flags & SA_RESTART != 0 && restartable(nr, restart & RESTART_TIMED != 0))

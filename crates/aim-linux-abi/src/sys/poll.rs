@@ -2103,6 +2103,99 @@ mod reportable_tests {
         close(&[blocking]);
     }
 
+    /// `sk_stream_wait_connect`: a send or write on a TCP socket neither
+    /// connected nor connecting, never connected or listening, fails with
+    /// EPIPE and raises SIGPIPE unless MSG_NOSIGNAL (`sk_stream_error`),
+    /// where Darwin's fails with ENOTCONN.
+    #[test]
+    fn a_send_on_an_unconnected_tcp_socket_is_epipe() {
+        let _view = crate::vfs::test_view();
+        const MSG_NOSIGNAL: u64 = 0x4000;
+        // SAFETY: this thread's signal mask and pending SIGPIPE.
+        let raised = |send: &dyn Fn() -> i64| unsafe {
+            let mut pipe: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut pipe);
+            libc::sigaddset(&mut pipe, libc::SIGPIPE);
+            let mut old: libc::sigset_t = std::mem::zeroed();
+            libc::pthread_sigmask(libc::SIG_BLOCK, &pipe, &mut old);
+            let r = send();
+            let mut pending: libc::sigset_t = std::mem::zeroed();
+            libc::sigpending(&mut pending);
+            let raised = libc::sigismember(&pending, libc::SIGPIPE) == 1;
+            if raised {
+                let mut signal = 0;
+                libc::sigwait(&pipe, &mut signal);
+            }
+            libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
+            (r, raised)
+        };
+        let fresh = crate::sys::net::socket([2, 1 | O_NONBLOCK, 0, 0, 0, 0]);
+        let listener = crate::sys::net::socket([10, 1 | O_NONBLOCK, 0, 0, 0, 0]);
+        let mut address = [0u8; 28];
+        address[..2].copy_from_slice(&10u16.to_le_bytes());
+        address[23] = 1;
+        assert_eq!(
+            crate::sys::net::bind([listener as u64, address.as_ptr() as u64, 28, 0, 0, 0]),
+            0
+        );
+        assert_eq!(crate::sys::net::listen([listener as u64, 1, 0, 0, 0, 0]), 0);
+        for fd in [fresh, listener] {
+            let byte = b"x".as_ptr() as u64;
+            let send = |flags: u64| crate::sys::net::sendto([fd as u64, byte, 1, flags, 0, 0]);
+            assert_eq!(raised(&|| send(0)), (-32, true), "fd {fd}");
+            assert_eq!(raised(&|| send(MSG_NOSIGNAL)), (-32, false), "fd {fd}");
+            assert_eq!(
+                raised(&|| fs::write([fd as u64, byte, 1, 0, 0, 0])),
+                (-32, true),
+                "fd {fd}"
+            );
+            let iov = [byte, 1];
+            let header = [0u64, 0, iov.as_ptr() as u64, 1, 0, 0, 0];
+            let sendmsg = |flags: u64| {
+                crate::sys::net::sendmsg([fd as u64, header.as_ptr() as u64, flags, 0, 0, 0])
+            };
+            assert_eq!(raised(&|| sendmsg(0)), (-32, true), "fd {fd}");
+            assert_eq!(raised(&|| sendmsg(MSG_NOSIGNAL)), (-32, false), "fd {fd}");
+        }
+        close(&[fresh, listener]);
+    }
+
+    /// `sk_stream_wait_connect`: a blocking send on a connecting TCP
+    /// socket waits for the connection up to SO_SNDTIMEO, then fails with
+    /// EAGAIN. The connect goes to TEST-NET-1 (RFC 5737), which nothing
+    /// answers, so it stays in progress.
+    #[test]
+    fn a_send_on_a_connecting_tcp_socket_waits_up_to_its_timeout() {
+        let _view = crate::vfs::test_view();
+        let fd = crate::sys::net::socket([2, 1 | O_NONBLOCK, 0, 0, 0, 0]);
+        let mut address = [0u8; 16];
+        address[..2].copy_from_slice(&2u16.to_le_bytes());
+        address[2..4].copy_from_slice(&9u16.to_be_bytes());
+        address[4..8].copy_from_slice(&[192, 0, 2, 1]);
+        assert_eq!(
+            crate::sys::net::connect([fd as u64, address.as_ptr() as u64, 16, 0, 0, 0]),
+            -115,
+            "TEST-NET-1 needs a route"
+        );
+        let byte = b"x".as_ptr() as u64;
+        assert_eq!(crate::sys::net::sendto([fd as u64, byte, 1, 0, 0, 0]), -11);
+        assert_eq!(fs::fcntl([fd as u64, 4, 0, 0, 0, 0]), 0);
+        let timeout = [0i64, 200_000];
+        assert_eq!(
+            crate::sys::net::setsockopt([fd as u64, 1, 21, timeout.as_ptr() as u64, 16, 0]),
+            0
+        );
+        let started = std::time::Instant::now();
+        assert_eq!(crate::sys::net::sendto([fd as u64, byte, 1, 0, 0, 0]), -11);
+        let waited = started.elapsed();
+        assert!(
+            waited >= std::time::Duration::from_millis(190)
+                && waited < std::time::Duration::from_secs(5),
+            "{waited:?}"
+        );
+        close(&[fd]);
+    }
+
     /// `POLLEX_SET` is EPOLLPRI alone: select sleeps for its timeout on an
     /// unconnected TCP socket asked only for exceptions, which `tcp_poll`
     /// reports hung up and writable.
@@ -2642,6 +2735,81 @@ mod reportable_tests {
         );
         assert_eq!(send(fd), -107);
         close(&[fd]);
+    }
+
+    /// A peeking receive takes no datagram, nor Darwin's socket error for
+    /// an AF_UNIX datagram peer's close, which is none on Linux: it fails
+    /// with EAGAIN, as the next does.
+    #[test]
+    fn a_unix_datagram_peek_past_its_peers_close_is_eagain() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_unix_datagram_peek_past_its_peers_close_is_eagain",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        const MSG_PEEK: u64 = 2;
+        const MSG_DONTWAIT: u64 = 0x40;
+        let (fd, peer) = unix_datagram_pair(false);
+        close(&[peer]);
+        let mut buffer = [0u8; 4];
+        let peek = |buffer: &mut [u8; 4]| {
+            crate::sys::net::recvfrom([
+                fd as u64,
+                buffer.as_mut_ptr() as u64,
+                4,
+                MSG_PEEK | MSG_DONTWAIT,
+                0,
+                0,
+            ])
+        };
+        assert_eq!(peek(&mut buffer), -11);
+        assert_eq!(peek(&mut buffer), -11);
+        close(&[fd]);
+    }
+
+    /// `unix_dgram_connect` to a new peer, or of AF_UNSPEC, drops what the
+    /// socket queued from the old one (`unix_dgram_disconnected`); to the
+    /// same peer, nothing.
+    #[test]
+    fn a_unix_datagram_connect_to_another_peer_drops_its_queue() {
+        let _view = crate::vfs::test_view();
+        let send = |fd: i64| crate::sys::net::sendto([fd as u64, b"x".as_ptr() as u64, 1, 0, 0, 0]);
+        let socket = || crate::sys::net::socket([1, 2 | O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0]);
+        let bound = |fd: i64, name: &str| {
+            let (address, len) = abstract_name(&format!("{name}-{}", std::process::id()));
+            assert_eq!(
+                crate::sys::net::bind([fd as u64, address.as_ptr() as u64, len, 0, 0, 0]),
+                0
+            );
+            (address, len)
+        };
+        let connect = |fd: i64, (address, len): &(Vec<u8>, u64)| {
+            crate::sys::net::connect([fd as u64, address.as_ptr() as u64, *len, 0, 0, 0])
+        };
+        let mut buffer = [0u8; 4];
+        let fd = socket();
+        let own = bound(fd, "aim-poll-queue-own");
+        let (first, second) = (socket(), socket());
+        let first_name = bound(first, "aim-poll-queue-first");
+        let second_name = bound(second, "aim-poll-queue-second");
+        assert_eq!(connect(first, &own), 0);
+        assert_eq!(connect(fd, &first_name), 0);
+        assert_eq!(send(first), 1);
+        assert_eq!(connect(fd, &first_name), 0);
+        assert_eq!(received(fd, &mut buffer), 1);
+        assert_eq!(send(first), 1);
+        assert_eq!(connect(fd, &second_name), 0);
+        assert_eq!(received(fd, &mut buffer), -11);
+        assert_eq!(connect(fd, &first_name), 0);
+        assert_eq!(send(first), 1);
+        let unspec = [0u8; 16];
+        assert_eq!(
+            crate::sys::net::connect([fd as u64, unspec.as_ptr() as u64, 16, 0, 0, 0]),
+            0
+        );
+        assert_eq!(received(fd, &mut buffer), -11);
+        close(&[fd, first, second]);
     }
 
     /// A refused non-blocking TCP connect: `tcp_done` shuts it both ways,

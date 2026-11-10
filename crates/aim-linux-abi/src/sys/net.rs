@@ -1418,10 +1418,14 @@ pub fn connect(a: [u64; 6]) -> i64 {
                     sa_family: libc::AF_UNSPEC as u8,
                     sa_data: [0; 14],
                 };
+                let old = unix_peer(fd);
                 // SAFETY: a sockaddr of ours, of its length.
                 unsafe { libc::connect(fd, &unspec, 2) };
                 s.peer_gone.store(false, Ordering::Relaxed);
                 *s.peer.lock().unwrap() = None;
+                if old != 0 {
+                    purge(&input);
+                }
                 return 0;
             }
         }
@@ -1436,6 +1440,8 @@ pub fn connect(a: [u64; 6]) -> i64 {
     if let Some(r) = connect_to_router(&input, &name) {
         return r;
     }
+    let unix_dgram = any_sock(&input).filter(|s| s.unix_datagram());
+    let old_peer = unix_dgram.as_ref().map_or(0, |_| unix_peer(fd));
     let zero_port = datagram_to_port_zero(fd, &mut t);
     let mut r = with_target(&t, |sa, len| {
         errno::check(unsafe { libc::connect(fd, sa, len) } as i64)
@@ -1449,11 +1455,16 @@ pub fn connect(a: [u64; 6]) -> i64 {
             clamp_mss(fd, o);
         }
     }
-    // A new peer; the one that closed is forgotten.
+    // A new peer: the one that closed is forgotten, and what an AF_UNIX
+    // datagram socket queued from another one dropped
+    // (`unix_dgram_connect`).
     if r == 0
         && let Some(s) = any_sock(&input)
     {
         s.peer_gone.store(false, Ordering::Relaxed);
+        if unix_dgram.is_some() && old_peer != 0 && unix_peer(fd) != old_peer {
+            purge(&input);
+        }
     }
     if r == -(libc::ENOENT as i64) && is_abstract(&name) {
         // An abstract name nobody bound: refused, not missing.
@@ -2298,6 +2309,86 @@ fn linux_msg_flags(h: i32) -> i32 {
     f
 }
 
+/// The peer AF_UNIX socket `fd` is connected to (its `unsi_conn_pcb`), 0
+/// for none.
+fn unix_peer(fd: i32) -> u64 {
+    socket_info(fd).map_or(0, |info| {
+        u64::from_ne_bytes(info[UNSI_CONN_PCB..UNSI_CONN_PCB + 8].try_into().unwrap())
+    })
+}
+
+/// `unix_dgram_disconnected`: drop what AF_UNIX datagram socket `input`
+/// had queued (`skb_queue_purge`). Each datagram holds at least a byte of
+/// the queue, so its bytes as of now bound the receives, however many more
+/// arrive meanwhile.
+fn purge(input: &SocketInput) {
+    let queued = socket_info(input.fd()).map_or(0, |info| {
+        u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap())
+    });
+    for _ in 0..queued {
+        if receive(input, &[], false, 0, L_MSG_DONTWAIT).is_err() {
+            break;
+        }
+    }
+}
+
+/// `sk_stream_wait_connect` for a TCP send on host socket `fd` that
+/// Darwin failed with ENOTCONN: EPIPE for a socket neither connected nor
+/// connecting (never connected, or listening); for a connecting one,
+/// EAGAIN when the send must not wait, else the wait for the connection,
+/// after which the send is tried again.
+fn wait_connect(fd: i32, flags: u64) -> Result<(), i64> {
+    const SS_ISCONNECTING: i16 = 0x4;
+    let connecting = socket_info(fd).is_some_and(|info| {
+        i16::from_ne_bytes(info[SOI_STATE..SOI_STATE + 2].try_into().unwrap()) & SS_ISCONNECTING
+            != 0
+    });
+    if !connecting {
+        return Err(-32);
+    }
+    // SAFETY: F_GETFL on the socket.
+    if flags & L_MSG_DONTWAIT != 0
+        || unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_NONBLOCK != 0
+    {
+        return Err(-(EAGAIN as i64));
+    }
+    // Up to SO_SNDTIMEO, then EAGAIN; a signal's EINTR is restarted as
+    // ERESTARTSYS untimed, and not timed (`sock_intr_errno`).
+    let mut timeout = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+    let mut len = std::mem::size_of::<libc::timeval>() as u32;
+    // SAFETY: a timeval of ours, of its length.
+    unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDTIMEO,
+            (&mut timeout as *mut libc::timeval).cast(),
+            &mut len,
+        )
+    };
+    let ms = timeout.tv_sec * 1000 + (timeout.tv_usec as i64 + 999) / 1000;
+    let mut ready = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: one pollfd of ours.
+    match unsafe { libc::poll(&mut ready, 1, if ms == 0 { -1 } else { ms as i32 }) } {
+        0 => Err(-(EAGAIN as i64)),
+        n if n > 0 => Ok(()),
+        _ => {
+            let error = errno::last();
+            if error == crate::errno::EINTR && ms != 0 {
+                super::signal::not_restarted();
+            }
+            Err(-(error as i64))
+        }
+    }
+}
+
 /// A send failed with EPIPE: Linux raises SIGPIPE unless MSG_NOSIGNAL.
 fn epipe(r: i64, flags: u64) -> i64 {
     if r == -32 && flags & L_MSG_NOSIGNAL == 0 {
@@ -2406,7 +2497,7 @@ fn send(
     let addressed = name.is_some_and(|n| n.0 != 0);
     let refused = |s: &Sock| {
         s.peer_gone.store(false, Ordering::Relaxed);
-        while receive(input, &[], false, 0, L_MSG_DONTWAIT).is_ok() {}
+        purge(input);
         -111
     };
     if let Some(s) = unix_dgram
@@ -2423,6 +2514,12 @@ fn send(
         } else {
             refused(s)
         };
+    }
+    while r == -107 && any_sock(input).is_some_and(|s| s.tcp()) {
+        match wait_connect(input.fd(), flags) {
+            Ok(()) => r = transmit(input, iov, name, ctrl, flags),
+            Err(error) => return epipe(error, flags),
+        }
     }
     if unix_dgram.is_some() && !addressed && r == -89 {
         return -107;
@@ -2939,12 +3036,14 @@ fn recv(
         take_error(s, input.fd())?;
     }
     // `tcp_recvmsg` and `unix_stream_read_generic` return `sk_err` once
-    // nothing is queued to read.
+    // nothing is queued to read; an AF_UNIX datagram or seqpacket receive
+    // before what is queued (`__skb_try_recv_datagram`).
     if let Some(s) = socket.as_ref().filter(|s| !s.datagram())
         && s.kept_error.load(Ordering::Relaxed) != 0
-        && socket_info(input.fd()).is_some_and(|info| {
-            u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap()) == 0
-        })
+        && (s.ty != SockType::Stream
+            || socket_info(input.fd()).is_some_and(|info| {
+                u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap()) == 0
+            }))
         && let kept @ 1.. = s.kept_error.swap(0, Ordering::Relaxed)
     {
         return Err(-(kept as i64));
@@ -2978,6 +3077,8 @@ fn recv(
     // its ECONNRESET socket error, is none: the receive goes on.
     if let (Err(-104), Some(s)) = (&r, socket.as_ref().filter(|s| s.unix_datagram())) {
         s.peer_gone.store(true, Ordering::Relaxed);
+        // Taken, which a peeking receive does not.
+        get_int(input.fd(), libc::SOL_SOCKET, libc::SO_ERROR);
         r = receive(input, iov, want_name, ctrl_cap, flags);
     }
     let r = match r {
@@ -3487,12 +3588,26 @@ pub(super) fn write_pinned(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i
     let fd = input.fd();
     let s = any_sock(&input)?;
     if let Family::Inet(_) = &s.family {
-        let r = dhcp_to_router(fd, &s, iov, None).unwrap_or_else(|| {
-            // SAFETY: the guest's iovec buffers.
-            errno::check(unsafe { libc::writev(fd, iov.as_ptr(), iov.len() as i32) } as i64)
-        });
+        let write = || {
+            dhcp_to_router(fd, &s, iov, None).unwrap_or_else(|| {
+                // SAFETY: the guest's iovec buffers.
+                errno::check(unsafe { libc::writev(fd, iov.as_ptr(), iov.len() as i32) } as i64)
+            })
+        };
+        let mut r = write();
+        while r == -107 && s.tcp() {
+            match wait_connect(fd, 0) {
+                Ok(()) => r = write(),
+                Err(error) => {
+                    r = error;
+                    break;
+                }
+            }
+        }
         traffic::account(&s, fd, true, r, None);
-        return Some(r);
+        // A TCP write's `sk_stream_error`, as a send's without
+        // MSG_NOSIGNAL.
+        return Some(if s.tcp() { epipe(r, 0) } else { r });
     }
     Some(send(&input, iov, None, None, 0))
 }
@@ -4079,6 +4194,8 @@ const SOI_OPTIONS: usize = 188;
 const SOI_STATE: usize = 192;
 const SOI_ERROR: usize = 202;
 const SBI_CC: usize = 208;
+/// `soi_proto.pri_un.unsi_conn_pcb`.
+const UNSI_CONN_PCB: usize = 272;
 /// Darwin's `soi_state` flags of a shut direction.
 const SS_CANTSENDMORE: i16 = 0x10;
 const SS_CANTRCVMORE: i16 = 0x20;
@@ -4447,6 +4564,42 @@ mod tests {
         let child = load_sock(&mut super::super::fork_state::Reader::new(&saved));
         assert_eq!(child.shutdown.load(Ordering::Relaxed), RCV_SHUTDOWN + 4);
         assert_eq!(child.kept_error.load(Ordering::Relaxed), 104);
+    }
+
+    /// An error a recvmmsg kept comes before what is queued on an AF_UNIX
+    /// datagram or seqpacket socket (`__skb_try_recv_datagram`), after it
+    /// on a stream one (`unix_stream_read_generic`).
+    #[test]
+    fn a_unix_kept_error_comes_before_or_after_the_queue_by_type() {
+        use super::*;
+        let _view = crate::vfs::test_view();
+        for (ty, first) in [(2u64, true), (5, true), (1, false)] {
+            let mut pair = [0i32; 2];
+            assert_eq!(
+                socketpair([
+                    1,
+                    ty | 0o4000 | 0o2000000,
+                    0,
+                    pair.as_mut_ptr() as u64,
+                    0,
+                    0
+                ]),
+                0
+            );
+            let (fd, peer) = (pair[0] as u64, pair[1] as u64);
+            assert_eq!(sendto([peer, b"q".as_ptr() as u64, 1, 0, 0, 0]), 1);
+            let Some(Kind::Sock(s)) = fdtab::get(fd as i32) else {
+                panic!("type {ty}: no socket");
+            };
+            s.kept_error.store(104, Ordering::Relaxed);
+            let mut buffer = [0u8; 4];
+            let mut receive = || recvfrom([fd, buffer.as_mut_ptr() as u64, 4, 0, 0, 0]);
+            let order = if first { [-104, 1] } else { [1, -104] };
+            assert_eq!([receive(), receive()], order, "type {ty}");
+            for fd in [fd, peer] {
+                assert_eq!(super::super::fs::close([fd, 0, 0, 0, 0, 0]), 0);
+            }
+        }
     }
 
     /// A raw socket's read() is `raw_recvmsg`'s, which returns a pending
