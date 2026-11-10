@@ -113,30 +113,34 @@ F_SETSIG's signal with POLL_IN, its band and si_fd: a watcher thread waits on a
 second knote on each watched vnode and decodes events as they arrive (#2850).
 F_SETFL and FIOASYNC set O_ASYNC on every fd's host file (FIOASYNC is ENOTTY on
 a file without Linux fasync), and F_GETFL reports it. A host socket keeps its
-process or group owner in Darwin, and a pipe or tty its group owner, whose
-SIGIO reaches it as `send_sigio`'s, SI_KERNEL from no process (a guest's kill
-of SIGIO to another process goes through the agent, so a host SIGIO is the
+process or group owner in Darwin, and a pipe its group owner, whose SIGIO
+reaches it as `send_sigio`'s, SI_KERNEL from no process (a guest's kill of
+SIGIO to another process goes through the agent, so a host SIGIO is the
 kernel's; where there is no agent, no pid table here or the native namespace
 init as target, and for a group kill without a member list, Darwin's kill
 delivers it, read as the kernel's; #2875, #2941). With F_SETSIG, a thread
-owner, or a process owner of a pipe or tty (Darwin would take its group),
-Darwin's owner is cleared and EV_CLEAR read and write knotes on a private reference to the file wake the same watcher
-thread, which signals as the Linux driver does: POLL_IN on data, POLL_OUT on
-write space (a pipe writer on its reader's reads and close), POLL_HUP when a
-socket's peer is gone, each with its band and the si_fd that set O_ASYNC,
-until the file's last guest fd closes. Wakeups before the watcher reads them
-are one signal, where Linux queues one real-time signal each, and a socket's
-or tty's POLL_OUT comes on every freeing of space, not only after a write found
-it full.
-eventfd, timerfd, signalfd, epoll, pidfd, regular files and memfds keep their
-owner in the layer and, as on Linux, never signal it; a fork child copies these
-owners (#2858, #2859, #2860). A fork child's copy of an O_ASYNC registration
-(host file or inotify) and its parent's signal each event once: the copy that
-holds a POSIX record lock on a private file they share signals, and another
-takes the lock once that process closes the file or exits (#2861). An evdev signals its owner the same way, POLL_IN
-on events and POLL_HUP when the device goes, and a pty POLL_IN on input and
-POLL_OUT on write space; a pty's O_ASYNC is its description's in the pty
-keeper, and both keep every owner in the layer (#2877). A fork child
+owner, or a process owner of a pipe (Darwin would take its group), Darwin's
+owner is cleared and EV_CLEAR read and write knotes on a private reference to
+the file wake the same watcher thread, which signals as the Linux driver does:
+POLL_IN on data, POLL_OUT on write space (a pipe writer on its reader's reads
+and close), POLL_HUP when a socket's peer is gone (after POLL_IN for data that
+came with it), each with its band and the si_fd that set O_ASYNC, until the
+file's last guest fd closes. Wakeups before the watcher reads them are one
+signal, where Linux queues one real-time signal each, and POLL_OUT comes on
+every freeing of at least 512 bytes (and on a pipe writer's own writes), not
+on each pipe read or only after a socket or tty write found the buffer full. A
+host tty's owner and O_ASYNC are always the layer's, never Darwin's TIOCSPGRP
+or its foreground-group SIGIO (#2945). eventfd, timerfd, signalfd, epoll, pidfd,
+regular files and memfds keep their owner in the layer and, as on Linux, never
+signal it (#2858, #2859, #2860). The owner, the signal and a layer-kept O_ASYNC
+are a record in a private file that a fork child shares, so an F_SETOWN,
+F_SETSIG or F_SETFL in either reaches both; each event is signalled once, by
+the process holding a POSIX record lock on that file, and another takes the
+lock once that process closes the file or exits (#2861). An evdev signals its
+owner the same way, POLL_IN on events and POLL_HUP when the device goes, and a
+pty POLL_IN on input and POLL_OUT on write space; a pty's O_ASYNC is its
+description's in the pty keeper, and both keep every owner in the layer
+(#2877). A fork child
 gives each rebuilt pidfd, epoll and inotify fd its own close-on-exec flag
 (#2840) and its open file's O_NONBLOCK and O_ASYNC (#2876), and a pidfd (a
 kqueue) cannot be sent over SCM_RIGHTS (#2838). Darwin attaches no `NOTE_REAP` to a zombie, so a pidfd opened (or inherited

@@ -1472,7 +1472,8 @@ mod tests {
 
     /// `evdev_fasync`: FIOASYNC is the open file's O_ASYNC, events signal
     /// the F_SETSIG owner with POLL_IN, and the device going away with
-    /// POLL_HUP (`evdev_hangup`).
+    /// POLL_HUP (`evdev_hangup`); events still queued then are POLL_IN
+    /// first, as Linux signalled them as they came.
     #[test]
     fn o_async_signals_events_and_hangup() {
         if fdtab::isolated_kernel_test("sys::evdev::tests::o_async_signals_events_and_hangup") {
@@ -1516,8 +1517,13 @@ mod tests {
         };
         devs.emit(MOUSE, 1, &[(EV_ABS, ABS_X, 42)]);
         assert_eq!(next(), (1, 0x41));
+        devs.emit(MOUSE, 1, &[(EV_ABS, ABS_X, 43)]);
         devs.close();
-        assert_eq!(next(), (6, 0x18));
+        let mut codes = vec![next()];
+        if codes[0] == (1, 0x41) {
+            codes.push(next());
+        }
+        assert_eq!(codes.last(), Some(&(6, 0x18)));
         fdtab::close_owned_guest(fd, false).unwrap();
         drop(devs);
         std::fs::remove_dir_all(dir).unwrap();

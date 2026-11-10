@@ -27,7 +27,7 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::sync::{Arc, Mutex, Weak};
 
-use super::fasync::{self, Arrival, Elect, close_private, drain, private_kqueue};
+use super::fasync::{self, Arrival, close_private, drain, private_kqueue};
 use super::fdtab::{self, Kind};
 use super::fown::Fown;
 use crate::errno::{self, EAGAIN, EBADF, EINVAL};
@@ -91,11 +91,11 @@ impl Drop for Watch {
     }
 }
 
-/// O_ASYNC, set through guest fd `fd` (the signals' `si_fd`).
+/// The registration of O_ASYNC, set through guest fd `fd` (the signals'
+/// `si_fd`); the flag itself is the owner's record, which a fork child
+/// shares.
 struct Fasync {
     fd: i32,
-    /// Which copy of the inotify (a fork child has one) signals.
-    elect: Elect,
     /// None in a fork child until [`after_fork_child`].
     armed: Option<Armed>,
 }
@@ -704,7 +704,7 @@ impl Inotify {
         let fd = s
             .fasync
             .as_ref()
-            .filter(|f| raised > 0 && f.elect.won())
+            .filter(|_| raised > 0 && s.owner.is_async() && s.owner.won())
             .map(|f| f.fd);
         let owner = s.owner.owner();
         drop(s);
@@ -722,7 +722,7 @@ impl Inotify {
 
     /// Whether O_ASYNC is set.
     pub fn is_async(&self) -> bool {
-        self.state.lock().unwrap().fasync.is_some()
+        self.state.lock().unwrap().owner.is_async()
     }
 }
 
@@ -804,11 +804,9 @@ pub fn set_async(ino: &Arc<Inotify>, fd: i32, guest: i32, on: bool) -> Result<()
     let mut s = ino.state.lock().unwrap();
     match (on, s.fasync.is_some()) {
         (true, false) => {
-            let elect = Elect::new()?;
             let armed = arm(ino, fd, &s)?;
             s.fasync = Some(Fasync {
                 fd: guest,
-                elect,
                 armed: Some(armed),
             });
         }
@@ -819,12 +817,13 @@ pub fn set_async(ino: &Arc<Inotify>, fd: i32, guest: i32, on: bool) -> Result<()
         }
         _ => {}
     }
-    Ok(())
+    s.owner.set_async(on)
 }
 
 /// Fork: an inotify is its watches (each on an inherited vnode fd), its
 /// queued events and its O_ASYNC state (Linux children share the file;
-/// here each process has a copy, and one copy signals the owner).
+/// here each process has a copy, sharing the owner's record, and one copy
+/// signals the owner).
 pub(super) fn save(ino: &Inotify, w: &mut super::fork_state::Writer) {
     use std::os::unix::ffi::OsStrExt;
     let s = ino.state.lock().unwrap();
@@ -854,10 +853,7 @@ pub(super) fn save(ino: &Inotify, w: &mut super::fork_state::Writer) {
     w.i32(s.next_wd);
     w.seq(s.queue.iter(), |w, e| w.bytes(e));
     s.owner.save(w);
-    w.opt(s.fasync.as_ref(), |w, f| {
-        w.i32(f.fd);
-        f.elect.save(w);
-    });
+    w.opt(s.fasync.as_ref(), |w, f| w.i32(f.fd));
 }
 
 pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Inotify> {
@@ -888,7 +884,6 @@ pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Inotify> {
         owner: Fown::load(r),
         fasync: r.opt(|r| Fasync {
             fd: r.i32(),
-            elect: Elect::load(r),
             armed: None,
         }),
         raised: 0,

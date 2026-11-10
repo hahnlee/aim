@@ -2645,13 +2645,24 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
         {
             return -(error as i64);
         }
-    } else {
+    }
+    // O_ASYNC that the layer keeps, not the host file: an inotify's, a
+    // host tty's.
+    let mut kept_async = matches!(pin.kind(), Some(Kind::Inotify(_)));
+    if !kept_async {
         let source = match super::fasync::Source::of(fd, pin.kind()) {
             Ok(source) => source,
             Err(error) => return -(error as i64),
         };
         if let Some(result) = super::fasync::fcntl(fd, original, source, cmd, arg) {
             return result;
+        }
+        kept_async = source.keeps_async();
+        if cmd == F_SETFL
+            && kept_async
+            && let Err(error) = super::fasync::set_kept_async(original, source, arg & O_ASYNC != 0)
+        {
+            return -(error as i64);
         }
     }
     // SAFETY: fcntl with integer arguments.
@@ -2674,15 +2685,28 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
                     if matches!(fdtab::get(fd), Some(Kind::TracePipe(_))) {
                         flags &= !O_ACCMODE;
                     }
-                    if matches!(fdtab::get(fd), Some(Kind::Inotify(ino)) if ino.is_async()) {
+                    if kept_async {
+                        flags &= !O_ASYNC;
+                    }
+                    let layer = match fdtab::get(fd) {
+                        Some(Kind::Inotify(ino)) => ino.is_async(),
+                        _ => kept_async && super::fasync::kept_async(original),
+                    };
+                    if layer {
                         flags |= O_ASYNC;
                     }
                     flags as i64
                 }
             }
-            F_SETFL => fdtab::set_status_flags(fd, open_flags_to_host(arg) & !libc::O_ACCMODE)
-                .and_then(|()| super::fasync::status_changed(fd, original))
-                .map_or_else(|error| -(error as i64), |()| 0),
+            F_SETFL => {
+                let mut host = open_flags_to_host(arg) & !libc::O_ACCMODE;
+                if kept_async {
+                    host &= !libc::O_ASYNC;
+                }
+                fdtab::set_status_flags(fd, host)
+                    .and_then(|()| super::fasync::status_changed(fd, original))
+                    .map_or_else(|error| -(error as i64), |()| 0)
+            }
             F_GETLK | F_SETLK | F_SETLKW | F_OFD_GETLK | F_OFD_SETLK | F_OFD_SETLKW => {
                 lock(fd, cmd, arg)
             }

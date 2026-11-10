@@ -6,30 +6,34 @@
 //! a process owner it holds only for a socket (its other files take the
 //! process's group in its place). It has no F_SETSIG and no thread owner
 //! (F_SETOWN_EX F_OWNER_TID), and its SIGIO does not say which descriptor
-//! raised it. A host file with a Linux fasync (a pipe, socket or tty) and
-//! an owner Darwin cannot hold keeps it here instead, Darwin's is cleared,
-//! and while O_ASYNC is set a private kqueue holds EV_CLEAR read and write
-//! knotes on a private reference to the file: a wakeup of the file wakes
-//! the watcher thread, which signals the owner as the Linux driver's
-//! `kill_fasync` would (POLL_IN, POLL_OUT or POLL_HUP, see [`Fasync`]),
-//! with the descriptor that set O_ASYNC as `si_fd`. The knotes report the
-//! file's own wakeups, where a readiness check on SIGIO would signal every
-//! ready descriptor again; wakeups before the watcher reads them are one
-//! signal each way, where Linux queues one real-time signal each. A
-//! socket's or tty's write knote wakes on every freeing of space, where
-//! Linux sends POLL_OUT only once a write found the buffer full
-//! (SOCKWQ_ASYNC_NOSPACE, TTY_DO_WRITE_WAKEUP).
-//! The private kqueue is drained once the knotes are in it, so readiness
-//! that is already there raises nothing, as on Linux. The registration
-//! lasts until the last guest fd of the file known here closes (Linux
-//! removes the fasync entry at the last reference), and a fork child gets
-//! a copy of each owner and registration, as an inotify's; the copies
-//! elect one process to signal each event ([`Elect`]).
+//! raised it. A host pipe or socket with an owner Darwin cannot hold keeps
+//! it here instead, Darwin's is cleared, and while O_ASYNC is set a private
+//! kqueue holds EV_CLEAR read and write knotes on a private reference to
+//! the file: a wakeup of the file wakes the watcher thread, which signals
+//! the owner as the Linux driver's `kill_fasync` would (POLL_IN, POLL_OUT
+//! or POLL_HUP, see [`Fasync`]), with the descriptor that set O_ASYNC as
+//! `si_fd`. The knotes report the file's own wakeups, where a readiness
+//! check on SIGIO would signal every ready descriptor again; wakeups
+//! before the watcher reads them are one signal each way, where Linux
+//! queues one real-time signal each. A write knote wakes on every freeing
+//! of space of at least 512 bytes, and a pipe writer's also on its own
+//! writes, where Linux sends a pipe writer POLL_OUT on each read and a
+//! socket or tty POLL_OUT only once a write found the buffer full
+//! (SOCKWQ_ASYNC_NOSPACE, TTY_DO_WRITE_WAKEUP). Readiness that is already
+//! there when the knotes go in raises nothing, as on Linux. The
+//! registration lasts until the last guest fd of the file known here
+//! closes (Linux removes the fasync entry at the last reference).
 //!
-//! An evdev (its socket is the layer's transport) and a pty (Darwin's
-//! F_SETOWN of a tty sets its foreground group, and the description's
-//! O_ASYNC is the pty keeper's) are signalled the same way, with their
-//! owner always kept here.
+//! The owner, signal and (where the file's status flags cannot keep it)
+//! O_ASYNC are a record ([`Fown`]) in a private file that a fork child
+//! holds too, as Linux's children share the file; each event is signalled
+//! by the one holder the record's lock elects, and only while every
+//! holder's view says O_ASYNC is set and Darwin does not hold the owner.
+//!
+//! An evdev (its socket is the layer's transport), a pty (its O_ASYNC is
+//! the pty keeper's description's) and a host tty (Darwin's F_SETOWN of a
+//! tty is TIOCSPGRP, and its O_ASYNC signals the foreground group) are
+//! signalled the same way, with their owner always kept here.
 //!
 //! The descriptors this layer implements whose Linux files have no fasync
 //! (eventfd, timerfd, signalfd, epoll, pidfd, ...) and host files without
@@ -202,71 +206,6 @@ pub fn close_private(fd: i32) {
     unsafe { libc::close(fd) };
 }
 
-/// The one process that signals for an O_ASYNC registration that a fork
-/// child copied: Linux has one fasync entry per open file, here each
-/// process holding the file has a copy and is woken for the same event.
-/// The copies share a private file, and the process that holds, or now
-/// takes, an exclusive POSIX record lock on it signals; Darwin gives the
-/// lock to one process at a time and drops it when that process closes
-/// the file or exits, so another copy takes over.
-pub struct Elect(i32);
-
-impl Elect {
-    pub fn new() -> Result<Elect, Errno> {
-        let mut tmpl = std::env::temp_dir()
-            .join("linux-abi-fasync.XXXXXX")
-            .into_os_string()
-            .into_encoded_bytes();
-        tmpl.push(0);
-        // SAFETY: mkstemp fills in the template; the name goes at once.
-        let fd = unsafe { libc::mkstemp(tmpl.as_mut_ptr().cast()) };
-        if fd < 0 {
-            return Err(errno::last());
-        }
-        // SAFETY: our new file's name and descriptor.
-        unsafe {
-            libc::unlink(tmpl.as_ptr().cast());
-            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-        }
-        Ok(Elect(fdtab::hide(fd)))
-    }
-
-    /// Whether this process signals the event at hand.
-    pub fn won(&self) -> bool {
-        // SAFETY: an all-zero flock is valid.
-        let mut whole: libc::flock = unsafe { std::mem::zeroed() };
-        whole.l_type = libc::F_WRLCK as i16;
-        whole.l_whence = libc::SEEK_SET as i16;
-        // SAFETY: a lock request on our private file.
-        if unsafe { libc::fcntl(self.0, libc::F_SETLK, &whole) } == 0 {
-            return true;
-        }
-        let error = errno::last();
-        if error == errno::EAGAIN || error == errno::EACCES {
-            return false;
-        }
-        // Signalling twice is safer than not at all.
-        crate::diag!("O_ASYNC election: errno {error}");
-        true
-    }
-
-    /// Fork: the child shares the private file.
-    pub(super) fn save(&self, w: &mut super::fork_state::Writer) {
-        w.retain_private(self.0);
-        w.i32(self.0);
-    }
-
-    pub(super) fn load(r: &mut super::fork_state::Reader) -> Elect {
-        Elect(r.i32())
-    }
-}
-
-impl Drop for Elect {
-    fn drop(&mut self) {
-        close_private(self.0);
-    }
-}
-
 /// The owner of an open file that is kept here, shared by its dups.
 struct File {
     fown: Fown,
@@ -284,6 +223,19 @@ pub struct Source {
     /// The host file is the Linux file, whose fown Darwin holds when it
     /// can; else Darwin's fown of it is never used.
     darwin: bool,
+    flags: Flags,
+}
+
+/// Where a file's O_ASYNC is kept, which every holder of the file sees.
+#[derive(Clone, Copy, PartialEq)]
+enum Flags {
+    /// The host file's status flags.
+    Host,
+    /// The pty keeper's description.
+    Pty,
+    /// The owner's record ([`Fown::is_async`]): a host tty's, since
+    /// Darwin's O_ASYNC of a tty signals its foreground process group.
+    Owner,
 }
 
 impl Source {
@@ -300,11 +252,29 @@ impl Source {
             None | Some(Kind::Sock(_) | Kind::Regular(_) | Kind::Memfd(_))
                 if super::fuse_client::get(fd).is_none() =>
             {
-                (Fasync::of(fd)?, true)
+                let fasync = Fasync::of(fd)?;
+                // A host tty's owner and O_ASYNC stay here: Darwin's
+                // F_SETOWN of a tty is TIOCSPGRP (#2945).
+                (fasync, fasync != Some(Fasync::Tty))
             }
             _ => (None, false),
         };
-        Ok(Source { fasync, darwin })
+        let flags = match (kind, fasync) {
+            (Some(Kind::Pty(_)), _) => Flags::Pty,
+            (_, Some(Fasync::Tty)) => Flags::Owner,
+            _ => Flags::Host,
+        };
+        Ok(Source {
+            fasync,
+            darwin,
+            flags,
+        })
+    }
+
+    /// Whether the owner's record keeps O_ASYNC, which the host file's
+    /// status flags must not.
+    pub fn keeps_async(&self) -> bool {
+        self.flags == Flags::Owner
     }
 
     /// Whether the file has a Linux fasync, which FIOASYNC may change.
@@ -323,6 +293,7 @@ impl Source {
     fn save(&self, w: &mut super::fork_state::Writer) {
         w.opt(self.fasync.as_ref(), |w, fasync| w.u32(*fasync as u32));
         w.bool(self.darwin);
+        w.u32(self.flags as u32);
     }
 
     fn load(r: &mut super::fork_state::Reader) -> Source {
@@ -335,6 +306,11 @@ impl Source {
         Source {
             fasync,
             darwin: r.bool(),
+            flags: match r.u32() {
+                0 => Flags::Host,
+                1 => Flags::Pty,
+                _ => Flags::Owner,
+            },
         }
     }
 }
@@ -375,26 +351,34 @@ impl Fasync {
         })
     }
 
-    /// The reason (`signal::POLL_*`) that a knote's event signals, if any,
-    /// for a file whose write side last had `space` free.
-    fn reason(self, held: i32, space: &mut isize, e: &libc::kevent) -> Option<i32> {
+    /// The reasons (`signal::POLL_*`) that a knote's event signals, in
+    /// order, into `out`, for a file that last had `seen` bytes to read.
+    fn reasons(self, held: i32, seen: &mut isize, e: &libc::kevent, out: &mut Vec<i32>) {
         use super::signal::{POLL_HUP, POLL_IN, POLL_OUT};
         let eof = e.flags & libc::EV_EOF != 0;
         let read = e.filter == libc::EVFILT_READ;
+        // Data that arrived in the same wakeup as the end is POLL_IN first.
+        let arrived = read && e.data > *seen;
+        if read {
+            *seen = e.data;
+        }
         match self {
-            Fasync::Pipe if read => Some(POLL_IN),
-            Fasync::Pipe => {
-                let freed = e.data > *space;
-                *space = e.data;
-                (freed || eof).then_some(POLL_OUT)
+            Fasync::Pipe => out.push(if read { POLL_IN } else { POLL_OUT }),
+            _ if !eof => out.push(if read { POLL_IN } else { POLL_OUT }),
+            _ if arrived => {
+                out.push(POLL_IN);
+                if self == Fasync::Evdev || self == Fasync::Socket && hung_up(held) {
+                    out.push(POLL_HUP);
+                }
             }
-            Fasync::Evdev => Some(if eof { POLL_HUP } else { POLL_IN }),
-            _ if !eof => Some(if read { POLL_IN } else { POLL_OUT }),
             // A peer gone for good is POLL_HUP; one that only shut down
-            // its writing is POLL_IN (`unix_shutdown`, `tcp_fin`). Its
-            // write side's EOF is no signal.
-            Fasync::Socket if read => Some(if hung_up(held) { POLL_HUP } else { POLL_IN }),
-            Fasync::Socket | Fasync::Tty => None,
+            // its writing is POLL_IN (`unix_shutdown`, `tcp_fin`).
+            Fasync::Socket if read => out.push(if hung_up(held) { POLL_HUP } else { POLL_IN }),
+            // `evdev_hangup`.
+            Fasync::Evdev => out.push(POLL_HUP),
+            // A socket's write side ending, and a tty's hangup, signal
+            // nothing.
+            Fasync::Socket | Fasync::Tty => {}
         }
     }
 }
@@ -416,26 +400,35 @@ struct Armed {
     /// The guest fd that set O_ASYNC (`fa_fd`).
     fd: i32,
     fasync: Fasync,
-    /// A pipe writer's free space when last seen: Darwin also wakes it
-    /// for its own writes, Linux only for reads.
-    space: isize,
+    /// The bytes to read when the read knote last reported.
+    seen: isize,
     /// The private reference to the file that the knote is on.
     held: i32,
     /// The private kqueue holding the knote.
     kq: i32,
     id: u64,
-    elect: Elect,
+    /// A pty's description, which keeps its O_ASYNC.
+    pty: Option<Arc<super::pty_owner::Description>>,
 }
 
 impl Arrival for File {
     fn arrived(&self) {
         let (fd, reasons) = match lock(&self.armed).as_mut() {
             Some(armed) => {
-                let reasons: Vec<i32> = knotes(armed.kq)
-                    .iter()
-                    .filter_map(|e| armed.fasync.reason(armed.held, &mut armed.space, e))
-                    .collect();
-                if reasons.is_empty() || !armed.elect.won() {
+                let mut reasons = Vec::new();
+                for e in knotes(armed.kq) {
+                    armed
+                        .fasync
+                        .reasons(armed.held, &mut armed.seen, &e, &mut reasons);
+                }
+                // Another holder of the file (a fork child) may have
+                // cleared O_ASYNC or handed the owner to Darwin since; and
+                // one holder signals.
+                if reasons.is_empty()
+                    || !self.is_async(armed)
+                    || self.fown.darwin()
+                    || !self.fown.won()
+                {
                     return;
                 }
                 (armed.fd, reasons)
@@ -450,6 +443,19 @@ impl Arrival for File {
 }
 
 impl File {
+    /// O_ASYNC as every holder of the file sees it now.
+    fn is_async(&self, armed: &Armed) -> bool {
+        match (self.source.flags, &armed.pty) {
+            (_, Some(pty)) => super::fs::open_flags_to_host(pty.flags()) & libc::O_ASYNC != 0,
+            (Flags::Owner, None) => self.fown.is_async(),
+            _ => {
+                // SAFETY: plain fcntl on our reference to the file.
+                let flags = unsafe { libc::fcntl(armed.held, libc::F_GETFL) };
+                flags & libc::O_ASYNC != 0
+            }
+        }
+    }
+
     fn disarm(&self) {
         if let Some(armed) = lock(&self.armed).take() {
             unregister(armed.id);
@@ -558,28 +564,26 @@ fn host_fcntl(fd: i32, cmd: u64, arg: u64) -> i64 {
     errno::check(unsafe { libc::fcntl(fd, libc::F_SETOWN, target) } as i64)
 }
 
-/// After the owner changed: Darwin takes an owner it can signal, and the
-/// file leaves this table; otherwise Darwin's is cleared and the watcher
-/// delivers while O_ASYNC is set.
+/// After the owner changed: Darwin takes an owner it can signal; otherwise
+/// Darwin's is cleared and the watcher delivers while O_ASYNC is set.
 fn project(fd: i32, guest: i32, file: &Arc<File>) -> Result<(), Errno> {
     let host = file.source.darwin_owner(&file.fown.owner());
     // SAFETY: plain fcntl.
     if file.source.darwin && unsafe { libc::fcntl(fd, libc::F_SETOWN, host.unwrap_or(0)) } < 0 {
         return Err(errno::last());
     }
+    // The other holders of the file (a fork child) leave it to Darwin too.
+    file.fown.set_darwin(host.is_some())?;
     if host.is_some() {
-        if let Some(files) = lock(&FILES).as_mut() {
-            files.retain(|_, other| !Arc::ptr_eq(other, file));
-        }
         file.disarm();
         return Ok(());
     }
-    refresh(fd, guest, file, None)
+    refresh(fd, guest, file)
 }
 
 /// The status flags of host descriptor `fd`, as Darwin's F_GETFL gives
 /// them: a pty's are its keeper's.
-fn status(fd: i32) -> Result<i32, Errno> {
+fn status(fd: i32, file: &File) -> Result<i32, Errno> {
     if let Some(fdtab::Kind::Pty(description)) = fdtab::get(fd) {
         return Ok(super::fs::open_flags_to_host(description.flags()));
     }
@@ -588,13 +592,16 @@ fn status(fd: i32) -> Result<i32, Errno> {
     if flags < 0 {
         return Err(errno::last());
     }
+    if file.source.flags == Flags::Owner && file.fown.is_async() {
+        return Ok(flags | libc::O_ASYNC);
+    }
     Ok(flags)
 }
 
 /// Arm or disarm file `file` (descriptor `fd`, guest fd `guest`) as its
-/// O_ASYNC flag now says, sharing the election `elect` of a fork parent.
-fn refresh(fd: i32, guest: i32, file: &Arc<File>, elect: Option<Elect>) -> Result<(), Errno> {
-    let flags = status(fd)?;
+/// O_ASYNC flag now says.
+fn refresh(fd: i32, guest: i32, file: &Arc<File>) -> Result<(), Errno> {
+    let flags = status(fd, file)?;
     let fasync = match file.source.fasync {
         Some(fasync) if flags & libc::O_ASYNC != 0 => fasync,
         _ => {
@@ -606,10 +613,6 @@ fn refresh(fd: i32, guest: i32, file: &Arc<File>, elect: Option<Elect>) -> Resul
     if armed.is_some() {
         return Ok(());
     }
-    let elect = match elect {
-        Some(elect) => elect,
-        None => Elect::new()?,
-    };
     let held = private_kqueue(Some(fd))?;
     let kq = match private_kqueue(None) {
         Ok(kq) => kq,
@@ -641,23 +644,27 @@ fn refresh(fd: i32, guest: i32, file: &Arc<File>, elect: Option<Elect>) -> Resul
                 return Err(errno::last());
             }
         }
-        let space = knotes(kq)
+        // What is there already raises nothing.
+        let seen = knotes(kq)
             .iter()
-            .find(|e| e.filter == libc::EVFILT_WRITE)
+            .find(|e| e.filter == libc::EVFILT_READ)
             .map_or(0, |e| e.data);
         let target: Weak<File> = Arc::downgrade(file);
-        register(kq, target).map(|id| (id, space))
+        register(kq, target).map(|id| (id, seen))
     })();
     match registered {
-        Ok((id, space)) => {
+        Ok((id, seen)) => {
             *armed = Some(Armed {
                 fd: guest,
                 fasync,
-                space,
+                seen,
                 held,
                 kq,
                 id,
-                elect,
+                pty: match fdtab::get(fd) {
+                    Some(fdtab::Kind::Pty(description)) => Some(description),
+                    _ => None,
+                },
             });
             Ok(())
         }
@@ -669,6 +676,31 @@ fn refresh(fd: i32, guest: i32, file: &Arc<File>, elect: Option<Elect>) -> Resul
     }
 }
 
+/// F_SETFL's O_ASYNC `on` for guest fd `guest`, of `source`, whose
+/// owner's record keeps it ([`Source::keeps_async`]).
+pub fn set_kept_async(guest: i32, source: Source, on: bool) -> Result<(), Errno> {
+    let file = match file(guest) {
+        Some(file) => file,
+        None => {
+            let file = Arc::new(File {
+                fown: Fown::default(),
+                source,
+                armed: Mutex::new(None),
+            });
+            lock(&FILES)
+                .get_or_insert_default()
+                .insert(guest, file.clone());
+            file
+        }
+    };
+    file.fown.set_async(on)
+}
+
+/// The O_ASYNC that guest fd `guest`'s owner's record keeps.
+pub fn kept_async(guest: i32) -> bool {
+    file(guest).is_some_and(|file| file.fown.is_async())
+}
+
 /// F_SETFL changed host descriptor `fd` (guest fd `guest`): a file kept
 /// here follows its O_ASYNC flag.
 pub fn status_changed(fd: i32, guest: i32) -> Result<(), Errno> {
@@ -677,7 +709,7 @@ pub fn status_changed(fd: i32, guest: i32) -> Result<(), Errno> {
             if file.source.fasync.is_some()
                 && file.source.darwin_owner(&file.fown.owner()).is_none() =>
         {
-            refresh(fd, guest, &file, None)
+            refresh(fd, guest, &file)
         }
         _ => Ok(()),
     }
@@ -729,15 +761,12 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
         w.seq(fds.iter(), |w, fd| w.i32(*fd));
         file.fown.save(w);
         file.source.save(w);
-        w.opt(lock(&file.armed).as_ref(), |w, armed| {
-            w.i32(armed.fd);
-            armed.elect.save(w);
-        });
+        w.opt(lock(&file.armed).as_ref(), |w, armed| w.i32(armed.fd));
     });
 }
 
 /// The registrations [`fork_restore`] read, armed by [`after_fork_child`].
-static RESTORED: Mutex<Vec<(i32, i32, Arc<File>, Elect)>> = Mutex::new(Vec::new());
+static RESTORED: Mutex<Vec<(i32, i32, Arc<File>)>> = Mutex::new(Vec::new());
 
 pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
     let groups = r.seq(|r| {
@@ -747,13 +776,13 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             source: Source::load(r),
             armed: Mutex::new(None),
         });
-        (fds, file, r.opt(|r| (r.i32(), Elect::load(r))))
+        (fds, file, r.opt(|r| r.i32()))
     });
     let mut files = lock(&FILES);
     let files = files.get_or_insert_default();
     for (fds, file, armed) in groups {
-        if let (Some((si_fd, elect)), Some(fd)) = (armed, fds.first()) {
-            lock(&RESTORED).push((*fd, si_fd, file.clone(), elect));
+        if let (Some(si_fd), Some(fd)) = (armed, fds.first()) {
+            lock(&RESTORED).push((*fd, si_fd, file.clone()));
         }
         for fd in fds {
             files.insert(fd, file.clone());
@@ -763,8 +792,8 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
 
 /// Fork child: arm each registration again on its inherited file.
 pub fn after_fork_child() -> Result<(), Errno> {
-    for (fd, si_fd, file, elect) in std::mem::take(&mut *lock(&RESTORED)) {
-        refresh(fd, si_fd, &file, Some(elect))?;
+    for (fd, si_fd, file) in std::mem::take(&mut *lock(&RESTORED)) {
+        refresh(fd, si_fd, &file)?;
     }
     Ok(())
 }
@@ -962,7 +991,7 @@ mod tests {
         let restored = std::mem::take(&mut *lock(&RESTORED));
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].1, a);
-        // The copy's election is the parent's own file here.
+        // The copy's record is the parent's own file here.
         std::mem::forget(restored);
         *lock(&FILES) = saved;
 
@@ -1059,9 +1088,11 @@ mod tests {
         setsig(p[1], WRITER);
         put(p[1], b"x");
         assert_eq!(reason(READER, p[0]), (1, 0x41));
-        assert!(quiet(WRITER));
+        // Darwin also wakes a writer for its own writes.
+        flush(WRITER);
         get(p[0]);
         assert_eq!(reason(WRITER, p[1]), (2, 0x304));
+        flush(WRITER);
         close(&[p[0]]);
         assert_eq!(reason(WRITER, p[1]), (2, 0x304));
         assert!(quiet(READER));
@@ -1072,6 +1103,44 @@ mod tests {
         close(&[p[1]]);
         assert_eq!(reason(READER, p[0]), (1, 0x41));
         close(&[p[0]]);
+    }
+
+    /// Discard what `sig` has queued.
+    fn flush(sig: i32) {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        while take_process(sig).is_some() {}
+    }
+
+    /// `pipe_read` signals the writer after each read: a non-blocking
+    /// writer that filled the pipe hears every drain, not only the first.
+    #[test]
+    fn f_setsig_pipe_writer_hears_each_drain() {
+        if fdtab::isolated_kernel_test("sys::fasync::tests::f_setsig_pipe_writer_hears_each_drain")
+        {
+            return;
+        }
+        const WRITER: i32 = 46;
+        const O_NONBLOCK: u64 = 0o4000;
+        fdtab::init();
+        super::super::signal::install_host_handlers();
+        let mut p = [0i32; 2];
+        assert_eq!(
+            fs::pipe2([p.as_mut_ptr() as u64, O_NONBLOCK, 0, 0, 0, 0]),
+            0
+        );
+        setsig(p[1], WRITER);
+        assert_eq!(fcntl(p[1], F_SETFL, O_ASYNC | O_NONBLOCK), 0);
+        // Each write fills what is free at once.
+        let chunk = vec![0u8; 1 << 20];
+        for round in 0..3 {
+            while fs::write([p[1] as u64, chunk.as_ptr() as u64, 1 << 20, 0, 0, 0]) > 0 {}
+            flush(WRITER);
+            let mut bytes = vec![0u8; 1 << 20];
+            while fs::read([p[0] as u64, bytes.as_mut_ptr() as u64, 1 << 20, 0, 0, 0]) > 0 {}
+            let info = take(WRITER).unwrap_or_else(|| panic!("no POLL_OUT in round {round}"));
+            assert_eq!((info.code, info.fields[0]), (2, 0x304));
+        }
+        close(&p);
     }
 
     /// A socket's peer that shuts down its writing is POLL_IN; one that
@@ -1093,6 +1162,111 @@ mod tests {
         assert_eq!(reason(SIGRT, a), (6, 0x18));
         assert!(quiet(SIGRT) && quiet(SIGIO));
         close(&[a]);
+    }
+
+    /// Data and the peer's close in one wakeup are POLL_IN, then POLL_HUP;
+    /// data that was there before O_ASYNC is not signalled at the close.
+    #[test]
+    fn f_setsig_socket_data_then_hangup() {
+        if fdtab::isolated_kernel_test("sys::fasync::tests::f_setsig_socket_data_then_hangup") {
+            return;
+        }
+        const SIGRT: i32 = 47;
+        fdtab::init();
+        super::super::signal::install_host_handlers();
+        let [a, b] = socketpair();
+        setsig(a, SIGRT);
+        let held = file(a).unwrap();
+        {
+            // The watcher waits for this lock: one wakeup sees both.
+            let _armed = lock(&held.armed);
+            put(b, b"x");
+            close(&[b]);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert_eq!(reason(SIGRT, a), (1, 0x41));
+        assert_eq!(reason(SIGRT, a), (6, 0x18));
+        assert!(quiet(SIGRT));
+        close(&[a]);
+
+        let [a, b] = socketpair();
+        put(b, b"x");
+        setsig(a, SIGRT);
+        close(&[b]);
+        assert_eq!(reason(SIGRT, a), (6, 0x18));
+        assert!(quiet(SIGRT));
+        close(&[a]);
+    }
+
+    /// A host tty's owner and O_ASYNC stay here: Darwin's F_SETOWN of a
+    /// tty is TIOCSPGRP (its foreground group), and its O_ASYNC signals
+    /// that group.
+    #[test]
+    fn f_setsig_host_tty_owner_stays_here() {
+        if fdtab::isolated_kernel_test("sys::fasync::tests::f_setsig_host_tty_owner_stays_here") {
+            return;
+        }
+        const SIGRT: i32 = 48;
+        fdtab::init();
+        super::super::signal::install_host_handlers();
+        // SAFETY: a new pty pair of our own.
+        let (master, slave) = unsafe {
+            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            assert!(master >= 0 && libc::grantpt(master) == 0 && libc::unlockpt(master) == 0);
+            let slave = libc::open(libc::ptsname(master), libc::O_RDWR | libc::O_NOCTTY);
+            assert!(slave >= 0);
+            (master, slave)
+        };
+        {
+            let _guard = fdtab::lifecycle();
+            fdtab::publish_guest(master).unwrap();
+            fdtab::publish_guest(slave).unwrap();
+        }
+        let pid = unsafe { libc::getpid() };
+        assert_eq!(fcntl(slave, F_SETOWN, pid as u64), 0);
+        assert_eq!(fcntl(slave, F_GETOWN, 0), pid as i64);
+        assert_eq!(fcntl(slave, F_SETSIG, SIGRT as u64), 0);
+        assert_eq!(fcntl(slave, F_SETFL, O_ASYNC), 0);
+        assert!(is_async(slave));
+        assert_eq!(
+            unsafe { libc::fcntl(slave, libc::F_GETFL) } & libc::O_ASYNC,
+            0
+        );
+        put(master, b"x\n");
+        assert_eq!(reason(SIGRT, slave), (1, 0x41));
+        assert_eq!(fioasync(slave, 0), 0);
+        assert!(!is_async(slave));
+        put(master, b"y\n");
+        assert!(quiet(SIGRT));
+        close(&[slave, master]);
+    }
+
+    /// A fork child's copy of a file's owner is the parent's: an F_SETSIG
+    /// after the fork reaches it.
+    #[test]
+    fn fork_copy_shares_the_owner() {
+        if fdtab::isolated_kernel_test("sys::fasync::tests::fork_copy_shares_the_owner") {
+            return;
+        }
+        use super::super::fork_state::{Reader, Writer};
+        fdtab::init();
+        let [a, b] = socketpair();
+        assert_eq!(fcntl(a, F_SETSIG, 40), 0);
+        let mut w = Writer::default();
+        fork_save(&mut w);
+        let blob = w.into_bytes();
+        let parent = lock(&FILES).take();
+        let mut r = Reader::new(&blob);
+        fork_restore(&mut r);
+        assert!(r.ok());
+        std::mem::take(&mut *lock(&RESTORED));
+        let child = std::mem::replace(&mut *lock(&FILES), parent);
+        assert_eq!(fcntl(a, F_SETSIG, 41), 0);
+        let parent = std::mem::replace(&mut *lock(&FILES), child);
+        assert_eq!(fcntl(a, F_GETSIG, 0), 41);
+        // The copy's record is the parent's own file here.
+        std::mem::forget(std::mem::replace(&mut *lock(&FILES), parent));
+        close(&[a, b]);
     }
 
     /// A memfd (shmem) has no fasync: F_SETSIG and O_ASYNC are kept, and

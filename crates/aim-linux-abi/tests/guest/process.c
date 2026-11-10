@@ -791,14 +791,17 @@ static int fasync_signals(int sig, int fd) {
 }
 
 // A fork child shares an O_ASYNC socket and inotify with its parent, as
-// Linux's one open file: each event signals the owner once, and the
-// child's copy signals once the parent closed its own. The owner is not
+// Linux's one open file: each event signals the owner once, also after
+// the parent clears and sets O_ASYNC again; F_SETSIG and O_ASYNC through
+// the parent hold for the child's copy; and the child's copy signals once
+// the parent closed its own. The owner is not
 // the namespace's init, which takes no siginfo from another process.
 static void fasync_fork_once_owner(void) {
-  int sig = SIGRTMIN + 2;
+  int sig = SIGRTMIN + 2, sig2 = SIGRTMIN + 4;
   sigset_t set;
   sigemptyset(&set);
   sigaddset(&set, sig);
+  sigaddset(&set, sig2);
   CHECK(sigprocmask(SIG_BLOCK, &set, NULL) == 0, "block");
   const char* dir = "/data/local/tmp/fasync-fork";
   mkdir(dir, 0755);
@@ -830,10 +833,27 @@ static void fasync_fork_once_owner(void) {
   close(open(path, O_CREAT | O_WRONLY, 0644));
   n = fasync_signals(sig, ino);
   CHECK(n == 1, "inotify signals %d", n);
+  int flags = fcntl(sv[0], F_GETFL);
+  CHECK(fcntl(sv[0], F_SETFL, flags & ~O_ASYNC) == 0, "clear O_ASYNC");
+  CHECK(write(sv[1], "x", 1) == 1, "write");
+  n = fasync_signals(sig, sv[0]);
+  CHECK(n == 0, "signals without O_ASYNC %d", n);
+  CHECK(fcntl(sv[0], F_SETFL, flags) == 0, "set O_ASYNC");
+  CHECK(write(sv[1], "x", 1) == 1, "write");
+  n = fasync_signals(sig, sv[0]);
+  CHECK(n == 1, "signals after O_ASYNC again %d", n);
+  CHECK(fcntl(sv[0], F_SETSIG, sig2) == 0, "F_SETSIG");
+  for (int i = 0; i < 3; i++) {
+    CHECK(write(sv[1], "x", 1) == 1, "write");
+    n = fasync_signals(sig2, sv[0]);
+    CHECK(n == 1, "signals after F_SETSIG %d", n);
+  }
+  n = fasync_signals(sig, sv[0]);
+  CHECK(n == 0, "old signal %d", n);
   int s0 = sv[0];
   close(sv[0]);
   CHECK(write(sv[1], "y", 1) == 1, "write after close");
-  n = fasync_signals(sig, s0);
+  n = fasync_signals(sig2, s0);
   CHECK(n == 1, "child's copy signals %d", n);
   write(go[1], "x", 1);
   close(go[1]);
