@@ -106,7 +106,9 @@ impl Store {
             ));
         }
         let dir = self.data.join("system/users").join(user.to_string());
-        fs::create_dir_all(&dir).map_err(WriteError::before)?;
+        fs::create_dir_all(&dir)
+            .and_then(|()| aim_storage::fscrypt::adopt(&dir))
+            .map_err(WriteError::before)?;
         let path = dir.join("package-restrictions.xml");
         let claim = Claim::inspect([
             path.clone(),

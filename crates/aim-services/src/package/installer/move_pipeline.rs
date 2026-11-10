@@ -202,6 +202,7 @@ impl InstallOwner for Adapter {
             code: None,
             errors: self.errors.clone(),
         };
+        aim_storage::fscrypt::adopt(&claim.path).map_err(io_error)?;
         let (target_guest, target_host) = if plan.complete {
             let guest = installed_path(plan)?;
             let host = (self.native.apks.files)(&guest)
@@ -277,6 +278,7 @@ impl PreparedMove for Prepared {
             .ok_or_else(|| error("Move staging VFS view missing"))?;
         fs::create_dir(&path).map_err(io_error)?;
         self.claim.capture(&path)?;
+        aim_storage::fscrypt::adopt(&path).map_err(io_error)?;
         copy_cluster(&self.source_host, &path).map_err(io_error)?;
         // The guest stage is mapped by the same Files owner as the parser.
         self.target_guest = Some(guest);
@@ -466,6 +468,8 @@ impl PreparedMove for Prepared {
         Ok(receipt)
     }
 }
+/// Copies the cluster `from` into `to`. Each copy is a new inode and takes
+/// `to`'s fscrypt policy, not the one its source's attributes carry.
 fn copy_cluster(from: &Path, to: &Path) -> io::Result<()> {
     for entry in fs::read_dir(from)? {
         let entry = entry?;
@@ -473,17 +477,20 @@ fn copy_cluster(from: &Path, to: &Path) -> io::Result<()> {
         let target = to.join(entry.file_name());
         if kind.is_dir() {
             fs::create_dir(&target)?;
+            aim_storage::fscrypt::inherit(to, &target)?;
             copy_cluster(&entry.path(), &target)?;
+            continue;
         } else if kind.is_symlink() {
-            symlink(fs::read_link(entry.path())?, target)?;
+            symlink(fs::read_link(entry.path())?, &target)?;
         } else if kind.is_file() {
-            fs::copy(entry.path(), target)?;
+            fs::copy(entry.path(), &target)?;
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Move cluster contains a non-file object",
             ));
         }
+        aim_storage::fscrypt::inherit(to, &target)?;
     }
     Ok(())
 }

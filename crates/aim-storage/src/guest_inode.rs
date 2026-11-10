@@ -101,8 +101,19 @@ pub fn read(path: &Path) -> io::Result<Option<GuestInode>> {
     Ok(decode(&b[..n as usize]))
 }
 
-/// Records `a`'s fields over those `path` already has.
+/// Records `a`'s fields over those `path` already has. A host-side owner
+/// records each inode it makes in a writable area, so here such an inode
+/// also takes the fscrypt policy the kernel would have given it
+/// ([`crate::fscrypt::adopt`]).
 pub fn record(path: &Path, a: GuestInode) -> io::Result<()> {
+    crate::fscrypt::adopt(path)?;
+    change(path, a)
+}
+
+/// Records `a`'s fields over those `path` already has, for an owner that
+/// gave the inode its fscrypt policy when it made it (guest-init's
+/// builtins): a chown or chmod leaves the policy as it is.
+pub fn change(path: &Path, a: GuestInode) -> io::Result<()> {
     let old = read(path)?.unwrap_or_default();
     let b = encode(GuestInode {
         uid: a.uid.or(old.uid),

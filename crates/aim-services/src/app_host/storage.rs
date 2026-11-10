@@ -1188,7 +1188,9 @@ impl AppHost {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as i64),
             Err(_) => {
-                if let Err(e) = std::fs::File::create(&file) {
+                if let Err(e) =
+                    std::fs::File::create(&file).and_then(|_| aim_storage::fscrypt::adopt(&file))
+                {
                     eprintln!(
                         "app host: mount: Unable to create fstrim record {}: {e}",
                         file.display()

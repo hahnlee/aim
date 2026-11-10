@@ -259,16 +259,23 @@ turns FBE on and depends on slice 4's CE protection: it lands after it.
 
 - Host-side writers bypass the syscall layer: the app host and aim-system
   write `/data/system*` and prepare app data directly or through installd.
-  They must create files through the ABI's inheritance (or the owner's
-  `aim_storage::fscrypt::inherit`, as guest-init's builtins and the data
-  template's placement do), else files appear unencrypted in an
-  encrypted tree. The app host's own files (`packages.xml` and the other
-  settings it writes) still do. Its writers of `/data/system_ce/<user>`
+  They give what they make the policy Linux would through the fscrypt
+  owner's `aim_storage::fscrypt::adopt` (#2901): `guest_inode::record`,
+  which every such writer calls on the inodes it makes, adopts, and the few
+  writers that record no guest owner (the instant app store, the native
+  writer's lease, compressed and moved package stages) call it directly;
+  a host copy takes its directory's policy (`inherit`), not its source's.
+  guest-init's builtins give a policy when they create, so their chown and
+  chmod records (`guest_inode::change`) do not adopt. An inode written past
+  both, or written by an older build, has none; nothing reports such
+  inodes yet (#2906). The app host's writers of `/data/system_ce/<user>`
   wait for the user's unlock, as their originals do (usage stats,
   shortcuts, widgets, launch params, accounts' CE database, hibernation),
   so vold prepares a fresh directory's CE storage at the first try.
 - The hot path: inheritance costs an xattr write per inode created under
-  `/data`; lookups pay only while a key is absent. Slice 1 measures
+  `/data`, and a host-side adoption an xattr read and an `lstat` per
+  directory it climbs, up to the first with a policy or the data volume's
+  root; lookups pay only while a key is absent. Slice 1 measures
   `startup_bench` and a boot before and after.
 - A partial FBE (properties before slices 1-3) is worse than none: the
   properties flip only in slice 3, after the ABI and vold are in.

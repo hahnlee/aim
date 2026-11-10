@@ -167,6 +167,7 @@ fn prepare_native(
         .custom_flags(libc::O_EXLOCK | libc::O_NONBLOCK | libc::O_NOFOLLOW)
         .open(&path)
         .map_err(io_error)?;
+    aim_storage::fscrypt::adopt(&path).map_err(io_error)?;
     let metadata = file.metadata().map_err(io_error)?;
     if !metadata.is_file() || fs::symlink_metadata(&path).map_err(io_error)?.ino() != metadata.ino()
     {

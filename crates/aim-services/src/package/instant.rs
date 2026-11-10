@@ -323,7 +323,9 @@ impl Owner {
             self.record_io("create instant id directory", error);
             return Ok(id);
         }
-        if let Err(error) = fs::write(&file, id.as_bytes()) {
+        if let Err(error) =
+            fs::write(&file, id.as_bytes()).and_then(|()| aim_storage::fscrypt::adopt(&file))
+        {
             self.record_io("persist instant app scoped Android id", error);
         }
         Ok(id)
@@ -433,6 +435,7 @@ impl Owner {
                     }
                     if let Some(bytes) = pending.bytes.filter(|bytes| !bytes.is_empty()) {
                         fs::write(&pending.path, bytes)?;
+                        aim_storage::fscrypt::adopt(&pending.path)?;
                     }
                     Ok(())
                 })();
@@ -647,7 +650,10 @@ impl Owner {
             fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
             self.write_metadata(user, &app, binary_xml)?;
             if let Some(png) = icon_png {
-                fs::write(directory.join("icon.png"), png).map_err(|error| error.to_string())?;
+                let icon = directory.join("icon.png");
+                fs::write(&icon, png)
+                    .and_then(|()| aim_storage::fscrypt::adopt(&icon))
+                    .map_err(|error| error.to_string())?;
             }
             self.shared
                 .live
@@ -759,6 +765,7 @@ impl Owner {
         let staging = directory.join("metadata.xml.new");
         let result = (|| -> io::Result<()> {
             let mut output = fs::File::create(&staging)?;
+            aim_storage::fscrypt::adopt(&staging)?;
             output.write_all(&bytes)?;
             crate::fsync(&output)?;
             drop(output);

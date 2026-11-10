@@ -536,7 +536,7 @@ pub fn create_socket(spec: &SocketSpec) -> Result<(OwnedFd, i32), String> {
         gid: Some(spec.gid),
         mode: Some(spec.perm),
     };
-    crate::guest_inode::record(&spec.host_path, owner)
+    crate::guest_inode::change(&spec.host_path, owner)
         .map_err(|e| format!("{}: {e}", spec.host_path.display()))?;
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&spec.host_path, fs::Permissions::from_mode(spec.perm))

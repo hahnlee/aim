@@ -1021,9 +1021,11 @@ app host writes nothing under `/data/system_ce/0` before user 0 unlocks
 shortcuts, widgets and launch params wait for the unlock, so vold prepares
 a fresh directory's CE storage at the first try (no ENOTEMPTY, no destroy
 and retry) and what services write there after the unlock is kept across
-a warm boot (branch fix/2902, a fresh and a warm boot of one throwaway
-data directory, 2026-11-10). A data directory's CE storage belongs to the
-image that first mounts it: `mount_all` refuses a data directory the derived image
+a warm boot (a fresh and a warm boot of one throwaway data directory,
+2026-11-10). What the app host writes host-side under an encrypted
+directory takes its policy as the kernel would give it (#2901). A data
+directory's CE storage belongs to the image that first mounts it:
+`mount_all` refuses a data directory the derived image
 (the original LockSettingsService) booted to the app host image, and the
 reverse, naming both (ADR 0016). Settings'
 warm median first presented frame was 1.094 s after open (2026-10-30). Raw capture now waits for user-0 DE storage
