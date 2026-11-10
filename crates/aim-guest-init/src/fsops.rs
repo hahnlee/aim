@@ -506,8 +506,54 @@ impl FsOps {
             {
                 let _ = file.write_all(record.line().as_bytes());
             }
+            self.advance_metadata_generation();
         }
         self.attrs.push(record);
+    }
+
+    /// Moves the syscall layer's metadata generation, the native u64 in
+    /// `<runtime>/inode-mode-epoch`, after a recording, as the layer's own
+    /// recordings do: its processes look at owners, modes and the table
+    /// again only when it moves.
+    fn advance_metadata_generation(&self) {
+        let Some(runtime) = self.attrs_file.parent() else {
+            return;
+        };
+        let advanced = (|| -> std::io::Result<()> {
+            use std::os::fd::AsRawFd;
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(runtime.join("inode-mode-epoch"))?;
+            if file.metadata()?.len() < 8 {
+                file.set_len(8)?;
+            }
+            // SAFETY: a shared mapping of the file's first aligned word,
+            // unmapped below.
+            let address = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    8,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED,
+                    file.as_raw_fd(),
+                    0,
+                )
+            };
+            if address == libc::MAP_FAILED {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: the word mapped above.
+            unsafe { &*(address as *const std::sync::atomic::AtomicU64) }
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+            unsafe { libc::munmap(address, 8) };
+            Ok(())
+        })();
+        if let Err(error) = advanced {
+            eprintln!("guest-init: metadata generation: {error}");
+        }
     }
 
     fn record_kernfs(&mut self, resolved: &Resolved, content: &str) -> FsResult {
@@ -1129,6 +1175,9 @@ mod tests {
         let table = fs::read_to_string(layout.fs_attrs_file()).unwrap();
         assert!(!table.contains("/data/"), "{table}");
         assert!(table.contains("\t0\t0\t755\n"), "{table}");
+        // Each recording moved the layer's metadata generation.
+        let generation = fs::read(layout.runtime.join("inode-mode-epoch")).unwrap();
+        assert!(u64::from_ne_bytes(generation[..8].try_into().unwrap()) >= 3);
         assert!(matches!(
             ops.mount("tmpfs", "tmpfs", "/mnt/x", &[]).unwrap(),
             Effect::Applied(_)
