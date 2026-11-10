@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 
 use crate::errno::{self, Errno};
+use crate::sys::fscrypt::Lock;
 
 pub const LINUX_AT_FDCWD: i32 = -100;
 const MAX_SYMLINKS: usize = 40;
@@ -2730,9 +2731,10 @@ pub(crate) fn visible(guest: String) -> Result<String, Errno> {
         return Ok(guest);
     }
     let (mut host, mut shown) = (Vec::new(), Vec::new());
+    let mut unlocked = None;
     for name in guest.split('/').filter(|name| !name.is_empty()) {
-        let dir = host_cstring(lookup(&join_guest(&host)).0)?;
-        shown.push(crate::sys::fscrypt::guest_name(&dir, name.as_bytes())?);
+        let (lock, _) = dir_lock(&join_guest(&host), &mut unlocked)?;
+        shown.push(crate::sys::fscrypt::guest_name(&lock, name.as_bytes()));
         host.push(name.as_bytes().to_vec());
     }
     Ok(join_guest(&shown))
@@ -2754,6 +2756,9 @@ pub struct Resolved {
     pub host: CString,
     pub guest: String,
     pub area: Area,
+    /// Whether the walk passed an encrypted directory whose key is present
+    /// that holds it, so that it is not locked (fscrypt, [`dir_lock`]).
+    pub unlocked: bool,
 }
 
 impl Resolved {
@@ -2825,12 +2830,37 @@ pub fn resolve_checked_new(
     resolve_inner(dirfd, path, follow_last, true, true, check)
 }
 
+/// The lock (fscrypt) of the directory with the guest path `dir` (by its
+/// host names). Nothing off the data filesystem
+/// ([`off_data`](crate::sys::fscrypt::off_data)) or below an encrypted
+/// directory whose key is present is locked: `unlocked` keeps the host
+/// path of the last such directory a walk passed, so that the directories
+/// below it are not asked.
+/// Returns the lock and the directory's host path.
+fn dir_lock(dir: &str, unlocked: &mut Option<PathBuf>) -> Result<(Lock, CString), Errno> {
+    let (host, area) = lookup(dir);
+    let path = host_cstring(host.clone())?;
+    if unlocked.as_ref().is_some_and(|root| host.starts_with(root))
+        || crate::sys::fscrypt::off_data(&host, area)?
+    {
+        return Ok((Lock::Plain, path));
+    }
+    let lock = crate::sys::fscrypt::path_lock(&path)?;
+    if let Lock::Unlocked = lock {
+        *unlocked = Some(host);
+    }
+    Ok((lock, path))
+}
+
 /// The components a walk has passed: as the guest names them and, once a
 /// locked directory's no-key name stands for an entry (fscrypt), as the
 /// host does.
 struct Walk {
     guest: Vec<Vec<u8>>,
     host: Option<Vec<Vec<u8>>>,
+    /// The host path of the last encrypted directory passed whose key is
+    /// present ([`dir_lock`]).
+    unlocked: Option<PathBuf>,
 }
 
 impl Walk {
@@ -2838,8 +2868,8 @@ impl Walk {
     /// it is to be created.
     fn push(&mut self, name: Vec<u8>, locking: bool, new: bool) -> Result<(), Errno> {
         let host = if locking {
-            let dir = host_cstring(lookup(&self.host_path()).0)?;
-            crate::sys::fscrypt::host_name(&dir, &name, new)?
+            let (lock, dir) = dir_lock(&self.host_path(), &mut self.unlocked)?;
+            crate::sys::fscrypt::host_name(&lock, &dir, &name, new)?
         } else {
             None
         };
@@ -2904,6 +2934,7 @@ fn resolve_inner(
     let mut done = Walk {
         guest: Vec::new(),
         host: None,
+        unlocked: None,
     };
     if relative_base && path[0] != b'/' {
         for part in base.split('/').filter(|part| !part.is_empty()) {
@@ -2975,7 +3006,16 @@ fn resolve_inner(
         fuse_walk = None;
         let named = done.host.as_ref().map(|names| join_guest(names));
         let (host, area) = lookup(named.as_deref().unwrap_or(&current));
-        let link = locking.then(|| host_cstring(host.clone())).transpose()?;
+        // A symlink off the data filesystem or below an encrypted directory
+        // whose key is present is not locked ([`dir_lock`]).
+        let link = (locking
+            && !done
+                .unlocked
+                .as_ref()
+                .is_some_and(|root| host.starts_with(root))
+            && !crate::sys::fscrypt::off_data(&host, area)?)
+        .then(|| host_cstring(host.clone()))
+        .transpose()?;
         let Some(mut target) = link_target(host, area) else {
             continue;
         };
@@ -3003,6 +3043,10 @@ fn resolve_inner(
     let named = done.host.as_ref().map(|names| join_guest(names));
     let (host, area) = lookup(named.as_deref().unwrap_or(&guest));
     Ok(Resolved {
+        unlocked: done
+            .unlocked
+            .as_ref()
+            .is_some_and(|root| host.starts_with(root)),
         host: CString::new(host.as_os_str().as_bytes()).map_err(|_| errno::EINVAL)?,
         guest,
         area,

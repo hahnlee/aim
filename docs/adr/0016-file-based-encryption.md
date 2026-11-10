@@ -297,7 +297,11 @@ turns FBE on and depends on slice 4's CE protection: it lands after it.
 - The hot path: inheritance costs an xattr write per inode created under
   `/data`, and a host-side adoption an xattr read and an `lstat` per
   directory it climbs, up to the first with a policy or the data volume's
-  root; lookups pay only while a key is absent. Slice 1 measures
+  root; lookups pay only while a key is absent (until user 0's unlock
+  and the previous boot's `/data/per_boot` is gone), an xattr read per
+  directory they walk on the data filesystem (any but the read-only
+  image root's tree on its own volume), up to the first encrypted one
+  whose key is present: everything below it has its policy. Slice 1 measures
   `startup_bench` and a boot before and after.
 - A partial FBE (properties before slices 1-3) is worse than none: the
   properties flip only in slice 3, after the ABI and vold are in.

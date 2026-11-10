@@ -42,11 +42,13 @@ bench`) keeps everything of `DATA` in `DATA.asif` beside it:
   ends, on its timeout, SIGINT or SIGTERM. The persistent `/data`,
   `/metadata` and `/cache` are on it. Meanwhile the boot lays out its
   runtime directory (`DATA.run`: `/dev`, sockets, the path map, logs),
-  which is not on it, and init runs up to its first `mount_all`, in the
-  `fs` stage, which waits for the attach as a device mounts its
-  partitions there (`crates/aim-guest-init/src/mount.rs`). On a second
-  boot the attach (about 0.5 s) is over by then. The runtime directory
-  earlier boots kept in the image (`DATA/run`) is removed at the mount.
+  which is not on it, initializes the property areas, writes the APEX
+  list and loads init's scripts; the owners that serve from the image
+  then wait for the attach, the fs-verity store and the native services,
+  before init's first action (`crates/aim-guest-init/src/mount.rs`). The
+  attach takes 0.3 s on a second boot and 0.4-0.5 s on a first, of
+  which the preparation hides 0.15-0.3 s. The runtime directory earlier
+  boots kept in the image (`DATA/run`) is removed at the mount.
 - **One user**: guest-init holds an exclusive lock on `DATA.lock` while the
   image is attached. A second guest-init on the same data fails at once.
 - **Crash recovery**: an image found attached at start belongs to a

@@ -9337,12 +9337,25 @@ steps (runtime layout, property areas, scripts, binder host), the data
 image's attach and mount, every wait of init's queue with its length,
 and every property a service sets, since guest-init started (also
 `ro.boottime.*`'s epoch). The data image attaches on a thread while the
-boot prepares and runs early-init and init; the `fs` stage's `mount_all`
-waits for it (docs/storage.md). On a second boot (host load 26-31) the
-preparation takes 0.16 s, the attach ends at 0.50-0.53 s and the mount
-waits 0-0.07 s for it; `start zygote` runs at 1.58-1.60 s (a first
-and a second boot, host load 10) and `boot_progress_start` about 0.75 s
-later. Linkerconfig runs for both `perform_apex_config --bootstrap` and
+boot prepares its runtime directory, property areas, APEX list and init's
+scripts; the verity store and the native services wait for it before
+init's first action (docs/storage.md). Six alternating disposable
+app-host boots (host load 17-45, 2026-11-11): the attach ends at
+0.31-0.52 s and the boot is prepared at 0.35-0.57 s, against 0.55-0.73 s
+when the preparation waited for the attach first; second boots reached
+`sys.boot_completed` 0.16-0.61 s sooner. `start zygote` runs about 2.1 s
+after guest-init starts on a second boot and 2.4 s on a first (host load
+5), and `boot_progress_start` about 0.75 s later. Until user 0's CE
+unlock and the removal of the previous boot's `/data/per_boot`, a key
+some policy names is absent, so path walks ask the fscrypt owner whether
+a directory is locked; they now skip the read-only image root's tree on
+its own volume (a read-only bind of data still asks) and ask only down
+to the first encrypted directory whose key is present (ADR 0016). The
+package boot's app-data passes before the unlock, whose installd calls
+walk `/data/user_de/0/...`, take 20-30% less (deferred 217 packages
+0.19 s against 0.24-0.28 s warm); in three alternating rounds second
+boots reached `sys.boot_completed` 0.16-0.48 s sooner (host load 5-10,
+2026-11-11). Linkerconfig runs for both `perform_apex_config --bootstrap` and
 post-fs-data's full APEX activation, as pinned init does. The native bootstrap
 and default mount owners select different APEX inventories; skipping the
 second helper left the default configuration at its one-byte placeholder in
