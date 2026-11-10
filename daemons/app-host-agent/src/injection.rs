@@ -262,7 +262,7 @@ fn result_and_finished_share_deadline_and_removal_releases_completion() {
         return;
     }
     use std::os::unix::net::UnixDatagram;
-    let d = Dispatcher::new();
+    let d = Dispatcher::new(|_| false);
     let (server, client) = UnixDatagram::pair().unwrap();
     client
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -313,7 +313,7 @@ fn removal_closes_socket_while_channel_references_survive() {
     }
     use std::os::unix::net::UnixDatagram;
     for full in [false, true] {
-        let d = Dispatcher::new();
+        let d = Dispatcher::new(|_| false);
         let (server, client) = UnixDatagram::pair().unwrap();
         if full {
             while unsafe {

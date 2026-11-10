@@ -800,7 +800,7 @@ impl IAppHostAgent for Agent {
 fn attach() {
     let agent = BnAppHostAgent::new_binder(
         Agent {
-            input: input::Dispatcher::new(),
+            input: input::Dispatcher::new(power::key),
             channels: Default::default(),
             effects: Default::default(),
         },

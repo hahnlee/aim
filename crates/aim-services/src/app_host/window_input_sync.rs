@@ -160,7 +160,7 @@ mod tests {
             return;
         }
         crate::system::with_discovery_binders(|host, _, _, export| {
-            let dispatcher = dispatcher::Dispatcher::new();
+            let dispatcher = dispatcher::Dispatcher::new(|_| false);
             let (server, client) = UnixDatagram::pair().unwrap();
             client.set_read_timeout(Some(TIMEOUT)).unwrap();
             dispatcher.add_window(
