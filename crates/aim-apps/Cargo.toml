@@ -9,4 +9,5 @@ description = "The guest's launcher apps as macOS apps: APK labels and icons, ma
 [dependencies]
 aim-android-xml = { path = "../aim-android-xml" }
 android-image-extract = { path = "../../tools/android-image-extract" }
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 libc.workspace = true

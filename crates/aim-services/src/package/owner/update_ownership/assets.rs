@@ -9,10 +9,8 @@ use crate::package::{
     system_config::SystemConfig,
     write::Apks,
 };
+use aim_apps::apk::Files;
 use aim_apps::res::{Result, bad};
-use android_image_extract::{source::FileSource, zip::Archive};
-
-const MAX_ENTRY: u64 = 512 << 20;
 
 impl UpdateOwnership {
     /// Run the captured next post, retaining the package associated with that
@@ -73,16 +71,12 @@ impl UpdateOwnership {
         let mut assets = Vec::new();
         for path in paths {
             let host = (apks.files)(path).ok_or_else(|| bad(format!("{path}: not readable")))?;
-            let source = FileSource::open(&host).map_err(|e| bad(format!("{path}: {e}")))?;
-            let archive = Archive::open(&source).map_err(|e| bad(format!("{path}: {e}")))?;
-            let table = archive
-                .find(b"resources.arsc")
-                .map(|entry| {
-                    archive
-                        .read(entry, MAX_ENTRY)
-                        .map_err(|e| bad(format!("{path}: {e}")))
-                        .and_then(|bytes| Table::parse(&bytes))
-                })
+            // ResourcesManager's ApkAssets: resources.arsc as an asset.
+            let source = Files::open(&host).map_err(|e| bad(format!("{path}: {e}")))?;
+            let table = source
+                .asset("resources.arsc")
+                .map_err(|e| bad(format!("{path}: {e}")))?
+                .map(|bytes| Table::parse(&bytes))
                 .transpose()?;
             // Code-only splits still have to be readable APK archives.
             assets.push((source, table));
@@ -102,8 +96,7 @@ impl UpdateOwnership {
         };
         let file = |cookie: usize, name: &str| {
             if cookie > 0 && cookie < resources.tables.len() {
-                let source = &assets[source_indices[cookie - 1]].0;
-                return read_file(source, name);
+                return assets[source_indices[cookie - 1]].0.asset_file(name);
             }
             let host = if cookie == 0 {
                 (apks.files)("/system/framework/framework-res.apk")
@@ -115,8 +108,7 @@ impl UpdateOwnership {
                     .ok_or_else(|| bad("framework overlay resource source is absent"))?
                     .clone()
             };
-            let source = FileSource::open(&host).map_err(|e| bad(e.to_string()))?;
-            read_file(&source, name)
+            Files::open(&host)?.asset_file(name)
         };
         self.complete_resource_read(
             &parsed.package_name,
@@ -127,14 +119,4 @@ impl UpdateOwnership {
             file,
         )
     }
-}
-
-fn read_file(source: &FileSource, name: &str) -> Result<Vec<u8>> {
-    let archive = Archive::open(source).map_err(|e| bad(e.to_string()))?;
-    let entry = archive
-        .find(name.as_bytes())
-        .ok_or_else(|| bad(format!("no resource asset {name}")))?;
-    archive
-        .read(entry, MAX_ENTRY)
-        .map_err(|e| bad(e.to_string()))
 }

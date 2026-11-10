@@ -25,12 +25,14 @@ pub struct Entry {
     pub dos_time: u32,
     pub compressed_size: u64,
     pub size: u64,
-    local_offset: u64,
+    pub local_offset: u64,
 }
 
 pub struct Archive<'a> {
     source: &'a dyn ReadAt,
     pub entries: Vec<Entry>,
+    /// Where the central directory starts: entry data lies before it.
+    pub central_offset: u64,
 }
 
 impl<'a> Archive<'a> {
@@ -130,7 +132,15 @@ impl<'a> Archive<'a> {
             });
             at = next;
         }
-        Ok(Self { source, entries })
+        Ok(Self {
+            source,
+            entries,
+            central_offset,
+        })
+    }
+
+    pub fn source(&self) -> &'a dyn ReadAt {
+        self.source
     }
 
     pub fn find(&self, name: &[u8]) -> Option<&Entry> {

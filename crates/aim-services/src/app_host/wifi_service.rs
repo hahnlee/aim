@@ -737,7 +737,7 @@ impl WifiService {
             |e: String| Exception::new(EX_ILLEGAL_STATE, format!("wifi: {}: {e}", apk.display()));
         let apk_file = aim_apps::apk::Apk::open(&apk).map_err(|e| state(e.to_string()))?;
         let table = match apk_file
-            .file_if_present("resources.arsc")
+            .asset("resources.arsc")
             .map_err(|e| state(e.to_string()))?
         {
             Some(bytes) => ResourceTable::parse(&bytes).map_err(|e| state(e.to_string()))?,

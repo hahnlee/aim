@@ -236,10 +236,10 @@ impl Framework {
                 .get(table)
                 .ok_or("an XML resource of an overlay")?
             {
-                Some(i) => apks[*i].file(file),
+                Some(i) => apks[*i].asset_file(file),
                 None => {
                     aim_apps::apk::Files::open(&root.join("system/framework/framework-res.apk"))
-                        .and_then(|apk| apk.file(file))
+                        .and_then(|apk| apk.asset_file(file))
                 }
             }
             .map_err(|e| e.to_string())?;
@@ -466,7 +466,7 @@ impl PackageResources {
         let tables = apks
             .iter()
             .map(|apk| {
-                apk.file_if_present("resources.arsc")
+                apk.asset("resources.arsc")
                     .map_err(|e| e.to_string())?
                     .map(|b| {
                         if indexed {

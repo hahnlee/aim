@@ -975,29 +975,18 @@ fn manifest_keysets_match_original_parser() {
     assert!(parse(&code_only, "/data/app/empty/base.apk", 0, &platform).is_ok());
     writeln!(&mut expected, "CASE code-only.apk OK").unwrap();
     apks.push(code_only);
-    for (name, method, size, payload, diagnostic, original_result) in [
-        (
-            "bad-resource-crc",
-            0,
-            8,
-            b"invalid!".as_slice(),
-            "CRC",
-            "ERROR",
-        ),
-        (
-            "bad-resource-deflate",
-            8,
-            8,
-            b"\x07".as_slice(),
-            "deflate",
-            "ERROR",
-        ),
+    // The original reads resources.arsc as an asset (ZipAssetsProvider): an
+    // entry libziparchive's FindEntry rejects, such as a stored entry whose
+    // declared size overruns the data before the central directory, is
+    // absent; a stored one is mapped without a CRC-32 check (#828).
+    for (name, method, size, payload, original_result) in [
+        ("bad-resource-crc", 0, 8, b"invalid!".as_slice(), "ERROR"),
+        ("bad-resource-deflate", 8, 8, b"\x07".as_slice(), "ERROR"),
         (
             "oversize-resource",
             0,
             (512 << 20) + 1,
             b"invalid!".as_slice(),
-            "limit",
             "OK",
         ),
     ] {
@@ -1007,16 +996,15 @@ fn manifest_keysets_match_original_parser() {
             resource_apk(&manifest_bytes, Some((method, size, payload))),
         )
         .unwrap();
-        let error = aim_apps::apk::Apk::open(&apk)
-            .err()
-            .expect("present unreadable table was treated as absent");
-        assert!(error.to_string().contains(diagnostic), "{name}: {error}");
-        assert!(matches!(
-            parse(&apk, "/data/app/bad/base.apk", 0, &platform),
-            Err(Error::Status(..))
-        ));
-        // The original accepts this inconsistent stored entry size; native
-        // reading reaches its existing entry bound. Compatibility is #828.
+        let native = parse(&apk, "/data/app/bad/base.apk", 0, &platform);
+        if original_result == "OK" {
+            let opened = aim_apps::apk::Apk::open(&apk).unwrap();
+            assert!(opened.asset("resources.arsc").unwrap().is_none());
+            assert!(native.is_ok(), "{name}");
+        } else {
+            assert!(aim_apps::apk::Apk::open(&apk).is_err(), "{name}");
+            assert!(matches!(native, Err(Error::Status(..))), "{name}");
+        }
         writeln!(&mut expected, "CASE {name}.apk {original_result}").unwrap();
         apks.push(apk);
     }

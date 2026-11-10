@@ -265,7 +265,7 @@ pub(super) fn open_apk(host: &Path, path: &str) -> Result<Apk> {
 }
 pub(super) fn read_apk(apk: &Apk, path: &str) -> Result<(Element, Option<super::Table>)> {
     let table = apk
-        .file_if_present("resources.arsc")
+        .asset("resources.arsc")
         .and_then(|bytes| bytes.map(|bytes| super::Table::parse(&bytes)).transpose())
         .map_err(|_| super::Error::Status(-100, format!("Failed to parse {path}")))?;
     let manifest = apk
