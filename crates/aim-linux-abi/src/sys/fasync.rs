@@ -689,7 +689,9 @@ mod tests {
         close(&[b]);
     }
 
-    /// A pipe's FIOASYNC is O_ASYNC: the reader's owner hears each write.
+    /// A pipe's FIOASYNC is O_ASYNC: the reader's owner hears each write,
+    /// as `send_sigio` signals it without F_SETSIG: SI_KERNEL, from no
+    /// process.
     #[test]
     fn fioasync_pipe() {
         if fdtab::isolated_kernel_test("sys::fasync::tests::fioasync_pipe") {
@@ -704,7 +706,8 @@ mod tests {
         assert_eq!(fioasync(p[0], 1), 0);
         assert!(is_async(p[0]));
         put(p[1], b"x");
-        assert!(take(SIGIO).is_some());
+        let info = take(SIGIO).unwrap();
+        assert_eq!((info.code, info.fields[0]), (0x80, 0));
         get(p[0]);
         assert_eq!(fioasync(p[0], 0), 0);
         assert!(!is_async(p[0]));
