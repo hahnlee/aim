@@ -8,8 +8,9 @@
 #   DERIVED_ROOT  default: target/aim/derived/root
 #   OUT           default: target/aim/app-host/root (replaced)
 # The image's translation cache (docs/storage.md) goes beside OUT, as the
-# derived image's is beside its root: a clone of it, indexed for OUT's
-# files and with the agent translated.
+# derived image's is beside its root: the derived image's entries, kept
+# across runs (an entry is named by its content and never changes), with
+# an index for OUT's files and the agent translated.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -21,10 +22,25 @@ translated="$(dirname "$derived")/translated"
 [[ -d "$derived" && -d "$translated" && -x "$agent" && -x "$translate" ]] || {
   echo "app-host-image needs the derived image with its translation cache, daemon/aim-app-host-agent and host/linux-translate (cargo aim build)" >&2; exit 2;
 }
-rm -rf "$out" "$(dirname "$out")/translated"
+rm -rf "$out"
 mkdir -p "$(dirname "$out")"
 cp -c -R "$derived" "$out"
-cp -c -R "$translated" "$(dirname "$out")/translated"
+# Entries are read-only: removing one makes it writable first. A copy is
+# staged under a dot name, so an interrupted run leaves no partial entry.
+cache="$(dirname "$out")/translated"
+mkdir -p "$cache"
+for entry in "$cache"/.copy-* "$cache"/*; do
+  name="${entry##*/}"
+  [[ -e "$entry" && "$name" != paths && ( "$name" == .copy-* || ! -e "$translated/$name" ) ]] || continue
+  chmod -R u+w "$entry"
+  rm -rf "$entry"
+done
+for entry in "$translated"/*; do
+  name="${entry##*/}"
+  [[ "$name" != paths && ! -e "$cache/$name" ]] || continue
+  cp -c -R "$entry" "$cache/.copy-$name"
+  mv "$cache/.copy-$name" "$cache/$name"
+done
 zygote="$out/system/etc/init/hw/init.zygote64.rc"
 grep -q -- ' --start-system-server' "$zygote" || { echo "$zygote: no --start-system-server" >&2; exit 1; }
 sed -i '' 's/ --start-system-server//' "$zygote"

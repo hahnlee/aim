@@ -9402,8 +9402,9 @@ programs one after another (about 25-120 ms each, mostly starting
 at its first lock, for a process init launches as for a fork child;
 init's launches had each waited about 8 ms for one, so zygote-start
 came 0.25-0.35 s later on a warm boot (2026-11-11). The app host image
-has the derived image's translation cache beside its root (an APFS
-clone, indexed for the image's own files by `linux-translate --image`):
+has the derived image's translation cache beside its root (its entries,
+copied once and kept across regenerations, indexed for the image's own
+files by `linux-translate --image`):
 without it every ELF of every process took the load-time rewrite, a
 private rewritten copy of its code, and loading a program took 2.7 ms
 instead of 1.2 ms (medians); first boots reach zygote 0.2-0.4 s sooner
