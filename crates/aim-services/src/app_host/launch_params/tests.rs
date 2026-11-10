@@ -45,10 +45,11 @@ fn params() -> Params {
     }
 }
 
-fn records(owner: &Persister, user: i32) -> Records {
+fn records(owner: &Persister, user: i32) -> BTreeMap<ComponentName, Params> {
     let mut state = owner.state.lock().unwrap();
     state.finish_loading(user).unwrap();
-    state.users.get(&user).cloned().unwrap_or_default()
+    let records = state.users.get(&user).cloned().unwrap_or_default();
+    records.into_iter().map(|(n, r)| (n, r.params)).collect()
 }
 
 // Block the real writer rather than racing its three-second delay.
@@ -70,9 +71,9 @@ fn launch_params_load_when_the_activity_side_unlocks_the_user() {
         let owner = host.tasks.launch_params(data).unwrap();
 
         host.user_unlocking(0).unwrap();
-        assert_eq!(owner.get(0, &component).unwrap(), None);
+        assert_eq!(owner.get(0, &component, None).unwrap(), None);
         host.activity_task_user_unlocked(0).unwrap();
-        assert_eq!(owner.get(0, &component).unwrap(), Some(params()));
+        assert_eq!(owner.get(0, &component, None).unwrap(), Some(params()));
     });
 }
 
@@ -89,7 +90,7 @@ fn launch_params_are_written_once_ce_storage_is_unlocked() {
     owner.save(0, &component, params(), false).unwrap();
     owner.queue.shared.flush();
     assert!(!folder(&data.0, 0).exists());
-    assert_eq!(owner.get(0, &component).unwrap(), Some(params()));
+    assert_eq!(owner.get(0, &component, None).unwrap(), Some(params()));
     owner.save(0, &component, params(), true).unwrap();
     owner.queue.shared.flush();
     assert!(file(&folder(&data.0, 0), &component).exists());
@@ -124,7 +125,7 @@ fn launch_params_survive_task_owner_restart_in_original_abx() {
     owner
         .unlock_user(0, BTreeSet::from([component.package.clone()]))
         .unwrap();
-    assert_eq!(owner.get(0, &component).unwrap(), Some(params()));
+    assert_eq!(owner.get(0, &component, None).unwrap(), Some(params()));
 }
 
 #[test]
@@ -301,4 +302,50 @@ fn launch_params_restore_follows_rect_and_integer_parsing() {
     }
     assert!(Params::restore(b"<launch_params windowing_mode=\"bad\"/>").is_err());
     assert_eq!(Params::restore(b"<unrelated/>").unwrap(), Params::default());
+}
+
+/// `getLaunchParams`: a component's own record, else or if newer the
+/// newest record of a component saved with its window layout affinity;
+/// another affinity's or another user's are not taken.
+#[test]
+fn launch_params_follow_the_newest_of_a_window_layout_affinity() {
+    let data = Data::new();
+    data.user(0);
+    let owner = Persister::new(&data.0).unwrap();
+    let with = |left, affinity: Option<&str>| {
+        let mut p = params();
+        p.bounds.left = left;
+        p.window_layout_affinity = affinity.map(Into::into);
+        p
+    };
+    owner
+        .save(0, &name("a"), with(1, Some("shared")), false)
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(2));
+    owner
+        .save(0, &name("b"), with(2, Some("shared")), false)
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(2));
+    owner
+        .save(0, &name("c"), with(3, Some("other")), false)
+        .unwrap();
+    owner
+        .save(10, &name("d"), with(4, Some("shared")), false)
+        .unwrap();
+    let left = |n: &str, affinity| {
+        owner
+            .get(0, &name(n), affinity)
+            .unwrap()
+            .map(|p| p.bounds.left)
+    };
+    assert_eq!(left("a", None), Some(1));
+    assert_eq!(left("a", Some("shared")), Some(2));
+    assert_eq!(left("b", Some("shared")), Some(2));
+    assert_eq!(left("new", Some("shared")), Some(2));
+    assert_eq!(left("new", Some("none")), None);
+    std::thread::sleep(Duration::from_millis(2));
+    owner
+        .save(0, &name("a"), with(5, Some("shared")), false)
+        .unwrap();
+    assert_eq!(left("b", Some("shared")), Some(5));
 }

@@ -175,7 +175,12 @@ itself (`OP_WINDOWS`, from guest-init) and, in window mode:
 - **Opens a task** for each task it makes, at the bounds freeform
   gives a task started without any (`TaskLaunchParamsModifier
   .getTaskBounds`: 412×732 dp, 1064×600 dp for a landscape activity, fit
-  into the display and centred, then moved off another task's corners), and
+  into the display and centred, or 75 dp down and right of a freeform
+  source task of that size; launch bounds turned to the activity's
+  orientation; the component's persisted bounds, else its activity's
+  `<layout>` size and gravity (`getLayoutBounds`); then moved off
+  another freeform task's corners; an unresizeable activity's too, not
+  fullscreen as the original's step 2.3 would have it, by decision, #2785), and
   reports it (`TASK`, `PACKAGE`, `ACTIVITY`, then `FRONT`). Its
   activities' configuration is the freeform task's (`TaskFragment
   .computeConfigResourceOverrides`: its sizes from its bounds). Every
@@ -219,6 +224,35 @@ itself (`OP_WINDOWS`, from guest-init) and, in window mode:
   task: closing Clock's alarm window leaves Clock's own window.
 - **Input**: the agent sends a touch to the front window under it, in the
   window's coordinates (`aim-app-host-agent`).
+
+### Launch params
+
+The app host places tasks as `TaskLaunchParamsModifier` and
+`LaunchParamsController` do at android-16.0.0_r1, with these departures in
+window mode, because a Mac window has its own title bar and where the user
+put it is authoritative (as for the clamp of Mac moves, #2823):
+
+- A start into a task that has bounds of its own (a running Mac window:
+  an app's own start into its task, a notification's `PendingIntent`,
+  `am start`) leaves them: unlike `layoutTask` under
+  `fixLayoutExistingTask`, it applies neither the activity's `<layout>`
+  nor the persisted launch params, and does not move the window off
+  another window's corners (`adjustBoundsToAvoidConflict`), so tiled
+  windows stay tiled. Launch bounds in the start's options still apply.
+- Persisted launch params, which are the component's (or, as the
+  original reads them, the newest of a component of the same
+  `windowLayoutAffinity`), only place a new task: a reused task never
+  takes the mode or bounds another task persisted.
+- A new task's persisted bounds, where the user last put the component's
+  window, come before its activity's `<layout>`, which applies when
+  nothing is persisted (the original takes the layout first).
+- A task being laid out is left out of the conflict check, which the
+  original includes.
+- Step 2.3 (unresizeable activities launched fullscreen) is not ported
+  (#2785).
+
+A reused task of no bounds of its own (fullscreen), and every task outside
+window mode, are laid out as the original lays them out.
 
 ### Display rotation policy (#2630)
 
@@ -507,15 +541,13 @@ display covers the main screen only).
 
 An activity start into a running task from anywhere but a shim (an app's
 own `FLAG_ACTIVITY_NEW_TASK` start, a notification's `PendingIntent`,
-`am start`) moves its window by freeform's cascade: freeform lays the
-reused task out again from its persisted bounds, and moves it off itself
-(#613). An activity of a fixed manifest orientation that comes to the top
+`am start`) leaves its window where it is (#613; see Launch params). An activity of a fixed manifest orientation that comes to the top
 of a running task does not turn the window: a freeform task is never the
 display's orientation source, so `onTaskRequestedOrientationChanged` does
 not come, and the top activity's `ActivityInfo` is only in the
 `RunningTaskInfo` past its `Configuration`, with a whole `ApplicationInfo`
 in it. The native task organizer's `onTaskInfoChanged` gives it (#593,
-#463). Both are covered by the window shell, which makes
-window mode desktop windowing (a fullscreen display, freeform tasks: no
-persisted bounds to lay a task out from) and reports the top activity's
+#463). The system_server window shell covered both by making window mode
+desktop windowing (a fullscreen display, freeform tasks: no persisted
+bounds to lay a task out from) and reporting the top activity's
 orientation to the bridge ([task-organizer.md](task-organizer.md)).

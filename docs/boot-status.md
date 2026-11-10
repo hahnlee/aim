@@ -284,7 +284,14 @@ mode (the options', else a fullscreen display area's fullscreen or freeform
 source task's, else its own) changes a root task's mode as
 `shouldUpdateExistingTaskWindowingMode` allows (never a pinned one's to the
 display area's), and the launch bounds of that mode lay the task out
-(`LaunchParamsController.layoutTask`). A start
+(`LaunchParamsController.layoutTask`): the options', else the activity's
+`<layout>`, else default freeform bounds, a freeform source's cascaded,
+turned to the activity's orientation and kept off the other freeform
+tasks; a new task takes the component's persisted params first. In window
+mode a start into a task with bounds of its own leaves them, applying no
+layout, persisted params or conflict shift (docs/windows.md, "Launch
+params"; #2913; host tests only; an unresizeable app stays freeform,
+#2785). A start
 that avoids the front (`ActivityOptions.setAvoidMoveToFront`, or a blocked
 background start, which goes only into a task holding its caller's activity
 and is otherwise aborted, its asked-for or forwarded result cancelled)
