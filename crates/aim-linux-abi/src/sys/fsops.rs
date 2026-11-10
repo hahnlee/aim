@@ -1402,7 +1402,7 @@ fn truncate_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
         if !attrs::permits(&stat, 2, id, attrs::FS) {
             return -(crate::errno::EACCES as i64);
         }
-        if let Err(error) = super::fscrypt::open(&resolved.host) {
+        if let Err(error) = super::fscrypt::open(&resolved) {
             return -(error as i64);
         }
         let result =
@@ -1977,6 +1977,7 @@ mod tests {
             host,
             guest: "/dev/pts/0".into(),
             area: vfs::Area::Writable,
+            unlocked: false,
         };
         let fd = super::super::fdtab::PathDescription::open_character(
             &resolved,

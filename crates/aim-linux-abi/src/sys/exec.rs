@@ -494,7 +494,7 @@ pub(super) fn resolve(dirfd: i32, path: &[u8], flags: u64) -> Result<vfs::Resolv
         }
     }
     // `do_open_execat` opens the file: a locked one is ENOKEY.
-    super::fscrypt::open(&r.host).map_err(|error| -(error as i64))?;
+    super::fscrypt::open(&r).map_err(|error| -(error as i64))?;
     Ok(r)
 }
 

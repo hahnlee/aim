@@ -381,18 +381,47 @@ pub(crate) fn locking() -> Result<bool, Errno> {
     Ok(owner()?.is_some_and(Owner::locking))
 }
 
-/// The context of `host` if its key is absent.
-fn locked(host: Host) -> Result<Option<(&'static Owner, Vec<u8>)>, Errno> {
+/// Whether an inode is locked.
+pub(crate) enum Lock {
+    /// It has no policy.
+    Plain,
+    /// It is encrypted and its key is present. Everything below a directory
+    /// has its policy, as Linux keeps a tree's (`fscrypt_has_permitted_context`
+    /// on lookup, link and rename), so no inode in its tree is locked while
+    /// the key stays.
+    Unlocked,
+    /// Its key is absent: the owner and its context.
+    Locked(&'static Owner, Vec<u8>),
+}
+
+/// Whether the inode at the host path `path` is locked.
+pub(crate) fn path_lock(path: &CStr) -> Result<Lock, Errno> {
+    lock(Host::Path(path))
+}
+
+fn lock(host: Host) -> Result<Lock, Errno> {
     let Some(owner) = owner()? else {
-        return Ok(None);
+        return Ok(Lock::Plain);
     };
     let Some(context) = context(host) else {
-        return Ok(None);
+        return Ok(Lock::Plain);
     };
     let Some(spec) = Spec::of_context(&context) else {
-        return Ok(None);
+        return Ok(Lock::Plain);
     };
-    Ok((!owner.has_key(spec).map_err(io)?).then_some((owner, context)))
+    Ok(if owner.has_key(spec).map_err(io)? {
+        Lock::Unlocked
+    } else {
+        Lock::Locked(owner, context)
+    })
+}
+
+/// The context of `host` if its key is absent.
+fn locked(host: Host) -> Result<Option<(&'static Owner, Vec<u8>)>, Errno> {
+    Ok(match lock(host)? {
+        Lock::Locked(owner, context) => Some((owner, context)),
+        Lock::Plain | Lock::Unlocked => None,
+    })
 }
 
 /// `fscrypt_fname_encrypted_size`, padded with NULs, then enciphered: the
@@ -502,16 +531,21 @@ fn plaintext(
     Ok(valid.then_some(plain))
 }
 
-/// The host name of `name` looked up in the host directory `dir`; None
-/// where `dir` is not locked and the names are the host's. A locked
-/// directory finds entries only by no-key names: any other is ENOENT, and
-/// creating (`new`) any entry but an existing one is ENOKEY
-/// (`fscrypt_prepare_lookup`, `fscrypt_prepare_new_inode`).
-pub(crate) fn host_name(dir: &CStr, name: &[u8], new: bool) -> Result<Option<Vec<u8>>, Errno> {
-    let Some((owner, context)) = locked(Host::Path(dir))? else {
+/// The host name of `name` looked up in the host directory `dir`, whose
+/// lock is `lock`; None where `dir` is not locked and the names are the
+/// host's. A locked directory finds entries only by no-key names: any
+/// other is ENOENT, and creating (`new`) any entry but an existing one is
+/// ENOKEY (`fscrypt_prepare_lookup`, `fscrypt_prepare_new_inode`).
+pub(crate) fn host_name(
+    lock: &Lock,
+    dir: &CStr,
+    name: &[u8],
+    new: bool,
+) -> Result<Option<Vec<u8>>, Errno> {
+    let Lock::Locked(owner, context) = lock else {
         return Ok(None);
     };
-    let plain = plaintext(owner, &context, dir, name)?;
+    let plain = plaintext(owner, context, dir, name)?;
     if new {
         let exists = plain.as_ref().is_some_and(|plain| {
             let path = [dir.to_bytes(), b"/", plain].concat();
@@ -524,13 +558,13 @@ pub(crate) fn host_name(dir: &CStr, name: &[u8], new: bool) -> Result<Option<Vec
     plain.map(Some).ok_or(errno::ENOENT)
 }
 
-/// The name the guest sees for the entry `name` of the host directory
-/// `dir`: its no-key name if `dir` is locked.
-pub(crate) fn guest_name(dir: &CStr, name: &[u8]) -> Result<Vec<u8>, Errno> {
-    Ok(match locked(Host::Path(dir))? {
-        Some((owner, context)) => nokey(owner, &context, name, NAME_MAX),
-        None => name.to_vec(),
-    })
+/// The name the guest sees for the entry `name` of a directory whose lock
+/// is `lock`: its no-key name if the directory is locked.
+pub(crate) fn guest_name(lock: &Lock, name: &[u8]) -> Vec<u8> {
+    match lock {
+        Lock::Locked(owner, context) => nokey(owner, context, name, NAME_MAX),
+        Lock::Plain | Lock::Unlocked => name.to_vec(),
+    }
 }
 
 /// readdir of the directory `fd`: no-key names if it is locked.
@@ -579,9 +613,14 @@ pub(super) fn removed(inode: Option<u64>) -> Result<(), Errno> {
 }
 
 /// `fscrypt_file_open` (also for execve) and `fscrypt_prepare_setattr` of a
-/// size: a locked regular file can neither be opened nor truncated.
-pub(super) fn open(host: &CStr) -> Result<(), Errno> {
-    if locking()?
+/// size: a locked regular file can neither be opened nor truncated. Only a
+/// writable area can be on the data filesystem, and nothing below an
+/// encrypted directory whose key is present is locked.
+pub(super) fn open(resolved: &crate::vfs::Resolved) -> Result<(), Errno> {
+    let host = resolved.host.as_c_str();
+    if resolved.area == crate::vfs::Area::Writable
+        && !resolved.unlocked
+        && locking()?
         && host_type(Host::Path(host)).is_ok_and(|kind| kind == libc::S_IFREG)
         && locked(Host::Path(host))?.is_some()
     {
@@ -1402,6 +1441,41 @@ mod tests {
         );
         assert!(!roots(identifier));
         // Other tests' roots are gone with their directories.
+        assert!(!locking().unwrap());
+        std::fs::remove_dir_all(&host).unwrap();
+    }
+
+    #[test]
+    fn a_tree_whose_key_is_present_keeps_its_names_while_another_is_absent() {
+        let (_guard, view) = crate::vfs::test_view();
+        let host = view.join("data/fscrypt-tests");
+        let _ = std::fs::remove_dir_all(&host);
+        std::fs::create_dir_all(&host).unwrap();
+        populate(view, "open", &[0x4d; 64]);
+        let raw = [0x6b; 64];
+        let identifier = populate(view, "shut", &raw);
+        let dir = open(view, "shut");
+        assert_eq!(remove(&dir, identifier, false, &root()), Ok(0));
+        assert!(locking().unwrap());
+        // Below the directory whose key is present: the host's names, a
+        // symlink's own target, new entries.
+        assert_eq!(list("open/sub"), ["inner"]);
+        assert_eq!(kind("open/sub/inner"), Ok(libc::S_IFREG as u32));
+        assert_eq!(readlink("open/link"), b"file");
+        assert_eq!(open_at("open/file", 0), 0);
+        assert_eq!(open_at("open/sub/new", 0o101), 0);
+        // Out of it by `..` into the locked one: no-key names again.
+        assert_eq!(kind("open/sub/../../shut/file"), Err(errno(errno::ENOENT)));
+        assert_eq!(open_at("open/../shut/new", 0o101), errno(ENOKEY));
+        let names = list("open/../shut");
+        assert_eq!(names.len(), 4);
+        assert!(names.iter().all(|name| !plain_names().contains(name)));
+        let file = names
+            .iter()
+            .find(|name| kind(&format!("shut/{name}")) == Ok(libc::S_IFREG as u32))
+            .unwrap();
+        assert_eq!(open_at(&format!("open/../shut/{file}"), 0), errno(ENOKEY));
+        add(&dir, &raw, &root()).unwrap();
         assert!(!locking().unwrap());
         std::fs::remove_dir_all(&host).unwrap();
     }

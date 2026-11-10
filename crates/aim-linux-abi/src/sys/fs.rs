@@ -119,7 +119,7 @@ pub(crate) fn open_kernel_authorized(
 ) -> Result<aim_storage::private_fd::PrivateFile, errno::Errno> {
     let resolved = resolve_as(vfs::LINUX_AT_FDCWD, guest, true, id, attrs::FS)?;
     open_permissions(&resolved, 0, false, id)?;
-    super::fscrypt::open(&resolved.host)?;
+    super::fscrypt::open(&resolved)?;
     aim_storage::private_fd::PrivateFile::allocate(|| {
         std::fs::File::open(std::path::Path::new(std::ffi::OsStr::from_bytes(
             resolved.host.as_bytes(),
@@ -231,7 +231,7 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     // says so.
     if flags & O_PATH == 0
         && flags & (O_CREAT | O_EXCL) != O_CREAT | O_EXCL
-        && let Err(error) = super::fscrypt::open(&r.host)
+        && let Err(error) = super::fscrypt::open(&r)
     {
         return -(error as i64);
     }
