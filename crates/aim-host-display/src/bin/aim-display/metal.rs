@@ -584,6 +584,11 @@ impl Renderer {
             encode(commands, drawable, target);
             drawables.push(drawable);
         }
+        if HIDDEN.load(Ordering::Relaxed)
+            && let Some(input) = crate::input::input()
+        {
+            input.presented_while_hidden(vsync::monotonic_ns());
+        }
         if let Some(f) = fence {
             if HIDDEN.load(Ordering::Relaxed) {
                 for _ in &drawables {

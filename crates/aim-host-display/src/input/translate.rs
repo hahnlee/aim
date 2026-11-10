@@ -46,6 +46,10 @@
 //!   locking presses the keyboard's `KEY_SLEEP`, the screens showing
 //!   windows again `KEY_WAKEUP` (`Generic.kl`: SLEEP, WAKEUP), which
 //!   PhoneWindowManager turns into `goToSleep(SLEEP_BUTTON)` and a wake.
+//!   The screens' state is a level: while they show nothing, each frame
+//!   Android still presents presses `KEY_SLEEP` again, at most once a
+//!   second, so a press no reader took or Android took before booting is
+//!   not lost.
 
 use std::sync::Mutex;
 
@@ -58,6 +62,8 @@ use super::{KEYBOARD, MOUSE, TOUCHSCREEN};
 /// What Android scrolls for one scroll unit, in dp
 /// (`config_verticalScrollFactor`).
 pub const SCROLL_UNIT_DP: f64 = 64.0;
+/// How often [`Input::presented_while_hidden`] presses System Sleep again.
+pub const SLEEP_REPEAT_NS: i64 = 1_000_000_000;
 /// A horizontal two-finger swipe this far (points) is Back.
 pub const SWIPE_BACK_POINTS: f64 = 80.0;
 /// How far (points) a trackpad gesture moves before it is a swipe or
@@ -258,6 +264,8 @@ struct Pointer {
     /// Mouse buttons down.
     buttons: Vec<Button>,
     hotspots: Hotspots,
+    /// When System Sleep was last pressed while the Mac shows no windows.
+    slept: Option<i64>,
 }
 
 /// The input side of the display server: its devices and the translation
@@ -603,11 +611,31 @@ impl Input {
     /// sleep and wake keys put Android to sleep and wake it
     /// (PhoneWindowManager's `KEYCODE_SLEEP`, `KEYCODE_WAKEUP`).
     pub fn screen_shown(&self, shown: bool, t: i64) {
-        let usage = if shown {
-            keymap::SYSTEM_WAKE_UP
+        let mut s = self.state.lock().unwrap();
+        if shown {
+            s.slept = None;
+            self.system_key(keymap::SYSTEM_WAKE_UP, t);
         } else {
-            keymap::SYSTEM_SLEEP
-        };
+            s.slept = Some(t);
+            self.system_key(keymap::SYSTEM_SLEEP, t);
+        }
+    }
+
+    /// Android presented a frame while the Mac shows no windows: its
+    /// display is on though the Mac's is not, so a sleep press was lost (no
+    /// reader had the keyboard open, or PhoneWindowManager had not booted
+    /// and drops all but wake keys). System Sleep again, at most every
+    /// [`SLEEP_REPEAT_NS`], until Android sleeps and presents no more.
+    pub fn presented_while_hidden(&self, t: i64) {
+        let mut s = self.state.lock().unwrap();
+        if s.slept.is_none_or(|at| t - at >= SLEEP_REPEAT_NS) {
+            s.slept = Some(t);
+            self.system_key(keymap::SYSTEM_SLEEP, t);
+        }
+    }
+
+    /// The system control key `usage`, pressed and released.
+    fn system_key(&self, usage: u32, t: i64) {
         if let Some(code) = self.devices.key_of(KEYBOARD, usage) {
             self.devices.emit(KEYBOARD, t, &[(EV_KEY, code, 1)]);
             self.devices.emit(KEYBOARD, t, &[(EV_KEY, code, 0)]);
@@ -897,6 +925,39 @@ mod tests {
             ]
         );
         input.close();
+    }
+
+    /// The screens' state is a level: hidden before any reader or while
+    /// Android cannot take the key yet, the frames Android still presents
+    /// press System Sleep again, at most once per repeat interval.
+    #[test]
+    fn frames_while_hidden_press_sleep_again() {
+        let (input, dir) = setup("screens-level");
+        // Hidden with no reader: the press is lost.
+        input.screen_shown(false, 0);
+        let mut k = open(&dir, KEYBOARD);
+        // Android keeps presenting: the press repeats once per interval.
+        input.presented_while_hidden(SLEEP_REPEAT_NS / 2);
+        input.presented_while_hidden(SLEEP_REPEAT_NS);
+        input.presented_while_hidden(SLEEP_REPEAT_NS + 1);
+        input.presented_while_hidden(2 * SLEEP_REPEAT_NS);
+        assert_eq!(
+            keys(&mut k, 8),
+            [
+                (KEY_SLEEP, 1),
+                (KEY_SLEEP, 0),
+                (KEY_SLEEP, 1),
+                (KEY_SLEEP, 0)
+            ]
+        );
+        // Never told the screens' state (aim-display starts its watch before
+        // its devices): the first frame while hidden presses at once.
+        let (fresh, dir) = setup("screens-fresh");
+        let mut k = open(&dir, KEYBOARD);
+        fresh.presented_while_hidden(5);
+        assert_eq!(keys(&mut k, 4), [(KEY_SLEEP, 1), (KEY_SLEEP, 0)]);
+        input.close();
+        fresh.close();
     }
 
     #[test]
