@@ -23,6 +23,7 @@
 //! working, as Linux's busy files do, but the key is reported absent, not
 //! FILES_BUSY.
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
@@ -395,16 +396,25 @@ pub(crate) enum Lock {
     Locked(&'static Owner, Vec<u8>),
 }
 
-/// Whether the inode at the host path `path` is locked.
-pub(crate) fn path_lock(path: &CStr) -> Result<Lock, Errno> {
-    lock(Host::Path(path))
+/// Whether the directory at the host path `path`, whose host lstat `stat`
+/// is where the caller has one, is locked.
+pub(crate) fn path_lock(path: &CStr, stat: Option<&libc::stat>) -> Result<Lock, Errno> {
+    let Some(owner) = owner()? else {
+        return Ok(Lock::Plain);
+    };
+    lock_of(owner, directory_context(path, stat))
 }
 
 fn lock(host: Host) -> Result<Lock, Errno> {
     let Some(owner) = owner()? else {
         return Ok(Lock::Plain);
     };
-    let Some(context) = context(host) else {
+    lock_of(owner, context(host))
+}
+
+/// The lock of an inode whose context is `context`.
+fn lock_of(owner: &'static Owner, context: Option<Vec<u8>>) -> Result<Lock, Errno> {
+    let Some(context) = context else {
         return Ok(Lock::Plain);
     };
     let Some(spec) = Spec::of_context(&context) else {
@@ -530,6 +540,37 @@ fn plaintext(
         && plain != b".."
         && ciphertext(owner, context, &plain, NAME_MAX) == decoded[NOKEY_HASH..];
     Ok(valid.then_some(plain))
+}
+
+/// Directories' contexts as path walks read them, by (dev, ino), valid
+/// while the directory's ctime is (setting a policy changes it, in any
+/// process): a walk passes the same directories again and again while a key
+/// is absent, and reading an attribute costs 10 to 30 times a stat.
+static CONTEXTS: std::sync::Mutex<Option<HashMap<(i32, u64), ((i64, i64), Option<Vec<u8>>)>>> =
+    std::sync::Mutex::new(None);
+const CONTEXTS_MAX: usize = 1 << 14;
+
+/// The context of the directory `dir`, whose host lstat `stat` is where
+/// the caller has one.
+fn directory_context(dir: &CStr, stat: Option<&libc::stat>) -> Option<Vec<u8>> {
+    let Some(stat) = stat else {
+        return context(Host::Path(dir));
+    };
+    let key = (stat.st_dev, stat.st_ino);
+    let ctime = (stat.st_ctime, stat.st_ctime_nsec);
+    if let Some((at, known)) = CONTEXTS.lock().unwrap().as_ref().and_then(|m| m.get(&key))
+        && *at == ctime
+    {
+        return known.clone();
+    }
+    let read = context(Host::Path(dir));
+    let mut contexts = CONTEXTS.lock().unwrap();
+    let map = contexts.get_or_insert_with(HashMap::new);
+    if map.len() >= CONTEXTS_MAX {
+        map.clear();
+    }
+    map.insert(key, (ctime, read.clone()));
+    read
 }
 
 /// The host name of `name` looked up in the host directory `dir`, whose
@@ -1321,6 +1362,28 @@ mod tests {
         names.push("l".repeat(200));
         names.sort();
         names
+    }
+
+    /// A walk reads a directory's context again once a policy changed it:
+    /// what it found the directory had before does not hide its lock.
+    #[test]
+    fn a_walk_sees_a_policy_set_after_it_passed_the_directory() {
+        let (_guard, view) = crate::vfs::test_view();
+        let host = view.join("data/fscrypt-tests");
+        let _ = std::fs::remove_dir_all(&host);
+        std::fs::create_dir_all(&host).unwrap();
+        let first = populate(view, "locked", &[0x5a; 64]);
+        assert_eq!(remove(&open(view, "locked"), first, false, &root()), Ok(0));
+        assert!(locking().unwrap());
+        mkdir("later");
+        assert_eq!(kind("later/absent"), Err(errno(errno::ENOENT)));
+        let dir = open(view, "later");
+        let second = add(&dir, &[0x6b; 64], &root()).unwrap();
+        let policy = v2(1, 4, 0x2, second);
+        assert_eq!(call(&dir, SET_POLICY, &mut policy.clone(), &root()), 0);
+        assert_eq!(remove(&dir, second, false, &root()), Ok(0));
+        assert_eq!(open_at("later/new", 0o101), errno(ENOKEY));
+        std::fs::remove_dir_all(&host).unwrap();
     }
 
     #[test]

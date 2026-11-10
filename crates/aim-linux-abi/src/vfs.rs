@@ -2733,7 +2733,7 @@ pub(crate) fn visible(guest: String) -> Result<String, Errno> {
     let (mut host, mut shown) = (Vec::new(), Vec::new());
     let mut unlocked = None;
     for name in guest.split('/').filter(|name| !name.is_empty()) {
-        let (lock, _) = dir_lock(&join_guest(&host), &mut unlocked)?;
+        let (lock, _) = dir_lock(&join_guest(&host), &mut unlocked, None)?;
         shown.push(crate::sys::fscrypt::guest_name(&lock, name.as_bytes()));
         host.push(name.as_bytes().to_vec());
     }
@@ -2848,8 +2848,13 @@ pub fn resolve_checked_new(
 /// directory whose key is present is locked: `unlocked` keeps the host
 /// path of the last such directory a walk passed, so that the directories
 /// below it are not asked.
-/// Returns the lock and the directory's host path.
-fn dir_lock(dir: &str, unlocked: &mut Option<PathBuf>) -> Result<(Lock, CString), Errno> {
+/// `stat` is the directory's host lstat where the walk took one. Returns
+/// the lock and the directory's host path.
+fn dir_lock(
+    dir: &str,
+    unlocked: &mut Option<PathBuf>,
+    stat: Option<&libc::stat>,
+) -> Result<(Lock, CString), Errno> {
     let (host, area) = lookup(dir);
     let path = host_cstring(host.clone())?;
     if unlocked.as_ref().is_some_and(|root| host.starts_with(root))
@@ -2857,7 +2862,7 @@ fn dir_lock(dir: &str, unlocked: &mut Option<PathBuf>) -> Result<(Lock, CString)
     {
         return Ok((Lock::Plain, path));
     }
-    let lock = crate::sys::fscrypt::path_lock(&path)?;
+    let lock = crate::sys::fscrypt::path_lock(&path, stat)?;
     if let Lock::Unlocked = lock {
         *unlocked = Some(host);
     }
@@ -2876,11 +2881,18 @@ struct Walk {
 }
 
 impl Walk {
-    /// Adds `name`, looked up in the directory walked so far; `new` when
-    /// it is to be created.
-    fn push(&mut self, name: Vec<u8>, locking: bool, new: bool) -> Result<(), Errno> {
+    /// Adds `name`, looked up in the directory walked so far (whose host
+    /// lstat `directory` is, where the walk took one); `new` when it is to
+    /// be created.
+    fn push(
+        &mut self,
+        name: Vec<u8>,
+        locking: bool,
+        new: bool,
+        directory: Option<&libc::stat>,
+    ) -> Result<(), Errno> {
         let host = if locking {
-            let (lock, dir) = dir_lock(&self.host_path(), &mut self.unlocked)?;
+            let (lock, dir) = dir_lock(&self.host_path(), &mut self.unlocked, directory)?;
             crate::sys::fscrypt::host_name(&lock, &dir, &name, new)?
         } else {
             None
@@ -2950,7 +2962,7 @@ fn resolve_inner(
     };
     if relative_base && path[0] != b'/' {
         for part in base.split('/').filter(|part| !part.is_empty()) {
-            done.push(part.as_bytes().to_vec(), locking, false)?;
+            done.push(part.as_bytes().to_vec(), locking, false, None)?;
         }
         pending = path
             .split(|&byte| byte == b'/')
@@ -2976,9 +2988,9 @@ fn resolve_inner(
             }
             _ => {}
         }
-        known = None;
+        let directory = known.take();
         let is_last = pending.is_empty();
-        done.push(c, locking, new && is_last)?;
+        done.push(c, locking, new && is_last, directory.as_ref())?;
         if is_last && !follow_last {
             break;
         }
