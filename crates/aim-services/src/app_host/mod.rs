@@ -6277,6 +6277,20 @@ pub(crate) fn configure_test_host(
     host.processes_ready.set(Ok(())).unwrap();
 }
 
+/// Gives `host` the test phone display (1080x1920 at 320 dpi), as a
+/// device has one before any activity starts.
+#[cfg(test)]
+pub(crate) fn install_test_display(host: &AppHost) {
+    let resources = display_service::Resources {
+        name: "test".into(),
+        density_dpi: 320,
+        brightness: (10, 255, 102),
+        brightness_dim: 0.05,
+    };
+    let display = (display::Display::phone_for_test(), resources);
+    assert!(host.display.set(Arc::new(display)).is_ok());
+}
+
 #[cfg(test)]
 pub(crate) fn configure_boot_test_host(
     host: &AppHost,

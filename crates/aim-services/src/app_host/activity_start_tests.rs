@@ -106,6 +106,11 @@ pub(super) fn permissions(host: &Arc<AppHost>) {
         .unwrap();
     let metrics = display::Metrics::of(&display::Display::phone_for_test());
     host.display_metrics.set(Ok(metrics)).unwrap();
+    // The device's display and framework configuration, which a start's
+    // launch params read (multi-window support, default freeform bounds).
+    super::install_test_display(host);
+    let framework = resources::Framework::load(&aim_paths::original_image(), 320, "en-US");
+    assert!(host.framework.set(framework.unwrap()).is_ok());
 }
 
 pub(super) fn with_start(test: impl FnOnce(&Arc<AppHost>, &dyn Fn(Arc<dyn Service>) -> Strong)) {
