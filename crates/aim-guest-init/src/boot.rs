@@ -713,13 +713,9 @@ impl Boot {
                 options.image.display()
             ));
         }
-        let linux_run_binary = options.linux_run.clone().unwrap_or_else(default_linux_run);
-        let linux_run_options = match options.mode {
-            RunMode::DryRun => LinuxRunOptions::CONTRACT,
-            RunMode::Run => LinuxRunOptions::detect(&linux_run_binary)?,
-        };
-        // The data image attaches while the boot starts; init's mount_all
-        // waits for it (`mount`).
+        // The data image attaches while the boot starts, before anything
+        // else waits (a first run of a new linux-run takes a code signature
+        // check); init's mount_all waits for it (`mount`).
         let data = match options.mode {
             RunMode::Run => aim_storage::data::mount_point(&options.data)?,
             RunMode::DryRun => options.data.clone(),
@@ -737,6 +733,11 @@ impl Boot {
             epoch,
         )?;
         let data_mount = Rc::new(RefCell::new(data_mount));
+        let linux_run_binary = options.linux_run.clone().unwrap_or_else(default_linux_run);
+        let linux_run_options = match options.mode {
+            RunMode::DryRun => LinuxRunOptions::CONTRACT,
+            RunMode::Run => LinuxRunOptions::detect(&linux_run_binary)?,
+        };
         let sweep = layout.sweep_runtime().map_err(|e| e.to_string())?;
         layout.prepare_runtime().map_err(|e| e.to_string())?;
         let mut map = layout.path_map();
@@ -1948,8 +1949,10 @@ mod androidboot_options_tests {
 #[cfg(test)]
 mod capability_boot_tests {
     use super::*;
+    /// The data image attaches beside the capability query; a failed
+    /// query detaches it and returns before the runtime and services.
     #[test]
-    fn failed_capability_query_returns_before_data_and_service_creation() {
+    fn failed_capability_query_detaches_data_and_returns_before_service_creation() {
         use std::os::unix::fs::PermissionsExt;
         let root = aim_paths::scratch_dir("aim-capability-boot");
         let image = root.join("image");
@@ -1971,8 +1974,9 @@ mod capability_boot_tests {
             error.contains("capability query") && error.contains("signal"),
             "{error}"
         );
-        assert!(!data.exists());
-        assert!(!root.join("data.asif").exists());
+        let image = std::fs::canonicalize(root.join("data.asif")).unwrap();
+        assert_eq!(aim_storage::disk::attachments_of(&image).unwrap(), []);
+        assert!(!aim_storage::disk::is_mount_point(&data));
         assert!(!root.join("data.run").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
