@@ -121,6 +121,35 @@ struct Entry {
     users: Option<Vec<u32>>,
 }
 
+/// What protects the users' CE keys of a data filesystem (ADR 0016): the
+/// app host's LockSettings (a keychain secret) or the original
+/// LockSettingsService (a synthetic password), neither able to open the
+/// other's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CeProtector {
+    AppHost,
+    Original,
+}
+
+impl CeProtector {
+    /// How the record names it.
+    fn record(self) -> &'static str {
+        match self {
+            CeProtector::AppHost => "app-host",
+            CeProtector::Original => "original",
+        }
+    }
+}
+
+impl std::fmt::Display for CeProtector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CeProtector::AppHost => "the app host",
+            CeProtector::Original => "the original LockSettingsService",
+        })
+    }
+}
+
 /// A policy root: the key its policy names and its host inode number.
 #[derive(Clone, PartialEq, Eq)]
 struct Root {
@@ -391,21 +420,39 @@ impl Owner {
         replace(&self.table.with_file_name(TABLE_NEXT), &self.table, "")
     }
 
-    /// Records `name` as what protects the users' CE keys of the
+    /// Records `protector` as what protects the users' CE keys of the
     /// filesystem (the LockSettings of the image that first mounts it),
-    /// unless something is already: returns that one if it is another.
-    pub fn claim_ce_protection(&self, name: &str) -> io::Result<Option<String>> {
+    /// unless one is already: returns that one if it is another. The
+    /// record is written whole and synced before it is linked, as the
+    /// secret is; one naming no protector is corrupt (InvalidData).
+    pub fn claim_ce_protection(&self, protector: CeProtector) -> io::Result<Option<CeProtector>> {
         let path = self.table.with_file_name(CE_PROTECTOR);
         let mut recorded = String::new();
         match open(&path, false) {
             Ok(mut file) => file.read_to_string(&mut recorded)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                replace(&self.table.with_file_name(CE_PROTECTOR_NEXT), &path, name)?;
+                let next = self.table.with_file_name(CE_PROTECTOR_NEXT);
+                let mut file = open(&next, true)?;
+                if unsafe { libc::ftruncate(file.as_raw_fd(), 0) } < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                file.write_all(protector.record().as_bytes())?;
+                file.sync_all()?;
+                fs::rename(next, path)?;
                 return Ok(None);
             }
             Err(error) => return Err(error),
         };
-        Ok((recorded != name).then_some(recorded))
+        let recorded = [CeProtector::AppHost, CeProtector::Original]
+            .into_iter()
+            .find(|known| known.record() == recorded)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: a corrupt CE protector record", path.display()),
+                )
+            })?;
+        Ok((recorded != protector).then_some(recorded))
     }
 
     /// Whether the filesystem is encrypted ([`encrypt`](Self::encrypt), or
@@ -935,6 +982,26 @@ mod tests {
         assert!(owner.locking());
         owner.set_policy(&misc, &policy).unwrap();
         assert!(owner.roots().unwrap() == roots);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The first protector claimed is kept; another is answered with it,
+    /// and a record naming none is corrupt.
+    #[test]
+    fn the_ce_protector_is_claimed_once_and_a_corrupt_record_is_refused() {
+        let dir = crate::scratch_dir("fscrypt-ce-protector");
+        let (runtime, data) = (dir.join("run"), dir.join("data"));
+        fs::create_dir_all(&runtime).unwrap();
+        Owner::prepare(&runtime, &data).unwrap();
+        let owner = Owner::locate(&runtime).unwrap().unwrap();
+        let claim = |protector| owner.claim_ce_protection(protector).unwrap();
+        assert_eq!(claim(CeProtector::Original), None);
+        assert_eq!(claim(CeProtector::Original), None);
+        assert_eq!(claim(CeProtector::AppHost), Some(CeProtector::Original));
+        fs::write(data.join("fscrypt").join(CE_PROTECTOR), "something").unwrap();
+        let error = owner.claim_ce_protection(CeProtector::AppHost).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("corrupt"), "{error}");
         fs::remove_dir_all(dir).unwrap();
     }
 

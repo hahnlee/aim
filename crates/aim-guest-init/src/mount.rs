@@ -12,13 +12,9 @@ use std::time::{Duration, Instant};
 use aim_android_image::identity::read_tree_identity;
 use aim_android_image::system_server::APP_HOST_SERVICES;
 use aim_storage::data::{self, DataImage};
+use aim_storage::fscrypt::CeProtector;
 
 use crate::paths::{Layout, Sweep};
-
-/// What protects the users' CE keys: the app host's LockSettings, or the
-/// original LockSettingsService.
-const APP_HOST: &str = "the app host";
-const ORIGINAL: &str = "the original LockSettingsService";
 
 pub struct DataMount {
     layout: Layout,
@@ -142,8 +138,8 @@ impl DataMount {
     pub fn claim_ce_protection(&self) -> Result<(), String> {
         let image = aim_android_init::ImageRoot::new(&self.layout.image);
         let protector = match image.host_path(APP_HOST_SERVICES).try_exists() {
-            Ok(true) => APP_HOST,
-            Ok(false) => ORIGINAL,
+            Ok(true) => CeProtector::AppHost,
+            Ok(false) => CeProtector::Original,
             Err(e) => return Err(format!("{APP_HOST_SERVICES}: {e}")),
         };
         match self.fscrypt()?.claim_ce_protection(protector) {
