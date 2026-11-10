@@ -574,6 +574,26 @@ fn host_stat(host: Host) -> Result<libc::stat, crate::errno::Errno> {
 
 /// Serialize metadata on the actual inode across guest processes and bind aliases.
 /// Same-thread nested recording shares the already-held lock.
+/// `<runtime>/inode-locks`, made and opened once per process: an inode
+/// lock opens its file relative to it. A failed open (no free descriptor,
+/// say) is tried again by the next lock.
+fn inode_locks() -> Result<&'static aim_storage::private_fd::PrivateFile, crate::errno::Errno> {
+    static DIRECTORY: OnceLock<aim_storage::private_fd::PrivateFile> = OnceLock::new();
+    if let Some(directory) = DIRECTORY.get() {
+        return Ok(directory);
+    }
+    let path = vfs::runtime_dir()
+        .ok_or(crate::errno::EIO)?
+        .join("inode-locks");
+    let opened = aim_storage::private_fd::PrivateFile::allocate(|| {
+        std::fs::create_dir_all(&path)?;
+        std::fs::File::open(&path)
+    })
+    .map_err(|error| crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
+    // Another thread's may have come first: this one is closed.
+    Ok(DIRECTORY.get_or_init(|| opened))
+}
+
 pub fn with_inode_lock<T>(
     host: Host,
     stat: &libc::stat,
@@ -591,21 +611,24 @@ pub fn with_inode_lock<T>(
         return action();
     }
     let _own = super::fork::spawn::own_fds();
-    let directory = vfs::runtime_dir()
-        .ok_or(crate::errno::EIO)?
-        .join("inode-locks");
-    std::fs::create_dir_all(&directory)
-        .map_err(|error| crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
-    let path = directory.join(format!("{:x}-{:x}", key.0 as u32, key.1));
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|error| crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
     use std::os::fd::AsRawFd;
     use std::os::fd::{FromRawFd, IntoRawFd};
+    let name = std::ffi::CString::new(format!("{:x}-{:x}", key.0 as u32, key.1))
+        .map_err(|_| crate::errno::EINVAL)?;
+    // SAFETY: a name relative to this process's open lock directory.
+    let fd = unsafe {
+        libc::openat(
+            inode_locks()?.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC,
+            0o644,
+        )
+    };
+    if fd < 0 {
+        return Err(crate::errno::last());
+    }
+    // SAFETY: the descriptor just opened, owned here.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
     struct PrivateLock(std::fs::File);
     impl Drop for PrivateLock {
         fn drop(&mut self) {
@@ -1176,6 +1199,28 @@ mod tests {
         assert_eq!(table_lookup_key("/table-generation").uid, Some(1234));
         advance();
         assert_eq!(table_lookup_key("/table-generation").uid, Some(4321));
+    }
+
+    #[test]
+    fn an_inode_lock_tries_its_directory_again_after_a_failure() {
+        if super::super::fdtab::isolated_kernel_test(
+            "sys::attrs::tests::an_inode_lock_tries_its_directory_again_after_a_failure",
+        ) {
+            return;
+        }
+        let (_guard, root) = crate::vfs::test_view();
+        let directory = vfs::runtime_dir().unwrap().join("inode-locks");
+        let _ = std::fs::remove_dir_all(&directory);
+        // A file where the directory goes: the first lock cannot open it.
+        std::fs::write(&directory, b"").unwrap();
+        let file = root.join("inode-lock-retry");
+        std::fs::write(&file, b"").unwrap();
+        let host = std::ffi::CString::new(file.as_os_str().as_encoded_bytes()).unwrap();
+        let stat = host_stat(Host::Path(&host)).unwrap();
+        assert!(with_inode_lock(Host::Path(&host), &stat, || Ok(())).is_err());
+        std::fs::remove_file(&directory).unwrap();
+        assert_eq!(with_inode_lock(Host::Path(&host), &stat, || Ok(7)), Ok(7));
+        std::fs::remove_file(&file).unwrap();
     }
 
     #[test]
