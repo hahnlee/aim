@@ -156,12 +156,17 @@ fn sync_accounts_race_register_before_snapshot_and_concurrent_revalidation() {
             });
             waiting.recv_timeout(Duration::from_secs(20)).unwrap();
             assert_eq!(count(&de, "SELECT count(*) FROM accounts"), 3);
+            // Each validator stops before delivery, so the probe's try_lock
+            // never meets the other workers' locks.
             let validators: Vec<_> = (0..2)
                 .map(|_| {
-                    scope.spawn(|| {
+                    let (delivering, deliver, install) = pause_at("delivery");
+                    let worker = scope.spawn(|| {
+                        install();
                         start.wait();
                         invoke(&manager, sync::VALIDATE_ACCOUNTS).unwrap();
-                    })
+                    });
+                    (delivering, deliver, worker)
                 })
                 .collect();
             let overlap = scope.spawn(|| {
@@ -172,13 +177,18 @@ fn sync_accounts_race_register_before_snapshot_and_concurrent_revalidation() {
             start.wait();
             release.send(()).unwrap();
             initial.join().unwrap();
-            for worker in validators {
-                worker.join().unwrap();
+            for (delivering, _, _) in &validators {
+                delivering.recv_timeout(Duration::from_secs(20)).unwrap();
             }
             overlap.join().unwrap();
+            for (_, deliver, worker) in validators {
+                deliver.send(()).unwrap();
+                worker.join().unwrap();
+            }
         });
-        check(&manager, true);
+        // Delivery is asynchronous: drain it before snapshots lock again.
         transitions(host, &receive);
+        check(&manager, true);
         invoke(&manager, sync::VALIDATE_ACCOUNTS).unwrap();
         host.broadcasts.wait(true);
         assert!(receive.try_recv().is_err());
