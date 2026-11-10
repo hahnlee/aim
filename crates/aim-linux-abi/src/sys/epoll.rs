@@ -696,7 +696,11 @@ fn bits(k: &libc::kevent, i: &Interest) -> u32 {
             // only for a queued datagram, a zero-length one included (its
             // address counts in Darwin's queued bytes, not in `data`). A
             // datagram socket's error may also arrive behind a queued one.
-            if let Some(queued) = super::net::pending_error(k.ident as i32) {
+            if super::net::peer_gone(k.ident as i32) == Some(0) {
+                // An AF_UNIX datagram peer's close, which Darwin reports
+                // as an error and Linux as nothing.
+                b = 0;
+            } else if let Some(queued) = super::net::pending_error(k.ident as i32) {
                 b = EPOLLERR | if queued == 0 { 0 } else { b };
             }
         }
@@ -996,8 +1000,8 @@ fn ready(
         }
         if b == 0 {
             // A dispatched knote that fired for nothing (a hangup-only one
-            // on a full buffer) waits on.
-            if (fired != 0 || i.hangup_only()) && i.events & EPOLLONESHOT != 0 && !i.disabled {
+            // on a full buffer, an AF_UNIX datagram peer's close) waits on.
+            if i.events & EPOLLONESHOT != 0 && !i.disabled {
                 rearm.push(kev(ident, k.filter, libc::EV_ENABLE));
             }
             continue;

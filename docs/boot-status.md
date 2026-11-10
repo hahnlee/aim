@@ -159,7 +159,10 @@ a recvmmsg's kept error, an exec or SCM_RIGHTS receiver does not (#2781,
 #2919). A shut AF_UNIX or datagram socket that is writable is
 POLLWRBAND too, and epoll reports EPOLLWRBAND, alone or with EPOLLOUT, for a
 writable datagram or AF_UNIX socket only (#2925). A stream or seqpacket peer's close with data unread is not
-ECONNRESET/POLLERR, as Linux's `unix_release_sock` makes it. A poll with no event
+ECONNRESET/POLLERR, as Linux's `unix_release_sock` makes it. An AF_UNIX datagram
+socket whose peer closed has no error, though Darwin's has ECONNRESET: it polls
+writable, receives what is queued, and its next send without an address fails
+with ECONNREFUSED, then ENOTCONN, as an unconnected one's does (#2924). A poll with no event
 on a socket or pipe reports its hangup and error too, waking for one that
 arrives during the wait without spinning on a full buffer or a TCP half-close
 (#2779). A pipe or named FIFO is never POLLPRI, POLLRDBAND, POLLWRBAND or

@@ -256,6 +256,11 @@ fn guest_revents(fd: i32, pin: Option<&super::fdtab::Pinned>, h: &libc::pollfd, 
     // readable, writable or not at all; readable only with data queued or
     // at EOF. Darwin's queued count includes each datagram's address, so a
     // zero-length one counts.
+    // An AF_UNIX datagram peer's close, which Darwin reports as an error,
+    // readable with nothing queued, is no event.
+    if pin.is_some() && h.revents != 0 && super::net::peer_gone(h.fd) == Some(0) {
+        revents &= !(POLLIN | POLLRDNORM);
+    }
     if pin.is_some() && (h.revents != 0 || h.events & (POLLIN | libc::POLLOUT) == 0) {
         if let Some(queued) = super::net::pending_error(h.fd) {
             revents |= POLLERR;
@@ -2404,6 +2409,65 @@ mod reportable_tests {
             pipe[1] as i64,
             pipe_band,
         ]);
+    }
+
+    /// An AF_UNIX datagram socketpair half whose peer closed has no error
+    /// on Linux: it polls writable, and readable only for what is queued;
+    /// a receive returns that, and then EAGAIN; and its next send fails
+    /// with ECONNREFUSED, which disconnects it, the one after with ENOTCONN
+    /// (`unix_dgram_sendmsg`).
+    #[test]
+    fn a_unix_datagram_survivor_of_its_peer_is_not_pollerr() {
+        let _view = crate::vfs::test_view();
+        let writable = POLLOUT | POLLWRNORM | POLLWRBAND;
+        let send = |fd: i64| crate::sys::net::sendto([fd as u64, b"x".as_ptr() as u64, 1, 0, 0, 0]);
+        for queued in [true, false] {
+            let mut pair = [0i32; 2];
+            assert_eq!(
+                crate::sys::net::socketpair([1, 2 | O_NONBLOCK, 0, pair.as_mut_ptr() as u64, 0, 0]),
+                0
+            );
+            let (fd, peer) = (pair[0] as i64, pair[1] as i64);
+            if queued {
+                assert_eq!(send(peer), 1);
+            }
+            let readable = watching(fd, 0x1);
+            let both = watching(fd, 0x1 | 0x4);
+            close(&[peer]);
+            let (revents, events) = if queued {
+                (POLLIN | POLLRDNORM | writable, 0x1 | 0x4)
+            } else {
+                (writable, 0x4)
+            };
+            assert_eq!(polled(fd, ALL), (1, revents), "queued {queued}");
+            assert_eq!(waited(both, 0), (1, events), "queued {queued}");
+            assert_eq!(waited(readable, 0).0, queued as i64, "queued {queued}");
+            let mut error = [0i32; 2];
+            let mut len = 4u32;
+            assert_eq!(
+                crate::sys::net::getsockopt([
+                    fd as u64,
+                    1,
+                    4,
+                    error.as_mut_ptr() as u64,
+                    &mut len as *mut u32 as u64,
+                    0,
+                ]),
+                0
+            );
+            assert_eq!(error[0], 0, "queued {queued}");
+            let mut buffer = [0u8; 4];
+            if queued {
+                assert_eq!(received(fd, &mut buffer), 1);
+            }
+            assert_eq!(received(fd, &mut buffer), -11, "queued {queued}");
+            assert_eq!(send(fd), -111, "queued {queued}");
+            assert_eq!(send(fd), -107, "queued {queued}");
+            close(&[fd, readable, both]);
+        }
+        let fresh = crate::sys::net::socket([1, 2 | O_NONBLOCK, 0, 0, 0, 0]);
+        assert_eq!(send(fresh), -107);
+        close(&[fresh]);
     }
 
     /// A refused non-blocking TCP connect: `tcp_done` shuts it both ways,
