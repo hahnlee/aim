@@ -152,7 +152,9 @@ is writable too, where Linux, keeping the data, reports POLLERR alone; Darwin
 frees the buffer with the last reader, whose close in any process (exit and
 SIGKILL included) leaves no record of the count (#2815). Its read end without writers is
 POLLHUP, readable only with data queued. A named FIFO does not yet report its
-other end's close. A non-TCP socket's half-close (the peer's SHUT_WR, its own SHUT_RD)
+other end's close (#2819): Darwin's FIFO gives no sign of it, neither poll,
+select nor a knote's EV_EOF, and a poll blocked on either end never wakes for
+it, though a read then returns 0 and a write EPIPE. A non-TCP socket's half-close (the peer's SHUT_WR, its own SHUT_RD)
 is POLLIN|POLLRDHUP, with POLLHUP only once both directions are shut, as
 `unix_poll` and `datagram_poll` report it, in poll and epoll (#2802). Host checks only; no guest boot (2026-11-10).
 
