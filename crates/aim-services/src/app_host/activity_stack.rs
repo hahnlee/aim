@@ -494,7 +494,8 @@ impl Stack {
     /// activity; on a fullscreen display, behind a task in front with a
     /// running activity, invisible unless that is translucent. Freeform
     /// tasks neither fill the display nor match its bounds, so do not
-    /// hide one another.
+    /// hide one another; nor does the root home task in window mode, the
+    /// Mac desktop under every app's window, though it is fullscreen.
     pub fn visibility(&self, task: i32) -> Visibility {
         if self.behind_desktop(task) || self.top(task).is_none() {
             return Visibility::Invisible;
@@ -504,7 +505,9 @@ impl Stack {
             if self.behind_desktop(other.id) || self.top(other.id).is_none() {
                 continue;
             }
-            if self.freeform && !self.fullscreen.contains(&other.id) {
+            if self.freeform
+                && (self.home == Some(other.id) || !self.fullscreen.contains(&other.id))
+            {
                 continue;
             }
             if !self.translucent(other.id) {

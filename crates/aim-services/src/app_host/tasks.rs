@@ -447,8 +447,8 @@ impl AppHost {
             bottom: display.height,
         };
         let windows = self.tasks.window_mode();
-        // `startHomeActivity`'s root home task (`WINDOWING_MODE_UNDEFINED`:
-        // the display area's) takes neither launch params nor a launch.
+        // `startHomeActivity`'s root home task (`WINDOWING_MODE_UNDEFINED`,
+        // resolving fullscreen) takes neither launch params nor a launch.
         let home = options.activity_type == ACTIVITY_TYPE_HOME;
         let activity = super::freeform::Activity::from(info);
         let real_activity = super::activity_start::real_component(info);
@@ -471,10 +471,10 @@ impl AppHost {
         };
         // TaskLaunchParamsModifier: a mode the options leave undefined is a
         // fullscreen display area's source task's, if fullscreen or freeform.
-        let source_mode = match source.filter(|_| !windows && options.mode == 0) {
-            Some(s) => Some(self.configured_mode(s)?).filter(|m| matches!(m, 1 | 5)),
-            None => None,
-        };
+        let source_mode = source
+            .filter(|_| !windows && options.mode == 0)
+            .and_then(|s| self.tasks.windowing_mode(s))
+            .filter(|m| matches!(m, 1 | 5));
         let launch_mode = match &saved {
             Some(p) if p.windowing_mode != 0 => p.windowing_mode,
             _ => source_mode.unwrap_or(options.mode),
@@ -482,7 +482,7 @@ impl AppHost {
         // The display area's mode is inherited, and so is a mode the activity
         // cannot take (TaskDisplayArea.validateWindowingMode).
         let area_mode = if windows { 5 } else { 1 };
-        let windowing_mode = if home {
+        let requested_mode = if home {
             0
         } else if launch_mode == area_mode {
             area_mode
@@ -492,6 +492,9 @@ impl AppHost {
                 mode => mode,
             }
         };
+        // TaskFragment.resolveOverrideConfiguration: an undefined home task
+        // resolves fullscreen, even on a freeform display area.
+        let windowing_mode = if home { 1 } else { requested_mode };
         let saved_bounds = saved
             .map(|p| p.bounds)
             .filter(|b| b.width() > 0 && b.height() > 0);
@@ -564,7 +567,7 @@ impl AppHost {
             real_activity,
             bounds,
             windowing_mode,
-            requested_mode: windowing_mode,
+            requested_mode,
             parent: None,
             requested_bounds: requested,
             resolved_bounds: launch_bounds.or(requested),
@@ -627,11 +630,16 @@ impl AppHost {
         // The launch mode: the options', else a fullscreen display area's
         // source task's if fullscreen or freeform
         // (`canInheritWindowingModeFromSource`), else the task's own.
-        let source_mode = match source.filter(|_| options.mode == 0 && !windows) {
-            Some(s) => Some(self.configured_mode(s)?).filter(|m| matches!(m, 1 | 5)),
-            None => None,
+        let source_mode = source
+            .filter(|_| options.mode == 0 && !windows)
+            .and_then(|s| self.tasks.windowing_mode(s))
+            .filter(|m| matches!(m, 1 | 5));
+        let mode_of = |id| {
+            self.tasks
+                .windowing_mode(id)
+                .ok_or_else(|| state(format!("no task {id}")))
         };
-        let own = self.configured_mode(id)?;
+        let own = mode_of(id)?;
         let launch_mode = match (options.mode, source_mode) {
             (0, Some(m)) => m,
             (0, None) => own,
@@ -642,7 +650,7 @@ impl AppHost {
         let multi_window = |mode| matches!(mode, 2 | 5 | 6);
         let root = self.tasks.parent(id);
         let root_mode = match root {
-            Some(root) => self.configured_mode(root)?,
+            Some(root) => mode_of(root)?,
             None => own,
         };
         // In its own mode with no launch bounds, a task outside a
@@ -727,20 +735,6 @@ impl AppHost {
             task.restore_bounds = Some(bounds);
         }
         Ok(())
-    }
-
-    /// Task `id`'s windowing mode as its configuration has it
-    /// (`getWindowingMode`): an organizer root task's, its own where its
-    /// configuration is of its own bounds (`Tasks::own_bounds`), else the
-    /// global configuration's, as the root home task's.
-    fn configured_mode(&self, id: i32) -> Result<i32, Exception> {
-        if let Some(root) = self.tasks.root(id) {
-            return Ok(root.windowing_mode);
-        }
-        match self.tasks.own_bounds(id) {
-            Some((mode, _)) => Ok(mode),
-            None => Ok(self.global_configuration()?.window.windowing_mode),
-        }
     }
 
     /// Task `id` is in front and focused: its layer goes over the others,
@@ -1197,7 +1191,8 @@ impl AppHost {
                 // `WindowConfiguration.canResizeTask`: only a freeform or
                 // multi-window task resizes; another's Mac window goes back
                 // to the task's bounds.
-                if !matches!(self.task_resolved_mode(r.task)?, 5 | 6) {
+                let mode = self.tasks.windowing_mode(r.task);
+                if !matches!(mode.ok_or_else(|| format!("no task {}", r.task))?, 5 | 6) {
                     eprintln!("app host: resizeTask not allowed on task {}", r.task);
                     if let Some((bounds, mode)) = self.tasks.place(r.task) {
                         self.tasks.send_task(r.task, bounds, mode);
@@ -1478,26 +1473,19 @@ impl AppHost {
             .ok_or_else(|| "task bounds overflow".into())
     }
 
-    /// Task `task`'s windowing `mode` resolved (`getWindowingMode`):
-    /// undefined inherits its parent's, its organizer root task's, else
-    /// the display area's.
+    /// Task `task`'s windowing `mode` resolved (`getWindowingMode`), as
+    /// a task stores it: undefined is fullscreen for the root home task
+    /// (`TaskFragment.resolveOverrideConfiguration`, even on a freeform
+    /// display area), else inherits its parent's, its organizer root
+    /// task's, else the display area's.
     fn resolved_mode(&self, tasks: &[Task], task: &Task, mode: i32) -> i32 {
         match (mode, parent_of(tasks, task)) {
+            (0, _) if task.id == self.tasks.home.load(Ordering::Relaxed) => 1,
             (0, Some((parent, _))) if parent != 0 => parent,
             (0, _) if self.tasks.window_mode() => 5,
             (0, _) => 1,
             (mode, _) => mode,
         }
-    }
-
-    /// Task `id`'s resolved windowing mode.
-    fn task_resolved_mode(&self, id: i32) -> Result<i32, String> {
-        let tasks = self.tasks.tasks.lock().unwrap();
-        let task = tasks
-            .iter()
-            .find(|t| t.id == id)
-            .ok_or_else(|| format!("no task {id}"))?;
-        Ok(self.resolved_mode(&tasks, task, task.windowing_mode))
     }
 
     pub(super) fn move_task(&self, id: i32, bounds: Rect, mover: Mover) -> Result<(), String> {
@@ -4522,6 +4510,79 @@ pub(super) mod tests {
             host.apply_task_launch_options(home, Default::default(), &info, Some(home))
                 .unwrap();
             assert_eq!(place(host), before);
+        });
+    }
+
+    /// `TaskFragment.resolveOverrideConfiguration`: the undefined root home
+    /// task on a freeform display area resolves fullscreen, as its
+    /// configuration and root task info have it. Its bounds fill the
+    /// display area, in its own mode or an undefined one, and a resize of
+    /// it is refused (`canResizeTask`).
+    #[test]
+    fn the_root_home_task_resolves_fullscreen_on_a_freeform_display_area() {
+        use super::super::activity::ACTIVITY_TYPE_HOME;
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            enable_freeform(host);
+            let (_thread, _, _receive, _) = wct_tasks(host, export, Rect::default());
+            let (home, _) = home_task(host);
+            let display = host.display().unwrap();
+            let area = Rect {
+                left: 0,
+                top: 0,
+                right: display.0.width,
+                bottom: display.0.height,
+            };
+            assert_eq!(host.tasks.windowing_mode(home), Some(1));
+            let info = host
+                .root_task_info_of(0, ACTIVITY_TYPE_HOME, 0)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (
+                    info.task.task_id,
+                    info.task.configuration.window.windowing_mode
+                ),
+                (home, 1)
+            );
+            let small = Rect {
+                left: 100,
+                top: 100,
+                right: 500,
+                bottom: 600,
+            };
+            for mode in [None, Some(0)] {
+                assert_eq!(
+                    host.task_move_bounds(home, mode, Some(small), Mover::Android),
+                    Ok(area)
+                );
+            }
+            host.request(&Record {
+                op: window::SET_BOUNDS,
+                task: home,
+                bounds: [small.left, small.top, small.right, small.bottom],
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(host.tasks.bounds(home), Some(area));
+        });
+    }
+
+    /// The fullscreen root home task brought to the front in window mode
+    /// is the Mac desktop: the focused app's tasks go behind it, but
+    /// another app's task stays visible, as its Mac window does.
+    #[test]
+    fn the_root_home_task_in_front_hides_only_the_focused_app() {
+        use super::super::activity_stack::Visibility;
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            enable_freeform(host);
+            let (_thread, _, _receive, _) = wct_tasks(host, export, Rect::default());
+            let (home, _) = home_task(host);
+            let mut stack = host.activities.stack.lock().unwrap();
+            stack.tasks.iter_mut().find(|t| t.id == 8).unwrap().package = "q".into();
+            stack.bring_to_front(7);
+            stack.bring_to_front(home);
+            assert_eq!(stack.visibility(7), Visibility::Invisible);
+            assert_eq!(stack.visibility(8), Visibility::Visible);
         });
     }
 
