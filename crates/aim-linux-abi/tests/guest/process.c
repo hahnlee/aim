@@ -1745,6 +1745,42 @@ static void peer_fatal_rt(void) {
   printf("ok peer_fatal_rt\n");
 }
 
+// SIGSTOP and SIGKILL sent to a peer's thread stop or end the whole peer,
+// and tgkill(2) returns 0 to the sender for both: the peer's agent replies
+// before the peer stops or ends.
+static int stop_kill_out = -1;
+static void* stop_kill_worker(void* arg) {
+  (void)arg;
+  pid_t tid = gettid();
+  write(stop_kill_out, &tid, sizeof(tid));
+  for (;;) pause();
+  return NULL;
+}
+static void peer_thread_stop_kill(void) {
+  int out[2];
+  CHECK(pipe(out) == 0, "pipe");
+  pid_t child = fork();
+  CHECK(child >= 0, "fork");
+  if (child == 0) {
+    close(out[0]);
+    stop_kill_out = out[1];
+    pthread_t t;
+    if (pthread_create(&t, NULL, stop_kill_worker, NULL) != 0) _exit(9);
+    for (;;) pause();
+  }
+  close(out[1]);
+  pid_t tid;
+  CHECK(read(out[0], &tid, sizeof(tid)) == sizeof(tid) && tid != child, "worker tid %d", tid);
+  close(out[0]);
+  CHECK(syscall(SYS_tgkill, child, tid, SIGSTOP) == 0, "tgkill SIGSTOP: errno %d", errno);
+  CHECK(kill(child, SIGCONT) == 0, "SIGCONT: errno %d", errno);
+  CHECK(syscall(SYS_tgkill, child, tid, SIGKILL) == 0, "tgkill SIGKILL: errno %d", errno);
+  int st;
+  CHECK(waitpid(child, &st, 0) == child, "waitpid: errno %d", errno);
+  CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL, "status %#x", st);
+  printf("ok peer_thread_stop_kill\n");
+}
+
 // A signal to a child that exited and is not yet reaped succeeds, as
 // kill(2) of a zombie does, also for one only its agent could carry.
 static void peer_zombie_signal(void) {
@@ -2313,7 +2349,7 @@ int main(int argc, char** argv) {
       {"empty_rights", empty_rights}, {"own_files_thread", own_files_thread},
       {"permissions", permissions}, {"peer_ids", peer_ids},
       {"peer_thread_signals", peer_thread_signals},
-      {"peer_fatal_rt", peer_fatal_rt}, {"peer_zombie_signal", peer_zombie_signal}, {"wait_signal_status", wait_signal_status},
+      {"peer_fatal_rt", peer_fatal_rt}, {"peer_zombie_signal", peer_zombie_signal}, {"peer_thread_stop_kill", peer_thread_stop_kill}, {"wait_signal_status", wait_signal_status},
       {"sigchld_after_reap", sigchld_after_reap},
       {"entry_rewrites", entry_rewrites}, {"other_procs", other_procs},
       {"bench", bench},             {"ns_init_exit", ns_init_exit},
