@@ -298,13 +298,24 @@ pub struct RetainedAdmission {
     inode: Inode,
 }
 impl RetainedAdmission {
-    pub fn lock(&self) -> Result<Admission> {
-        let admission = self.inode.admission()?;
-        Ok(Admission {
+    /// Admission to read the verity state, shared with other readers of it
+    /// (a read or write of the file) and exclusive of what changes it.
+    pub fn shared(&self) -> Result<SharedAdmission> {
+        Ok(SharedAdmission {
+            _lock: self.inode.shared_admission()?,
             store: self.store.clone(),
-            inode: self.inode.clone(),
-            admission,
+            identity: self.inode.identity(),
         })
+    }
+}
+pub struct SharedAdmission {
+    _lock: crate::inode_lease::TransientLock,
+    store: Store,
+    identity: Identity,
+}
+impl SharedAdmission {
+    pub fn enabled(&self) -> Result<Option<Metadata>> {
+        self.store.lookup(self.identity)
     }
 }
 pub struct EnableGuard {

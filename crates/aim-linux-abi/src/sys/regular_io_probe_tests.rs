@@ -171,7 +171,7 @@ fn real_regular_owner_costs_preserve_bytes_offsets_and_verity_admission() {
         let _admission = description.store.lock_inode(&pin.descriptor()).unwrap();
     });
     let retained_admission = measure(|| {
-        let _admission = description.admission.lock().unwrap();
+        let _admission = description.admission.shared().unwrap();
     });
     let metadata = measure(|| {
         assert!(

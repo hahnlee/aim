@@ -10,7 +10,7 @@ use std::{
         unix::{ffi::OsStrExt, fs::OpenOptionsExt},
     },
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Condvar, Mutex},
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Identity {
@@ -73,12 +73,38 @@ struct Inner {
     directory: PrivateFd,
     path: PathBuf,
     identity: Identity,
+    admission: Transient,
+    offset: Transient,
 }
 #[derive(Clone)]
 pub struct Inode(Arc<Inner>);
 pub struct Admission {
     inode: Inode,
-    _metadata: PrivateFd,
+    _metadata: TransientLock,
+}
+/// A lock file this inode's handle takes and releases around one operation
+/// (admission, the offset lock), opened once instead of for each: its flock
+/// excludes other processes and other handles of the inode, which have
+/// their own open file, and `state` excludes this handle's threads, which
+/// share the one open file and so its flock.
+struct Transient {
+    suffix: &'static str,
+    descriptor: std::sync::OnceLock<PrivateFd>,
+    state: Mutex<Held>,
+    changed: Condvar,
+}
+#[derive(Clone, Copy, PartialEq)]
+enum Held {
+    Free,
+    /// A thread is between taking the state and its flock.
+    Acquiring,
+    Shared(usize),
+    Exclusive,
+}
+/// A held [`Transient`]: shared or exclusive until dropped.
+pub struct TransientLock {
+    inode: Inode,
+    offset: bool,
 }
 pub struct WriterLease {
     inode: Inode,
@@ -89,8 +115,8 @@ pub struct ExclusiveLease {
     descriptor: PrivateFd,
 }
 pub type EnableSlot = ExclusiveLease;
-/// Serializes position-dependent operations; aliases retain the same flock.
-pub type OffsetLock = ExclusiveLease;
+/// Serializes position-dependent operations.
+pub type OffsetLock = TransientLock;
 fn duplicate(fd: BorrowedFd<'_>) -> io::Result<PrivateFd> {
     PrivateFd::allocate(|| {
         let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
@@ -152,6 +178,8 @@ impl Inode {
             directory,
             path,
             identity,
+            admission: Transient::new("admission"),
+            offset: Transient::new("offset"),
         })))
     }
     pub fn identity(&self) -> Identity {
@@ -211,22 +239,71 @@ impl Inode {
         if Identity::from_fd(self.source())? != self.identity() {
             return Err(io::Error::from_raw_os_error(libc::ESTALE));
         }
-        let metadata = self.lock_file("admission")?;
-        locked(metadata.as_fd(), libc::LOCK_EX)?;
         Ok(Admission {
             inode: self.clone(),
-            _metadata: metadata,
+            _metadata: self.transient(false, true)?,
         })
+    }
+    /// Admission shared with other readers of the verity state: excludes
+    /// the exclusive admission of a writer, a writer denial or an enable,
+    /// not other shared ones.
+    pub fn shared_admission(&self) -> io::Result<TransientLock> {
+        if Identity::from_fd(self.source())? != self.identity() {
+            return Err(io::Error::from_raw_os_error(libc::ESTALE));
+        }
+        self.transient(false, false)
     }
     pub fn offset_lock(&self) -> io::Result<OffsetLock> {
         if Identity::from_fd(self.source())? != self.identity() {
             return Err(io::Error::from_raw_os_error(libc::ESTALE));
         }
-        let descriptor = self.lock_file("offset")?;
-        locked(descriptor.as_fd(), libc::LOCK_EX)?;
-        Ok(ExclusiveLease {
+        self.transient(true, true)
+    }
+    fn transient(&self, offset: bool, exclusive: bool) -> io::Result<TransientLock> {
+        let lock = if offset {
+            &self.0.offset
+        } else {
+            &self.0.admission
+        };
+        let descriptor = match lock.descriptor.get() {
+            Some(descriptor) => descriptor,
+            None => {
+                let opened = self.lock_file(lock.suffix)?;
+                lock.descriptor.get_or_init(|| opened)
+            }
+        };
+        let mut state = lock.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            match *state {
+                Held::Shared(n) if !exclusive => {
+                    *state = Held::Shared(n + 1);
+                    return Ok(TransientLock {
+                        inode: self.clone(),
+                        offset,
+                    });
+                }
+                Held::Free => break,
+                _ => state = lock.changed.wait(state).unwrap_or_else(|e| e.into_inner()),
+            }
+        }
+        *state = Held::Acquiring;
+        drop(state);
+        let operation = if exclusive {
+            libc::LOCK_EX
+        } else {
+            libc::LOCK_SH
+        };
+        let result = locked(descriptor.as_fd(), operation);
+        let mut state = lock.state.lock().unwrap_or_else(|e| e.into_inner());
+        *state = match (&result, exclusive) {
+            (Err(_), _) => Held::Free,
+            (Ok(()), true) => Held::Exclusive,
+            (Ok(()), false) => Held::Shared(1),
+        };
+        lock.changed.notify_all();
+        result.map(|()| TransientLock {
             inode: self.clone(),
-            descriptor,
+            offset,
         })
     }
     /// Adopt the actual carrier under admission and verify its lock-file inode.
@@ -312,6 +389,37 @@ impl WriterLease {
     }
     pub fn into_fd(self) -> io::Result<OwnedFd> {
         self.descriptor.into_fd()
+    }
+}
+impl Transient {
+    fn new(suffix: &'static str) -> Self {
+        Self {
+            suffix,
+            descriptor: std::sync::OnceLock::new(),
+            state: Mutex::new(Held::Free),
+            changed: Condvar::new(),
+        }
+    }
+}
+impl Drop for TransientLock {
+    fn drop(&mut self) {
+        let lock = if self.offset {
+            &self.inode.0.offset
+        } else {
+            &self.inode.0.admission
+        };
+        let mut state = lock.state.lock().unwrap_or_else(|e| e.into_inner());
+        *state = match *state {
+            Held::Shared(n) if n > 1 => Held::Shared(n - 1),
+            _ => {
+                if let Some(descriptor) = lock.descriptor.get() {
+                    // An unlock of a lock this open file holds cannot block.
+                    let _ = locked(descriptor.as_fd(), libc::LOCK_UN);
+                }
+                Held::Free
+            }
+        };
+        lock.changed.notify_all();
     }
 }
 impl ExclusiveLease {
@@ -811,26 +919,30 @@ pub(crate) mod tests {
         }
     }
     #[test]
-    fn offset_lock_serializes_processes_until_final_alias_close() {
+    fn offset_lock_serializes_processes() {
         const MARKER: &str = "INODE_OFFSET_FORK_FIXTURE_EXECUTED";
         if isolated_fork_fixture(
-            "inode_lease::tests::offset_lock_serializes_processes_until_final_alias_close",
+            "inode_lease::tests::offset_lock_serializes_processes",
             MARKER,
         ) {
             return;
         }
         let fixture = Fixture::new();
         let lock = fixture.inode.offset_lock().unwrap();
-        let alias = lock.try_clone().unwrap();
         let ready = pipe();
         let acquired = pipe();
         let child = unsafe { libc::fork() };
         assert!(child >= 0);
         if child == 0 {
-            drop(lock);
-            drop(alias);
+            // The child's own handle of the inode, as a fork child restores
+            // its open files; the parent's handle and lock stay its own.
+            std::mem::forget(lock);
+            let inode = match Inode::open(fixture.inode.directory(), fixture.file.as_fd()) {
+                Ok(inode) => inode,
+                Err(_) => unsafe { libc::_exit(40) },
+            };
             byte(ready[1].as_raw_fd(), b'r');
-            let _lock = match fixture.inode.offset_lock() {
+            let _lock = match inode.offset_lock() {
                 Ok(lock) => lock,
                 Err(_) => unsafe { libc::_exit(41) },
             };
@@ -844,10 +956,8 @@ pub(crate) mod tests {
             events: libc::POLLIN,
             revents: 0,
         };
-        assert_eq!(unsafe { libc::poll(&mut event, 1, 50) }, 0);
+        assert_eq!(unsafe { libc::poll(&mut event, 1, 100) }, 0);
         drop(lock);
-        assert_eq!(unsafe { libc::poll(&mut event, 1, 50) }, 0);
-        drop(alias);
         assert_eq!(unsafe { libc::poll(&mut event, 1, 2000) }, 1);
         assert_eq!(read_byte(acquired[0].as_raw_fd()), b'a');
         let mut status = 0;
@@ -857,6 +967,40 @@ pub(crate) mod tests {
         assert_eq!(libc::WEXITSTATUS(status), 0);
         assert!(fixture.inode.offset_lock().is_ok());
         println!("{MARKER}");
+    }
+    /// Shared admissions of one handle and of another coexist; an exclusive
+    /// one waits for them all, and they wait for it.
+    #[test]
+    fn shared_admission_excludes_only_exclusive() {
+        let fixture = Fixture::new();
+        let other = Inode::open(fixture.inode.directory(), fixture.file.as_fd()).unwrap();
+        let first = fixture.inode.shared_admission().unwrap();
+        let second = fixture.inode.shared_admission().unwrap();
+        let third = other.shared_admission().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let inode = other.clone();
+        let exclusive = std::thread::spawn(move || {
+            let admission = inode.admission().unwrap();
+            sender.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(admission);
+        });
+        drop(first);
+        drop(third);
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        drop(second);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let started = std::time::Instant::now();
+        let shared = fixture.inode.shared_admission().unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(50));
+        drop(shared);
+        exclusive.join().unwrap();
     }
     #[test]
     fn canonical_directory_and_lock_nodes_reject_symlink_redirection() {

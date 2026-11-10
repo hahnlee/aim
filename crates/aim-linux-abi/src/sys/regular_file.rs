@@ -407,7 +407,7 @@ impl Description {
         if Identity::from_fd(fd).map_err(io)? != self.identity {
             return Err(errno::EBADF);
         }
-        let admission = self.admission.lock().map_err(core)?;
+        let admission = self.admission.shared().map_err(core)?;
         let enabled = admission.enabled().map_err(core)?;
         if write && enabled.is_some() {
             return Err(errno::EPERM);
