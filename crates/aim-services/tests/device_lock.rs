@@ -50,6 +50,8 @@ impl Drop for Boot {
     }
 }
 
+/// Also checks that the boot left no inode without a policy below an
+/// encrypted `/data` directory.
 #[test]
 #[ignore = "boots the app host on fresh disposable data; run explicitly"]
 fn fresh_app_host_publishes_the_pinned_device_lock_aidl() {
@@ -86,5 +88,12 @@ fn fresh_app_host_publishes_the_pinned_device_lock_aidl() {
         std::thread::sleep(Duration::from_millis(200));
     }
     drop(boot);
+    // What the boot's host-side writers made below an encrypted /data
+    // directory has its policy, as Linux gives every inode there (ADR 0016).
+    let data = aim_storage::data::DataImage::attach(&directory.join("data"), None).unwrap();
+    let policy_less = aim_storage::fscrypt::policy_less(&data.dir().join("data")).unwrap();
+    data.detach().unwrap();
+    assert!(policy_less.is_empty(), "{policy_less:?}");
+    aim_storage::data::remove(&directory.join("data")).unwrap();
     fs::remove_dir_all(directory).unwrap();
 }

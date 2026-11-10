@@ -762,6 +762,19 @@ impl GuestExecutor {
                 .fscrypt()?
                 .encrypt()
                 .map_err(|e| format!("fscrypt: {e}"))?;
+            let repaired = data.borrow().repair_policies();
+            match repaired {
+                Ok(None) => {}
+                Ok(Some((repaired, took))) => self.log.push(format!(
+                    "mount_all: gave {repaired} inodes below encrypted /data directories, which an earlier build wrote without a policy, their directory's ({:.3} s)",
+                    took.as_secs_f64()
+                )),
+                Err(reason) => {
+                    self.fatal
+                        .get_or_insert_with(|| format!("mount_all: {reason}"));
+                    return Err(reason);
+                }
+            }
         }
         // FS_MGR_MNTALL_DEV_FILE_ENCRYPTED.
         self.set_property("ro.crypto.state", "encrypted")?;

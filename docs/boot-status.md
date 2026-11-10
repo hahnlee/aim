@@ -1097,7 +1097,11 @@ a fresh directory's CE storage at the first try (no ENOTEMPTY, no destroy
 and retry) and what services write there after the unlock is kept across
 a warm boot (a fresh and a warm boot of one throwaway data directory,
 2026-11-10). What the app host writes host-side under an encrypted
-directory takes its policy as the kernel would give it (#2901). A data
+directory takes its policy as the kernel would give it (#2901), and
+`mount_all` gives what an earlier build wrote there without one its
+directory's policy, once per data directory (#2906); three fresh boots
+of throwaway data directories left no inode below an encrypted directory
+without a policy (`fscrypt::policy_less`, 2026-11-10). A data
 directory's CE storage belongs to the image that first mounts it:
 `mount_all` refuses a data directory the derived image
 (the original LockSettingsService) booted to the app host image, and the

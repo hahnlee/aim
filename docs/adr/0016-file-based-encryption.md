@@ -267,9 +267,31 @@ turns FBE on and depends on slice 4's CE protection: it lands after it.
   a host copy takes its directory's policy (`inherit`), not its source's.
   guest-init's builtins give a policy when they create, so their chown and
   chmod records (`guest_inode::change`) do not adopt. An inode written past
-  both, or written by an older build, has none; nothing reports such
-  inodes yet (#2906). The app host's writers of `/data/system_ce/<user>`
-  wait for the user's unlock, as their originals do (usage stats,
+  both, or by an older build, has none, a state Linux never allows:
+  `fscrypt::policy_less` lists such inodes below an encrypted directory
+  (diagnostics and tests), and `mount_all` gives each its directory's
+  policy (`fscrypt::repair`, `inherit` as template placement does) once
+  per data directory and writer fix: a filesystem a build encrypts, or one
+  it repaired, is marked whole at that build's `WHOLE_VERSION`
+  (`fscrypt/whole`), a number bumped with each fix of a host-side writer
+  that left inodes without a policy, and is walked again only by a build
+  whose version is greater (or when the mark is missing or unreadable).
+  A walk that fails ends the boot naming the inode and its errno, and
+  leaves the mark as it was. An older build that boots a marked data
+  directory writes past the mark: what it leaves without a policy is
+  repaired by the next current build only if that build's `WHOLE_VERSION`
+  is greater than the one stored, that is only if a writer fix landed
+  between the build that stored the mark and it; otherwise it stays
+  until `policy_less` reports it. Only a data directory first encrypted
+  by a build before #2906 pays the walk unasked (#2906):
+  0.29-0.59 s for the 4,486 inodes of a fresh app host data directory just
+  attached (its metadata not yet cached), too much for every boot. A
+  writer that bypasses both after that is a bug `policy_less` finds, not
+  a state the mount repairs: it found the package parser's cache
+  (`/data/system/package_cache`, 494 inodes) and the move claims'
+  directory, which now adopt. The fresh app host boot of
+  `aim-services/tests/device_lock.rs` checks that a boot leaves none.
+  The app host's writers of `/data/system_ce/<user>` wait for the user's unlock, as their originals do (usage stats,
   shortcuts, widgets, launch params, accounts' CE database, hibernation),
   so vold prepares a fresh directory's CE storage at the first try.
 - The hot path: inheritance costs an xattr write per inode created under

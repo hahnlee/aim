@@ -121,3 +121,53 @@ fn an_app_host_image_refuses_a_data_directory_the_original_protects() {
     common::make_writable(&root);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `mount_all` gives what an earlier build wrote below an encrypted
+/// directory without a policy its directory's; one it cannot repair ends
+/// the boot, naming the inode and its errno.
+#[test]
+fn mount_all_repairs_policy_less_inodes_and_names_one_it_cannot() {
+    let root = common::temp_dir("fbe-mount-repair");
+    let image = image(&root);
+    let mut first = boot(&root, &image);
+    mount_all(&mut first).unwrap();
+    drop(first);
+    let system = root.join("data/data/system");
+    std::fs::create_dir(&system).unwrap();
+    let policy = [&[2u8, 1, 4, 2, 0, 0, 0, 0][..], &[7; 16]].concat();
+    let owner = aim_storage::fscrypt::Owner::locate(&root.join("run"))
+        .unwrap()
+        .unwrap();
+    owner.set_policy(&system, &policy).unwrap();
+    // What an earlier build left: no mark, a file without a policy, in a
+    // directory this boot cannot read.
+    std::fs::remove_file(root.join("data/fscrypt/whole")).unwrap();
+    let locked = system.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    aim_storage::fscrypt::inherit(&system, &locked).unwrap();
+    std::fs::write(locked.join("settings.xml"), "").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0)).unwrap();
+    let mut second = boot(&root, &image);
+    assert!(mount_all(&mut second).is_err());
+    let fatal = second.fatal.clone().unwrap();
+    assert!(
+        fatal.contains(&locked.display().to_string()) && fatal.contains("os error 13"),
+        "{fatal}"
+    );
+    drop(second);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut third = boot(&root, &image);
+    mount_all(&mut third).unwrap();
+    assert!(third.fatal.is_none(), "{:?}", third.fatal);
+    let placed = aim_storage::fscrypt::context(&locked.join("settings.xml")).unwrap();
+    assert_eq!(placed.unwrap()[..24], policy[..]);
+    assert!(
+        aim_storage::fscrypt::policy_less(&root.join("data/data"))
+            .unwrap()
+            .is_empty()
+    );
+    drop(third);
+    common::make_writable(&root);
+    let _ = std::fs::remove_dir_all(&root);
+}

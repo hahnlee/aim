@@ -147,7 +147,11 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    let result = fs::write(&tmp, bytes).and_then(|()| fs::rename(&tmp, path));
+    // Written host-side: the parcel and the directories made for it take
+    // their encrypted directory's policy (ADR 0016) before it is in place.
+    let result = fs::write(&tmp, bytes)
+        .and_then(|()| aim_storage::fscrypt::adopt(&tmp))
+        .and_then(|()| fs::rename(&tmp, path));
     if result.is_err() {
         let _ = fs::remove_file(tmp);
     }
@@ -157,6 +161,31 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A parcel written in an encrypted package_cache takes its policy, as
+    /// the directory made for it does.
+    #[test]
+    fn parcels_take_the_policy_of_the_cache() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = std::env::temp_dir().join(format!("aim-cache-fbe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let context = [&[2u8, 1, 4, 2, 0, 0, 0, 0][..], &[7; 16], &[0; 16]].concat();
+        let name = std::ffi::CString::new(root.as_os_str().as_bytes()).unwrap();
+        let name = name.as_ptr();
+        let key = aim_storage::fscrypt::CONTEXT.as_ptr();
+        let set = unsafe { libc::setxattr(name, key, context.as_ptr().cast(), 40, 0, 0) };
+        assert_eq!(set, 0);
+        let parcel = root.join("fingerprint/app-0-1");
+        fs::create_dir(parcel.parent().unwrap()).unwrap();
+        atomic_write(&parcel, b"parcel").unwrap();
+        for made in [parcel.parent().unwrap(), &parcel] {
+            let own = aim_storage::fscrypt::context(made).unwrap().unwrap();
+            assert_eq!(own[..24], context[..24], "{}", made.display());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn keys_stamps_splits_and_torn_receipts() {
         let root = std::env::temp_dir().join(format!("aim-cache-unit-{}", std::process::id()));
