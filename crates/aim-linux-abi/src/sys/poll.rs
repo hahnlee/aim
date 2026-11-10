@@ -252,7 +252,11 @@ fn guest_revents(fd: i32, pin: Option<&super::fdtab::Pinned>, h: &libc::pollfd, 
     // readable, writable or not at all; readable only with data queued or
     // at EOF. Darwin's queued count includes each datagram's address, so a
     // zero-length one counts.
-    if pin.is_some() && (h.revents != 0 || h.events & (POLLIN | libc::POLLOUT) == 0) {
+    if pin.is_some()
+        && (h.revents != 0
+            || h.events & (POLLIN | libc::POLLOUT) == 0
+            || super::net::kept_error(h.fd))
+    {
         if let Some(queued) = super::net::pending_error(h.fd) {
             revents |= POLLERR;
             if queued == 0 && h.revents & POLLHUP == 0 {
@@ -595,13 +599,15 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
         // Darwin poll waits for a socket's pending error only through a
         // read or write event (filt_soread, filt_sowrite), which
         // `sock_poll` reports whatever was asked, and never reports an
-        // unconnected TCP socket. Checked on each pass, as another thread
-        // may take the error, or connect, before it is reported.
+        // unconnected TCP socket or an error a recvmmsg kept. Checked on
+        // each pass, as another thread may take the error, or connect,
+        // before it is reported.
         let errored = host.iter().zip(&pins).any(|(h, pin)| {
             (pin.is_some()
                 && h.events & (POLLIN | libc::POLLOUT) == 0
                 && super::net::pending_error(h.fd).is_some())
                 || unconnected(pin.as_ref(), h.fd)
+                || super::net::kept_error(h.fd)
         });
         let n = host_poll(&mut host, if invalid || errored { 0 } else { left }, mask);
         if n < 0 {
@@ -759,11 +765,12 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
         if let Some(polling) = &polling {
             polling.sync();
         }
-        // Darwin never reports an unconnected TCP socket ready, which
-        // POLLIN_SET and POLLOUT_SET hold (its HUP and OUT), not
-        // POLLEX_SET.
+        // Darwin never reports an unconnected TCP socket ready, nor an
+        // error a recvmmsg kept, which POLLIN_SET and POLLOUT_SET hold (HUP,
+        // OUT, ERR), not POLLEX_SET.
         let unconnected = host.iter().zip(&pins).any(|(h, pin)| {
-            h.events & (libc::POLLIN | libc::POLLOUT) != 0 && unconnected(pin.as_ref(), h.fd)
+            h.events & (libc::POLLIN | libc::POLLOUT) != 0
+                && (unconnected(pin.as_ref(), h.fd) || super::net::kept_error(h.fd))
         });
         let n = host_poll(&mut host, if unconnected { 0 } else { left }, mask);
         if n < 0 {
@@ -1648,6 +1655,79 @@ mod reportable_tests {
         assert_eq!(&buffer[..2], b"xy");
         assert_eq!(received(fd, &mut buffer), -11);
         close(&[fd, readable]);
+    }
+
+    /// A recvmmsg that received a datagram before an error keeps the
+    /// error for the next call (`do_recvmmsg` writes it back to `sk_err`):
+    /// poll reports it, and a read returns it once.
+    #[test]
+    fn recvmmsg_keeps_an_error_after_a_datagram() {
+        let _view = crate::vfs::test_view();
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let fd = crate::sys::net::socket([2, 2, 0, 0, 0, 0]);
+        assert!(fd >= 0, "socket {fd}");
+        let mut address = [0u8; 16];
+        address[..2].copy_from_slice(&2u16.to_le_bytes());
+        address[2..4].copy_from_slice(&peer.local_addr().unwrap().port().to_be_bytes());
+        address[4..8].copy_from_slice(&[127, 0, 0, 1]);
+        assert_eq!(
+            crate::sys::net::connect([fd as u64, address.as_ptr() as u64, 16, 0, 0, 0]),
+            0
+        );
+        let mut local = [0u8; 16];
+        let mut len = 16u32;
+        assert_eq!(
+            crate::sys::net::getsockname([
+                fd as u64,
+                local.as_mut_ptr() as u64,
+                &mut len as *mut u32 as u64,
+                0,
+                0,
+                0
+            ]),
+            0
+        );
+        peer.send_to(
+            b"x",
+            ("127.0.0.1", u16::from_be_bytes([local[2], local[3]])),
+        )
+        .unwrap();
+        drop(peer);
+        // Two struct mmsghdr, each one iovec of a buffer: the first takes
+        // the datagram, the second blocks until the error arrives.
+        let receiver = std::thread::spawn(move || {
+            let mut buffers = [[0u8; 4]; 2];
+            let iovs: Vec<[u64; 2]> = buffers
+                .iter_mut()
+                .map(|b| [b.as_mut_ptr() as u64, b.len() as u64])
+                .collect();
+            let mut headers = [[0u64; 8]; 2];
+            for (header, iov) in headers.iter_mut().zip(&iovs) {
+                header[2] = iov.as_ptr() as u64;
+                header[3] = 1;
+            }
+            crate::sys::net::recvmmsg([fd as u64, headers.as_mut_ptr() as u64, 2, 0, 0, 0])
+        });
+        // The first datagram taken, the receiver blocks for the second.
+        while polled(fd, POLLIN) != (0, 0) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !receiver.is_finished() && std::time::Instant::now() < deadline {
+            let byte = 0u8;
+            crate::sys::net::sendto([fd as u64, &byte as *const u8 as u64, 1, 0, 0, 0]);
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        assert_eq!(receiver.join().unwrap(), 1);
+        assert_eq!(polled(fd, POLLIN), (1, POLLERR));
+        let mut buffer = [0u8; 4];
+        assert_eq!(
+            fs::read([fd as u64, buffer.as_mut_ptr() as u64, 4, 0, 0, 0]),
+            -111
+        );
+        assert_eq!(polled(fd, POLLIN), (0, 0));
+        close(&[fd]);
     }
 
     /// A reset with data queued: `tcp_reset` sets ECONNRESET and
