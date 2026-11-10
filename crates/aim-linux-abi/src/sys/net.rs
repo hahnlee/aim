@@ -2971,12 +2971,14 @@ fn recv(
         take_error(s, input.fd())?;
     }
     // `tcp_recvmsg` and `unix_stream_read_generic` return `sk_err` once
-    // nothing is queued to read.
+    // nothing is queued to read; an AF_UNIX datagram or seqpacket receive
+    // before what is queued (`__skb_try_recv_datagram`).
     if let Some(s) = socket.as_ref().filter(|s| !s.datagram())
         && s.kept_error.load(Ordering::Relaxed) != 0
-        && socket_info(input.fd()).is_some_and(|info| {
-            u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap()) == 0
-        })
+        && (s.ty != SockType::Stream
+            || socket_info(input.fd()).is_some_and(|info| {
+                u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap()) == 0
+            }))
         && let kept @ 1.. = s.kept_error.swap(0, Ordering::Relaxed)
     {
         return Err(-(kept as i64));
@@ -4493,6 +4495,42 @@ mod tests {
         let child = load_sock(&mut super::super::fork_state::Reader::new(&saved));
         assert_eq!(child.shutdown.load(Ordering::Relaxed), RCV_SHUTDOWN + 4);
         assert_eq!(child.kept_error.load(Ordering::Relaxed), 104);
+    }
+
+    /// An error a recvmmsg kept comes before what is queued on an AF_UNIX
+    /// datagram or seqpacket socket (`__skb_try_recv_datagram`), after it
+    /// on a stream one (`unix_stream_read_generic`).
+    #[test]
+    fn a_unix_kept_error_comes_before_or_after_the_queue_by_type() {
+        use super::*;
+        let _view = crate::vfs::test_view();
+        for (ty, first) in [(2u64, true), (5, true), (1, false)] {
+            let mut pair = [0i32; 2];
+            assert_eq!(
+                socketpair([
+                    1,
+                    ty | 0o4000 | 0o2000000,
+                    0,
+                    pair.as_mut_ptr() as u64,
+                    0,
+                    0
+                ]),
+                0
+            );
+            let (fd, peer) = (pair[0] as u64, pair[1] as u64);
+            assert_eq!(sendto([peer, b"q".as_ptr() as u64, 1, 0, 0, 0]), 1);
+            let Some(Kind::Sock(s)) = fdtab::get(fd as i32) else {
+                panic!("type {ty}: no socket");
+            };
+            s.kept_error.store(104, Ordering::Relaxed);
+            let mut buffer = [0u8; 4];
+            let mut receive = || recvfrom([fd, buffer.as_mut_ptr() as u64, 4, 0, 0, 0]);
+            let order = if first { [-104, 1] } else { [1, -104] };
+            assert_eq!([receive(), receive()], order, "type {ty}");
+            for fd in [fd, peer] {
+                assert_eq!(super::super::fs::close([fd, 0, 0, 0, 0, 0]), 0);
+            }
+        }
     }
 
     /// A raw socket's read() is `raw_recvmsg`'s, which returns a pending

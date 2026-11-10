@@ -143,7 +143,9 @@ EPOLLIN for an empty queue, until a receive, send or SO_ERROR returns it once,
 read from the socket's `soi_error` without clearing it; an IP datagram or raw
 socket's receive returns it before any queued datagram, which stays EPOLLIN
 with the error's EPOLLERR (#2780), as does a raw socket's read; a recvmmsg that
-received messages keeps a later error for the next call, of any socket, which
+received messages keeps a later error for the next call, of any socket (a stream
+socket's receive returns it once nothing is queued, an AF_UNIX datagram or
+seqpacket one's before what is, #2932), which
 poll and a level-triggered epoll interest report; a closed TCP connection
 polls IN|OUT|HUP as `tcp_done` shuts it both ways (#2713), never Darwin's
 POLLPRI|POLLRDBAND at EOF, nor a TCP socket's POLLWRBAND (#2918), to select as
