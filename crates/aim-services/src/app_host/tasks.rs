@@ -1722,11 +1722,12 @@ impl AppHost {
         let display = self.display().map_err(|e| e.message)?;
         let name = crate::package::preferred::unflatten(&task.real_activity)
             .ok_or_else(|| format!("invalid task component {}", task.real_activity))?;
+        let user = (task.uid / super::PER_USER_RANGE) as i32;
         self.tasks
             .launch_params(self.data().map_err(|e| e.message)?)
             .map_err(|e| e.message)?
             .save(
-                (task.uid / super::PER_USER_RANGE) as i32,
+                user,
                 &name,
                 Params {
                     display_unique_id: Some(format!("local:{}", display.0.id)),
@@ -1734,6 +1735,8 @@ impl AppHost {
                     bounds: task.restore_bounds.unwrap_or_default(),
                     window_layout_affinity: task.window_layout_affinity.clone(),
                 },
+                self.user_unlocking_or_unlocked(user)
+                    .map_err(|e| e.message)?,
             )
     }
 }
@@ -2508,6 +2511,12 @@ pub(super) mod tests {
             {
                 let host = launch_host(ready, true);
                 std::fs::create_dir_all(host.data().unwrap().join("system_ce/0")).unwrap();
+                host.set_user_unlocked_for_package_test(0, true);
+                host.tasks
+                    .launch_params(host.data().unwrap())
+                    .unwrap()
+                    .unlock_user(0, BTreeSet::new())
+                    .unwrap();
                 let id = host.new_task(10100, "p", "p.Main", &info, None).unwrap();
                 assert_ne!(host.tasks.bounds(id), Some(saved));
                 // A freeform task persists its last non-fullscreen bounds.
@@ -2553,6 +2562,11 @@ pub(super) mod tests {
                     host.tasks
                         .launch_params(host.data().unwrap())
                         .unwrap()
+                        .unlock_user(0, BTreeSet::new())
+                        .unwrap();
+                    host.tasks
+                        .launch_params(host.data().unwrap())
+                        .unwrap()
                         .save(
                             0,
                             &component,
@@ -2567,6 +2581,7 @@ pub(super) mod tests {
                                 },
                                 ..Default::default()
                             },
+                            true,
                         )
                         .unwrap();
                 }
@@ -2613,6 +2628,11 @@ pub(super) mod tests {
                 host.tasks
                     .launch_params(host.data().unwrap())
                     .unwrap()
+                    .unlock_user(0, BTreeSet::new())
+                    .unwrap();
+                host.tasks
+                    .launch_params(host.data().unwrap())
+                    .unwrap()
                     .save(
                         0,
                         &component,
@@ -2622,6 +2642,7 @@ pub(super) mod tests {
                             bounds: saved,
                             ..Default::default()
                         },
+                        true,
                     )
                     .unwrap();
             }

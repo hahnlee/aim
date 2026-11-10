@@ -2230,14 +2230,26 @@ impl ShortcutManager {
         Ok(package.to_owned())
     }
 
-    /// `getUserShortcutsLocked(0)`: the user loaded, then
-    /// `checkPackageChanges` (removed packages cleaned up, updated ones
-    /// rescanned, the scan time saved).
+    /// `throwIfUserLockedL(0)`.
+    fn throw_if_user_locked(&self) -> Result<(), Exception> {
+        if !self.host.user_unlocking_or_unlocked(0)? {
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "User 0 is locked or not running",
+            ));
+        }
+        Ok(())
+    }
+
+    /// `throwIfUserLockedL(0)`, then `getUserShortcutsLocked(0)`: the user
+    /// loaded from its CE storage, then `checkPackageChanges` (removed
+    /// packages cleaned up, updated ones rescanned, the scan time saved).
     fn with_user<T>(
         &self,
         f: impl FnOnce(&mut User) -> Result<T, Exception>,
     ) -> Result<T, Exception> {
         let mut guard = self.user.lock().unwrap();
+        self.throw_if_user_locked()?;
         if guard.is_none() {
             *guard = Some(self.load_user()?);
         }
@@ -2743,6 +2755,7 @@ impl ShortcutManager {
                 let a = ss::GetRateLimitResetTime::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
                     self.verify_caller(uid, a.package_name.as_deref(), a.user_id)?;
+                    self.throw_if_user_locked()?;
                     let interval = self
                         .constant("reset_interval_sec", DEFAULT_RESET_INTERVAL_SEC)?
                         .max(1)

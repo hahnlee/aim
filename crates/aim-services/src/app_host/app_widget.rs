@@ -329,13 +329,14 @@ impl AppWidgetService {
     }
 
     /// `ensureGroupStateLoadedLocked(userId)`, then `f` over the group:
-    /// the app host's one user is running and unlocked.
+    /// the app host's one user, once it is unlocking or unlocked
+    /// (`isUserRunningAndUnlocked`), its state in CE storage.
     fn with_group<T>(
         &self,
         user: i32,
         f: impl FnOnce(&mut Group) -> Result<T, Exception>,
     ) -> Result<T, Exception> {
-        if user != 0 {
+        if user != 0 || !self.host.user_unlocking_or_unlocked(user)? {
             return Err(Exception::new(
                 EX_ILLEGAL_STATE,
                 format!("User {user} must be unlocked for widgets to be available"),
@@ -1301,6 +1302,27 @@ mod tests {
                 assert!(count > 0, "no widget metadata exercised: {path}");
             }
         }
+    }
+
+    /// `ensureGroupStateLoadedLocked(userId, true)`: a locked user's group,
+    /// its previews in CE storage, is not loaded.
+    #[test]
+    fn widgets_wait_for_the_users_unlock() {
+        crate::system::with_discovery_session(|host, _, _| {
+            let service = AppWidgetService::new(host.clone());
+            let locked = service.with_group(0, |_| Ok(())).unwrap_err();
+            assert_eq!(
+                (locked.code, locked.message.as_str()),
+                (
+                    EX_ILLEGAL_STATE,
+                    "User 0 must be unlocked for widgets to be available"
+                )
+            );
+            assert!(service.group.lock().unwrap().is_none());
+            host.set_user_unlocked_for_package_test(0, true);
+            service.with_group(0, |_| Ok(())).unwrap();
+            assert!(service.group.lock().unwrap().is_some());
+        });
     }
 
     /// AppWidgetServiceImpl's package receiver updates the loaded providers

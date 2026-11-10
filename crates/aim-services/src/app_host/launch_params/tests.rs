@@ -76,6 +76,25 @@ fn launch_params_load_when_the_activity_side_unlocks_the_user() {
     });
 }
 
+/// A locked user's CE storage holds no folder for the writer to make: a
+/// save before the unlock stays in memory (`Failed to create folder`).
+/// Once CE storage is unlocking, saves are written even before the activity
+/// side's `onUserUnlocked` loads the records.
+#[test]
+fn launch_params_are_written_once_ce_storage_is_unlocked() {
+    let data = Data::new();
+    data.user(0);
+    let owner = Persister::new(&data.0).unwrap();
+    let component = name("p");
+    owner.save(0, &component, params(), false).unwrap();
+    owner.queue.shared.flush();
+    assert!(!folder(&data.0, 0).exists());
+    assert_eq!(owner.get(0, &component).unwrap(), Some(params()));
+    owner.save(0, &component, params(), true).unwrap();
+    owner.queue.shared.flush();
+    assert!(file(&folder(&data.0, 0), &component).exists());
+}
+
 #[test]
 fn launch_params_survive_task_owner_restart_in_original_abx() {
     let data = Data::new();
@@ -89,7 +108,7 @@ fn launch_params_survive_task_owner_restart_in_original_abx() {
         owner
             .unlock_user(0, BTreeSet::from([component.package.clone()]))
             .unwrap();
-        owner.save(0, &component, params()).unwrap();
+        owner.save(0, &component, params(), true).unwrap();
         owner.queue.shared.flush();
     }
     let bytes = std::fs::read(&path).unwrap();
@@ -117,8 +136,9 @@ fn launch_params_package_removal_callback_cleans_all_loaded_users() {
         let kept = name("removed.app.other");
         for user in [0, 10] {
             std::fs::create_dir_all(folder(data, user).parent().unwrap()).unwrap();
-            owner.save(user, &removed, params()).unwrap();
-            owner.save(user, &kept, params()).unwrap();
+            owner.unlock_user(user, BTreeSet::new()).unwrap();
+            owner.save(user, &removed, params(), true).unwrap();
+            owner.save(user, &kept, params(), true).unwrap();
         }
         owner.queue.shared.flush();
         Observer(Arc::downgrade(host))
@@ -141,26 +161,29 @@ fn launch_params_removal_cancels_coalesced_writes_and_preserves_queue_order() {
         data.user(user);
     }
     let owner = Persister::new(&data.0).unwrap();
+    for user in [0, 10] {
+        owner.unlock_user(user, BTreeSet::new()).unwrap();
+    }
     let release = block(&owner);
     let removed = name("removed");
     let kept = name("kept");
     for user in [0, 10] {
-        owner.save(user, &removed, params()).unwrap();
-        owner.save(user, &kept, params()).unwrap();
+        owner.save(user, &removed, params(), true).unwrap();
+        owner.save(user, &kept, params(), true).unwrap();
         let mut changed = params();
         changed.bounds.left = 100;
-        owner.save(user, &removed, changed.clone()).unwrap();
-        owner.save(user, &kept, changed.clone()).unwrap();
+        owner.save(user, &removed, changed.clone(), true).unwrap();
+        owner.save(user, &kept, changed.clone(), true).unwrap();
         // The pin's queued item refers to the mutable record even when an
         // affinity-only change doesn't request another write.
         changed.window_layout_affinity = Some("latest".into());
-        owner.save(user, &kept, changed).unwrap();
+        owner.save(user, &kept, changed, true).unwrap();
     }
     assert_eq!(owner.queue.shared.pending_writes(), 4);
     owner.remove_package("removed").unwrap();
     assert_eq!(owner.queue.shared.pending_writes(), 2);
     // A later reinstall/save must run after the earlier deletion, and survive.
-    owner.save(10, &removed, params()).unwrap();
+    owner.save(10, &removed, params(), true).unwrap();
     release.send(()).unwrap();
     owner.queue.shared.flush();
     assert!(!file(&folder(&data.0, 0), &removed).exists());
@@ -178,11 +201,12 @@ fn launch_params_removal_deletes_a_write_already_taken_by_the_writer() {
     let data = Data::new();
     data.user(0);
     let owner = Persister::new(&data.0).unwrap();
+    owner.unlock_user(0, BTreeSet::new()).unwrap();
     let component = name("removed");
     let (entered, waiting) = mpsc::channel();
     let (release, resume) = mpsc::channel();
     owner.queue.shared.pause_next_write(entered, resume);
-    owner.save(0, &component, params()).unwrap();
+    owner.save(0, &component, params(), true).unwrap();
     owner.queue.shared.cleanup(Vec::new());
     waiting.recv_timeout(Duration::from_secs(10)).unwrap();
     assert_eq!(owner.queue.shared.pending_writes(), 0);
@@ -203,7 +227,8 @@ fn launch_params_removal_waits_for_unlock_loads() {
     {
         let owner = Persister::new(&data.0).unwrap();
         for user in [0, 10] {
-            owner.save(user, &component, params()).unwrap();
+            owner.unlock_user(user, BTreeSet::new()).unwrap();
+            owner.save(user, &component, params(), true).unwrap();
         }
     }
     let owner = Persister::new(&data.0).unwrap();

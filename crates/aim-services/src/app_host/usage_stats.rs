@@ -59,34 +59,50 @@ fn clocks() -> Clocks {
 }
 
 impl AppHost {
-    /// `f` over user 0's usage stats, unlocked when first needed
-    /// (`onUserUnlocked`), and what they then ask of the service done.
+    /// `f` over user 0's usage stats, unlocked when first needed once the
+    /// user is unlocking (`onUserUnlocked`), and what they then ask of the
+    /// service done; None while the user is locked, whose stats in system
+    /// CE are not there yet (`mUserUnlockedStates`).
     pub(super) fn with_usage<T>(
         &self,
         f: impl FnOnce(&mut UserStats, Clocks, &mut Notified) -> T,
+    ) -> Result<Option<T>, Exception> {
+        self.with_user_usage(|usage| usage.ok().map(|(user, clocks, n)| f(user, clocks, n)))
+    }
+
+    /// `f` over user 0's usage stats as `with_usage` has them, or over the
+    /// events reported while it is locked.
+    fn with_user_usage<T>(
+        &self,
+        f: impl FnOnce(Result<(&mut UserStats, Clocks, &mut Notified), &mut Vec<Event>>) -> T,
     ) -> Result<T, Exception> {
         let mut notified = Notified::default();
         let mut new_update = false;
         let result = {
             let mut usage = self.usage.lock().unwrap();
-            if usage.is_none() {
-                let (user, init, unlocked) = self.unlock_usage()?;
+            if usage.is_none() && self.user_unlocking_or_unlocked(0)? {
+                let mut reported = self.usage_reported.lock().unwrap();
+                let (user, init, unlocked) = self.unlock_usage(&reported)?;
+                reported.clear();
                 *usage = Some(user);
                 new_update = init.new_update;
                 notified = unlocked;
             }
-            f(usage.as_mut().unwrap(), clocks(), &mut notified)
+            match usage.as_mut() {
+                Some(user) => f(Ok((user, clocks(), &mut notified))),
+                None => f(Err(&mut self.usage_reported.lock().unwrap())),
+            }
         };
         self.usage_notified(notified, new_update);
         Ok(result)
     }
 
     /// `onUserUnlocked` of user 0's usage stats: the stats migrated to
-    /// system CE (none to copy, #1869), no pending events (#1869), the
-    /// user's service initialized, the unlock reported and system DE's
-    /// stats deleted. `UsageStatsIdleService`'s mappings job is the
-    /// original's (#1518).
-    fn unlock_usage(&self) -> Result<(UserStats, Init, Notified), Exception> {
+    /// system CE (none to copy, #1869), no pending events on disk (#1869),
+    /// the user's service initialized, the events `reported` while it was
+    /// locked and then the unlock reported, and system DE's stats deleted.
+    /// `UsageStatsIdleService`'s mappings job is the original's (#1518).
+    fn unlock_usage(&self, reported: &[Event]) -> Result<(UserStats, Init, Notified), Exception> {
         let data = self.data()?;
         let dir = data.join("system_ce/0/usagestats");
         let fail = |e: String| {
@@ -134,10 +150,16 @@ impl AppHost {
             flags: 0,
             extra: Extra::None,
         };
-        let reported = user.report(unlock, clocks());
-        notified.updated |= reported.updated;
-        notified.reloaded |= reported.reloaded;
+        for event in reported.iter().cloned().chain([unlock]) {
+            let n = user.report(event, clocks());
+            notified.updated |= n.updated;
+            notified.reloaded |= n.reloaded;
+        }
         let _ = std::fs::remove_dir_all(&pending);
+        // The events reported while locked are persisted at once.
+        if !reported.is_empty() {
+            user.persist();
+        }
         Ok((user, init, notified))
     }
 
@@ -197,7 +219,7 @@ impl AppHost {
 
     /// `UserUsageStatsService.queryUsageStats`: the packages' stats of each
     /// interval in the range (`queryStats` without events); none for an
-    /// invalid range.
+    /// invalid range or a locked user.
     pub(super) fn usage_stats_in_range(
         &self,
         interval: i32,
@@ -214,6 +236,7 @@ impl AppHost {
                 true
             })
         })
+        .map(Option::flatten)
     }
 
     /// `queryConfigurationStats` of user 0: each interval's configurations
@@ -225,21 +248,23 @@ impl AppHost {
         begin: i64,
         end: i64,
     ) -> Result<Option<Vec<ConfigStats>>, Exception> {
-        let stats = self.with_usage(|user, clocks, notified| {
-            let now = user.check_and_get_time(clocks, notified);
-            if !(begin <= now && begin < end) {
-                return None;
-            }
-            user.query_stats(interval, begin, end, true, |stats, out| {
-                out.extend(
-                    stats
-                        .configurations
-                        .iter()
-                        .map(|c| (c.clone(), stats.begin_time, stats.end_time)),
-                );
-                true
-            })
-        })?;
+        let stats = self
+            .with_usage(|user, clocks, notified| {
+                let now = user.check_and_get_time(clocks, notified);
+                if !(begin <= now && begin < end) {
+                    return None;
+                }
+                user.query_stats(interval, begin, end, true, |stats, out| {
+                    out.extend(
+                        stats
+                            .configurations
+                            .iter()
+                            .map(|c| (c.clone(), stats.begin_time, stats.end_time)),
+                    );
+                    true
+                })
+            })?
+            .flatten();
         stats
             .map(|all| {
                 all.into_iter()
@@ -280,10 +305,14 @@ impl AppHost {
         {
             eprintln!("app host: app hibernation: {}", e.message);
         }
-        let reported = self.with_usage(|user, clocks, notified| {
-            let n = user.report(event, clocks);
-            notified.updated |= n.updated;
-            notified.reloaded |= n.reloaded;
+        // `reportEventOrAddToQueue`: queued while the user is locked.
+        let reported = self.with_user_usage(|usage| match usage {
+            Ok((user, clocks, notified)) => {
+                let n = user.report(event, clocks);
+                notified.updated |= n.updated;
+                notified.reloaded |= n.reloaded;
+            }
+            Err(reported) => reported.push(event),
         });
         if let Err(e) = reported {
             eprintln!("app host: usagestats: {}", e.message);
@@ -484,30 +513,33 @@ impl UsageStats {
     }
 
     /// The daily events in `[begin, end)` (`queryStats` of
-    /// `INTERVAL_DAILY`), when the range is valid (`validRange`).
+    /// `INTERVAL_DAILY`), when the range is valid (`validRange`) and the
+    /// user unlocked.
     fn events_in_range(
         &self,
         begin: i64,
         end: i64,
         keep: impl Fn(&Event) -> bool,
     ) -> Result<Option<Vec<Event>>, Exception> {
-        self.host.with_usage(|user, clocks, notified| {
-            let now = user.check_and_get_time(clocks, notified);
-            if !(begin <= now && begin < end) {
-                return None;
-            }
-            user.query_stats(INTERVAL_DAILY as i32, begin, end, false, |stats, out| {
-                for e in &stats.events[stats.first_index_on_or_after(begin)..] {
-                    if e.time_stamp >= end {
-                        return false;
-                    }
-                    if keep(e) {
-                        out.push(e.clone());
-                    }
+        self.host
+            .with_usage(|user, clocks, notified| {
+                let now = user.check_and_get_time(clocks, notified);
+                if !(begin <= now && begin < end) {
+                    return None;
                 }
-                true
+                user.query_stats(INTERVAL_DAILY as i32, begin, end, false, |stats, out| {
+                    for e in &stats.events[stats.first_index_on_or_after(begin)..] {
+                        if e.time_stamp >= end {
+                            return false;
+                        }
+                        if keep(e) {
+                            out.push(e.clone());
+                        }
+                    }
+                    true
+                })
             })
-        })
+            .map(Option::flatten)
     }
 
     /// `UserUsageStatsService.queryEvents` with `queryEventsHelper`'s

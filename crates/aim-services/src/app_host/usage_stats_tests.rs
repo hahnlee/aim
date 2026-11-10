@@ -111,3 +111,46 @@ fn shortcut_invocations_follow_the_callers_permission_and_home_role() {
         );
     });
 }
+
+/// `reportEventOrAddToQueue`: while user 0 is locked its events wait in
+/// memory and its stats in CE storage are not made; at the unlock they are
+/// reported before the unlock event (`onUserUnlocked`).
+#[test]
+fn events_reported_while_the_user_is_locked_wait_for_its_unlock() {
+    crate::system::with_discovery_session(|host, _, _| {
+        let dir = host.data().unwrap().join("system_ce/0/usagestats");
+        let (_, now) = clocks();
+        host.report_usage_stats_event(Event {
+            package: "p".into(),
+            class: Some("p.Main".into()),
+            instance_id: 1,
+            task_root_package: None,
+            task_root_class: None,
+            event_type: usage_events::ACTIVITY_RESUMED,
+            time_stamp: now,
+            flags: 0,
+            extra: Extra::None,
+        });
+        assert!(!dir.exists());
+        assert!(
+            host.usage_stats_in_range(INTERVAL_DAILY as i32, 0, now + 1000)
+                .unwrap()
+                .is_none()
+        );
+        host.set_user_unlocked_for_package_test(0, true);
+        let events = UsageStats::new(host.clone())
+            .events_in_range(0, i64::MAX, |e| {
+                matches!(
+                    e.event_type,
+                    usage_events::ACTIVITY_RESUMED | usage_events::USER_UNLOCKED
+                )
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            events.iter().map(|e| e.event_type).collect::<Vec<_>>(),
+            [usage_events::ACTIVITY_RESUMED, usage_events::USER_UNLOCKED]
+        );
+        assert!(dir.join("migrated").exists());
+    });
+}
