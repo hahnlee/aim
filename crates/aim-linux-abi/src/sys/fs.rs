@@ -836,7 +836,8 @@ fn special_write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
             Ok(iov) => iov,
             Err(error) => return Some(error),
         };
-        return Some(attrs::written(
+        return Some(attrs::written_as(
+            fd,
             actual,
             description.rw(pin.descriptor(), &iov, None, true),
         ));
@@ -846,7 +847,8 @@ fn special_write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
             Ok(iov) => iov,
             Err(error) => return error,
         };
-        attrs::written(
+        attrs::written_as(
+            fd,
             actual,
             errno::check(unsafe { libc::writev(actual, iov.as_ptr(), iov.len() as i32) } as i64),
         )
@@ -895,14 +897,15 @@ fn special_pio(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> Option<i
             len
         };
         if write && appends(actual) {
-            return Some(attrs::written(
+            return Some(attrs::written_as(
+                fd,
                 actual,
                 description.append(pin.descriptor(), &one(buf, len)),
             ));
         }
         let result = description.rw(pin.descriptor(), &one(buf, len), Some(pos), write);
         return Some(if write {
-            attrs::written(actual, result)
+            attrs::written_as(fd, actual, result)
         } else {
             result
         });
@@ -939,7 +942,7 @@ fn special_pio(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> Option<i
                 }
             } as i64);
             if write {
-                attrs::written(actual, result)
+                attrs::written_as(fd, actual, result)
             } else {
                 result
             }
@@ -1375,7 +1378,7 @@ pub fn preadv(write: bool, v2: bool, a: [u64; 6]) -> i64 {
                 Err(error) => return error,
             };
             let result = description.append(pin.descriptor(), &vectors);
-            return synced(fd, attrs::written(actual, result), flags);
+            return synced(fd, attrs::written_as(fd, actual, result), flags);
         }
     }
     if write && (flags & (RWF_APPEND | RWF_NOAPPEND) != 0 || pos != -1) {
@@ -1420,7 +1423,7 @@ pub fn preadv(write: bool, v2: bool, a: [u64; 6]) -> i64 {
         }
     }
     if write {
-        return synced(fd, attrs::written(actual, result), flags);
+        return synced(fd, attrs::written_as(fd, actual, result), flags);
     }
     result
 }

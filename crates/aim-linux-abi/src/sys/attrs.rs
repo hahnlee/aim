@@ -697,13 +697,20 @@ pub(super) fn forget_write_mode(fd: i32) {
 /// a regular file drops S_ISUID and executable S_ISGID without CAP_FSETID.
 /// Zero and failed writes keep them.
 pub(super) fn written(fd: i32, result: i64) -> i64 {
+    written_as(fd, fd, result)
+}
+/// [`written`] through `fd`, the host descriptor a pin of the guest's fd
+/// `guest` holds: the mode is cached for `guest`, whose slot is cleared
+/// whenever an fd is published there, not for the pin's duplicate, a new
+/// descriptor each time.
+pub(super) fn written_as(guest: i32, fd: i32, result: i64) -> i64 {
     if result <= 0 || !recording() {
         return result;
     }
     let stat = || super::fs::stat_fd_kernel(fd).map_err(|e| (-e) as i32);
     let change = || {
         let epoch = mode_epoch()?.load(Ordering::Acquire) << 16;
-        let slot = WRITE_MODES.get(fd as usize);
+        let slot = WRITE_MODES.get(guest as usize);
         let mut cached = slot.map_or(0, |s| s.load(Ordering::Acquire));
         if cached & !0xffff != epoch || cached & 0x8000 == 0 {
             let stat = stat()?;
@@ -1137,6 +1144,26 @@ mod tests {
         assert_eq!(cached & 0o7777, 0o6777);
         std::fs::remove_file(alias).unwrap();
         std::fs::remove_file(first).unwrap();
+    }
+
+    #[test]
+    fn a_pinned_duplicate_caches_the_write_mode_for_the_guest_fd() {
+        let (_guard, _root) = crate::vfs::test_view();
+        use std::os::fd::IntoRawFd;
+        // A character device: its pin is a duplicate.
+        let fd = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .unwrap()
+            .into_raw_fd();
+        super::super::fdtab::publish_guest(fd).unwrap();
+        let byte = 7u8;
+        let write = [fd as u64, (&byte as *const u8) as u64, 1, 0, 0, 0];
+        assert_eq!(super::super::fs::write(write), 1);
+        let cached = WRITE_MODES[fd as usize].load(Ordering::Acquire);
+        assert_ne!(cached & 0x8000, 0, "the guest fd's slot holds the mode");
+        assert_eq!(cached & 0o7777, 0);
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
     }
 
     #[test]
