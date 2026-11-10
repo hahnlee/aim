@@ -406,7 +406,7 @@ fn exec_services_are_temporary_and_unblock_on_exit() {
     };
     let name = f
         .supervisor
-        .add_exec_service(&spec, &f.planner.ids)
+        .add_exec_service(&spec, &f.planner.ids, None)
         .unwrap();
     assert_eq!(name, "exec 1 (/system/bin/testsvc arg)");
     let StartOutcome::Started { pid, spec } = f

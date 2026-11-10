@@ -675,7 +675,7 @@ impl IVold::IVold for Vold {
     }
     fn getUnlockedUsers(&self) -> binder::Result<Vec<i32>> {
         let crypt = self.crypt.lock().unwrap();
-        if crypt.fbe {
+        if crypt.fbe() {
             return Ok(crypt
                 .unlocked_users()
                 .into_iter()
@@ -686,7 +686,7 @@ impl IVold::IVold for Vold {
     }
     fn unlockCeStorage(&self, user: i32, secret: &[u8]) -> binder::Result<()> {
         let mut crypt = self.crypt.lock().unwrap();
-        if crypt.fbe {
+        if crypt.fbe() {
             return crypt
                 .unlock_ce_storage(user_id(user)?, secret)
                 .map_err(|e| io_error(&format!("unlockCeStorage {user}"), e));
@@ -699,7 +699,7 @@ impl IVold::IVold for Vold {
     }
     fn lockCeStorage(&self, user: i32) -> binder::Result<()> {
         let mut crypt = self.crypt.lock().unwrap();
-        if crypt.fbe {
+        if crypt.fbe() {
             return crypt
                 .lock_ce_storage(user_id(user)?)
                 .map_err(|e| io_error(&format!("lockCeStorage {user}"), e));
@@ -890,7 +890,7 @@ fn main() {
     // nothing to act on here.
     let crypt = FsCrypt::new(
         "/data".into(),
-        property(c"ro.crypto.type") == "file",
+        || property(c"ro.crypto.type") == "file",
         property(c"ro.product.first_api_level").parse().unwrap_or(0),
         KeyStorage::new(keystore::Keystore2, "/system/bin/secdiscard".into()),
         Kernel,

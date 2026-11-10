@@ -28,7 +28,7 @@ use std::os::fd::AsRawFd;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use aim_storage::fscrypt::{CONTEXT, Owner, Removal, Spec};
+use aim_storage::fscrypt::{CONTEXT, Owner, Removal, Spec, policy, supported};
 use sha2::{Digest, Sha256};
 
 use super::attrs::{self, Host};
@@ -49,9 +49,6 @@ pub(super) const ENCRYPTED: u32 = 0x800;
 
 const NONCE: usize = 16;
 const PAD_MASK: u8 = 0x03;
-const DIRECT_KEY: u8 = 0x04;
-const IV_INO_LBLK_64: u8 = 0x08;
-const IV_INO_LBLK_32: u8 = 0x10;
 const CAP_FOWNER: u32 = 3;
 const CAP_SYS_ADMIN: u32 = 21;
 const EOVERFLOW: Errno = 75;
@@ -83,8 +80,8 @@ fn owner() -> Result<Option<&'static Owner>, Errno> {
         .map_err(|error| *error)
 }
 
-/// Whether any directory has a policy. Policies are never removed, so a
-/// process asks the owner only until one exists.
+/// Whether the filesystem is encrypted, so that a directory may have a
+/// policy. It stays so, so a process asks the owner only until it is.
 pub(super) fn active() -> Result<bool, Errno> {
     static ACTIVE: AtomicBool = AtomicBool::new(false);
     if ACTIVE.load(Ordering::Relaxed) {
@@ -96,16 +93,6 @@ pub(super) fn active() -> Result<bool, Errno> {
     let active = owner.has_policies().map_err(io)?;
     ACTIVE.store(active, Ordering::Relaxed);
     Ok(active)
-}
-
-/// The policy part of a context (`struct fscrypt_policy_v1/v2`), or None
-/// for a context that is not valid (`fscrypt_context_is_valid`).
-fn policy(context: &[u8]) -> Option<Vec<u8>> {
-    match (context.first(), context.len()) {
-        (Some(1), 28) => Some([&[0], &context[1..12]].concat()),
-        (Some(2), 40) => Some(context[..24].to_vec()),
-        _ => None,
-    }
 }
 
 fn context(host: Host) -> Option<Vec<u8>> {
@@ -255,34 +242,6 @@ pub(super) fn rename(old: &CStr, new: &CStr, exchange: bool) -> Result<(), Errno
         moved(Host::Path(&old_dir), Host::Path(new))?;
     }
     Ok(())
-}
-
-/// `fscrypt_supported_policy` for ext4 with 4096-byte blocks: ext4 has
-/// stable inode numbers of 32 bits, which the IV_INO_LBLK flags need. The
-/// host's inode numbers are stable, and no IV is derived from them, since
-/// the bytes stay plaintext.
-fn supported(policy: &[u8]) -> bool {
-    let (contents, filenames, flags) = (policy[1], policy[2], policy[3]);
-    let v1_modes = matches!((contents, filenames), (1, 4) | (5, 6) | (9, 9));
-    // Only Adiantum has the IV size DIRECT_KEY needs, for both.
-    let direct = flags & DIRECT_KEY == 0 || (contents, filenames) == (9, 9);
-    if policy[0] == 0 {
-        return v1_modes && direct && flags & !(PAD_MASK | DIRECT_KEY) == 0;
-    }
-    let modes = v1_modes || matches!((contents, filenames), (1, 10) | (7, 8));
-    let exclusive = [DIRECT_KEY, IV_INO_LBLK_64, IV_INO_LBLK_32]
-        .iter()
-        .filter(|flag| flags & **flag != 0)
-        .count();
-    let log2_data_unit = policy[4];
-    modes
-        && exclusive <= 1
-        && direct
-        && flags & !(PAD_MASK | DIRECT_KEY | IV_INO_LBLK_64 | IV_INO_LBLK_32) == 0
-        && (log2_data_unit == 0
-            || (9..=12).contains(&log2_data_unit)
-                && (log2_data_unit == 12 || flags & IV_INO_LBLK_32 == 0))
-        && policy[5..8] == [0; 3]
 }
 
 /// The names in the directory `path` at `fd`, all or the first.
@@ -790,6 +749,7 @@ fn ioctl_as(fd: i32, request: u64, arg: u64, id: &Identity) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aim_storage::fscrypt::{DIRECT_KEY, IV_INO_LBLK_64};
     use std::path::Path;
 
     const AT: u64 = crate::vfs::LINUX_AT_FDCWD as u64;

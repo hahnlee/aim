@@ -241,7 +241,9 @@ and joins the binder thread pool.
   the original's identity from `android16-image-full.identity` beside the
   extracted tree): `guest-init --run --only
   servicemanager,vendor.health-aim` starts the binder host and both
-  services with `linux-run --binder`.
+  services with `linux-run --binder` (before `/data` was file-encrypted;
+  a subset now also needs vold, vdc, keystore2 and
+  vendor.keymint-default, ADR 0016).
   - The original servicemanager finds `IHealth/default` in the device VINTF
     manifest, and the HAL registers it.
   - The original `service list` shows `android.hardware.health.IHealth/default:

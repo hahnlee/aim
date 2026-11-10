@@ -18,6 +18,13 @@
 //!   parser cache is not shipped: a parse resolves resource values for the
 //!   device's locale, so the device's first boot makes its own (#722).
 //!
+//! The files wait outside the guest's `/data` (`data::TEMPLATE_FILES`):
+//! `/data` is file-encrypted, so its directories get their policies from
+//! the new data directory's own keys, made at its first boot, and an
+//! unencrypted directory with entries could never get one (ADR 0016).
+//! guest-init moves them in after `init_user0`, each taking the policy of
+//! its directory, before anything that reads them starts.
+//!
 //! A template is the original's own output: a first boot of the derived
 //! image on a data directory made from the empty image, with a fixed-size
 //! headless display: no task, panel or native UI can open a window (#607).
@@ -226,7 +233,7 @@ pub fn template() -> Node {
         // Named after the SKU, which the build boot names.
         outputs: Vec::new(),
         tools: Vec::new(),
-        recipe: 5,
+        recipe: 6,
         action: Action::UserdataTemplate,
         boot: true,
     }
@@ -485,15 +492,18 @@ fn publish(
 ) -> Result<(), String> {
     let template = work.join("template");
     let to = DataImage::attach(&template, Some(empty))?;
+    // Outside /data until guest-init places them (data::TEMPLATE_FILES).
+    let staged = to.dir().join(data::TEMPLATE_FILES);
+    fs::create_dir(&staged).map_err(|e| format!("{}: {e}", staged.display()))?;
     let mut files = Vec::new();
     for (from, paths) in sources {
         let paths: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
-        files.extend(copy::copy_paths(from, to.dir(), &paths)?);
+        files.extend(copy::copy_paths(from, &staged, &paths)?);
     }
     files.sort();
     let mut manifest = String::new();
     for file in &files {
-        let hash = crate::hash::sha256_file(&to.dir().join(file)).map_err(|e| e.to_string())?;
+        let hash = crate::hash::sha256_file(&staged.join(file)).map_err(|e| e.to_string())?;
         writeln!(manifest, "{hash}  {}", file.display()).unwrap();
     }
     to.detach()?;

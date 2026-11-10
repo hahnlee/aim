@@ -151,6 +151,9 @@ pub struct BootOptions {
     /// Run mode: the data templates (`userdata` build node) a new data
     /// directory starts from (`aim_storage::data::template`).
     pub userdata: Option<PathBuf>,
+    /// Run mode: the keychain file of the users' CE secrets, a throwaway
+    /// data directory's; the Mac user's keychain without one.
+    pub ce_keychain: Option<PathBuf>,
 }
 
 impl BootOptions {
@@ -183,6 +186,7 @@ impl BootOptions {
             timeout: None,
             simulate_after: None,
             userdata: None,
+            ce_keychain: None,
         }
     }
 }
@@ -1062,6 +1066,7 @@ impl Boot {
                             crate::unixsock::connect_at(&socket_dir, APP_HOST_ZYGOTE_RELAY)
                         }),
                         options.display.as_deref(),
+                        options.ce_keychain.as_deref(),
                     )
                     .map_err(|e| format!("app host: {e}"))?;
             }

@@ -45,12 +45,20 @@ const KEYRING_NEXT: &str = "fscrypt-keyring.next";
 const STATE: &str = "fscrypt-state";
 const TABLE: &str = "policies";
 const TABLE_NEXT: &str = "policies.next";
+const CE_PROTECTOR: &str = "ce-protector";
+const CE_PROTECTOR_NEXT: &str = "ce-protector.next";
 const SECRET: &str = "secret";
 const SECRET_NEXT: &str = "secret.next";
 const MAGIC: &[u8] = b"AIMFSCRYPT01\0";
 const PAGE: usize = 4096;
 /// The host attribute holding an inode's `struct fscrypt_context`.
 pub const CONTEXT: &CStr = c"dev.aim.fscrypt-context";
+/// A context's nonce, and the policy flags `supported` checks.
+const NONCE: usize = 16;
+const PAD_MASK: u8 = 0x03;
+pub const DIRECT_KEY: u8 = 0x04;
+pub const IV_INO_LBLK_64: u8 = 0x08;
+pub const IV_INO_LBLK_32: u8 = 0x10;
 
 unsafe extern "C" {
     /// `fsgetpath(2)`: the path of an inode of a mounted volume.
@@ -113,6 +121,35 @@ struct Entry {
     users: Option<Vec<u32>>,
 }
 
+/// What protects the users' CE keys of a data filesystem (ADR 0016): the
+/// app host's LockSettings (a keychain secret) or the original
+/// LockSettingsService (a synthetic password), neither able to open the
+/// other's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CeProtector {
+    AppHost,
+    Original,
+}
+
+impl CeProtector {
+    /// How the record names it.
+    fn record(self) -> &'static str {
+        match self {
+            CeProtector::AppHost => "app-host",
+            CeProtector::Original => "original",
+        }
+    }
+}
+
+impl std::fmt::Display for CeProtector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CeProtector::AppHost => "the app host",
+            CeProtector::Original => "the original LockSettingsService",
+        })
+    }
+}
+
 /// A policy root: the key its policy names and its host inode number.
 #[derive(Clone, PartialEq, Eq)]
 struct Root {
@@ -142,6 +179,134 @@ impl Drop for Owner {
     fn drop(&mut self) {
         unsafe { libc::munmap(self.state as *mut _, PAGE) };
     }
+}
+
+/// The policy part of a context (`struct fscrypt_policy_v1/v2`), or None
+/// for a context that is not valid (`fscrypt_context_is_valid`).
+pub fn policy(context: &[u8]) -> Option<Vec<u8>> {
+    match (context.first(), context.len()) {
+        (Some(1), 28) => Some([&[0], &context[1..12]].concat()),
+        (Some(2), 40) => Some(context[..24].to_vec()),
+        _ => None,
+    }
+}
+
+/// `fscrypt_supported_policy` for ext4 with 4096-byte blocks: ext4 has
+/// stable inode numbers of 32 bits, which the IV_INO_LBLK flags need. The
+/// host's inode numbers are stable, and no IV is derived from them, since
+/// the bytes stay plaintext.
+pub fn supported(policy: &[u8]) -> bool {
+    let (contents, filenames, flags) = (policy[1], policy[2], policy[3]);
+    let v1_modes = matches!((contents, filenames), (1, 4) | (5, 6) | (9, 9));
+    // Only Adiantum has the IV size DIRECT_KEY needs, for both.
+    let direct = flags & DIRECT_KEY == 0 || (contents, filenames) == (9, 9);
+    if policy[0] == 0 {
+        return v1_modes && direct && flags & !(PAD_MASK | DIRECT_KEY) == 0;
+    }
+    let modes = v1_modes || matches!((contents, filenames), (1, 10) | (7, 8));
+    let exclusive = [DIRECT_KEY, IV_INO_LBLK_64, IV_INO_LBLK_32]
+        .iter()
+        .filter(|flag| flags & **flag != 0)
+        .count();
+    let log2_data_unit = policy[4];
+    modes
+        && exclusive <= 1
+        && direct
+        && flags & !(PAD_MASK | DIRECT_KEY | IV_INO_LBLK_64 | IV_INO_LBLK_32) == 0
+        && (log2_data_unit == 0
+            || (9..=12).contains(&log2_data_unit)
+                && (log2_data_unit == 12 || flags & IV_INO_LBLK_32 == 0))
+        && policy[5..8] == [0; 3]
+}
+
+/// The context of the host inode `path`, none if it has no policy.
+pub fn context(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let mut context = [0u8; 40];
+    let n = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            CONTEXT.as_ptr(),
+            context.as_mut_ptr().cast(),
+            context.len(),
+            0,
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    if n < 0 {
+        let error = io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ENOATTR) => Ok(None),
+            _ => Err(error),
+        };
+    }
+    Ok(Some(context[..n as usize].to_vec()))
+}
+
+/// Stores `context` on the host inode `path`, a fresh nonce in it. Setting
+/// an attribute needs write access, which a file's host mode may deny its
+/// owner for a moment.
+fn store(path: &Path, context: &[u8]) -> io::Result<()> {
+    let mut context = context.to_vec();
+    let at = context.len() - NONCE;
+    unsafe { libc::arc4random_buf(context[at..].as_mut_ptr().cast(), NONCE) };
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let set = || {
+        let set = unsafe {
+            libc::setxattr(
+                name.as_ptr(),
+                CONTEXT.as_ptr(),
+                context.as_ptr().cast(),
+                context.len(),
+                0,
+                libc::XATTR_NOFOLLOW,
+            )
+        };
+        if set < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    };
+    match set() {
+        Err(error) if error.raw_os_error() == Some(libc::EACCES) => {
+            let metadata = fs::symlink_metadata(path)?;
+            if metadata.file_type().is_symlink() {
+                return Err(error);
+            }
+            let mode = metadata.permissions().mode();
+            fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200))?;
+            let result = set();
+            fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+            result
+        }
+        result => result,
+    }
+}
+
+fn withdraw(path: &Path) -> io::Result<()> {
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    if unsafe { libc::removexattr(path.as_ptr(), CONTEXT.as_ptr(), libc::XATTR_NOFOLLOW) } < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ENOATTR) {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// `fscrypt_prepare_new_inode` for an inode a host-side owner made (init's
+/// builtins): `child`, just created in `parent`, takes the parent's policy
+/// with a nonce of its own.
+pub fn inherit(parent: &Path, child: &Path) -> io::Result<()> {
+    let Some(context) = context(parent)? else {
+        return Ok(());
+    };
+    let kind = fs::symlink_metadata(child)?.file_type();
+    if kind.is_dir() || kind.is_file() || kind.is_symlink() {
+        store(child, &context)?;
+    }
+    Ok(())
 }
 
 impl Owner {
@@ -242,8 +407,57 @@ impl Owner {
         self.device
     }
 
-    /// Whether any directory of the filesystem was given a policy: until
-    /// one is, no inode has one to read or inherit.
+    /// Marks the filesystem as encrypted (`mount_all` of a `/data` with
+    /// `fileencryption=`) before any directory gets a policy: from then on
+    /// [`has_policies`](Self::has_policies) answers true, so a boot that
+    /// ends between making the first encrypted directory and recording its
+    /// policy is not taken for one from before file-based encryption.
+    pub fn encrypt(&self) -> io::Result<()> {
+        let _lock = Lock::exclusive(&open(&self.runtime.join(KEYRING_LOCK), false)?)?;
+        if self.has_policies()? {
+            return Ok(());
+        }
+        replace(&self.table.with_file_name(TABLE_NEXT), &self.table, "")
+    }
+
+    /// Records `protector` as what protects the users' CE keys of the
+    /// filesystem (the LockSettings of the image that first mounts it),
+    /// unless one is already: returns that one if it is another. The
+    /// record is written whole and synced before it is linked, as the
+    /// secret is; one naming no protector is corrupt (InvalidData).
+    pub fn claim_ce_protection(&self, protector: CeProtector) -> io::Result<Option<CeProtector>> {
+        let path = self.table.with_file_name(CE_PROTECTOR);
+        let mut recorded = String::new();
+        match open(&path, false) {
+            Ok(mut file) => file.read_to_string(&mut recorded)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let next = self.table.with_file_name(CE_PROTECTOR_NEXT);
+                let mut file = open(&next, true)?;
+                if unsafe { libc::ftruncate(file.as_raw_fd(), 0) } < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                file.write_all(protector.record().as_bytes())?;
+                file.sync_all()?;
+                fs::rename(next, path)?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let recorded = [CeProtector::AppHost, CeProtector::Original]
+            .into_iter()
+            .find(|known| known.record() == recorded)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: a corrupt CE protector record", path.display()),
+                )
+            })?;
+        Ok((recorded != protector).then_some(recorded))
+    }
+
+    /// Whether the filesystem is encrypted ([`encrypt`](Self::encrypt), or
+    /// a directory was given a policy): until it is, no inode has a policy
+    /// to read or inherit.
     pub fn has_policies(&self) -> io::Result<bool> {
         match fs::symlink_metadata(&self.table) {
             Ok(_) => Ok(true),
@@ -263,6 +477,62 @@ impl Owner {
                 roots.push(root);
             }
             Ok(())
+        })
+    }
+
+    /// `FS_IOC_SET_ENCRYPTION_POLICY` by a host-side owner with root's
+    /// capabilities (init's `FscryptSetDirectoryPolicy`, which may name a
+    /// key it did not add): `dir` gets `policy` (a `struct
+    /// fscrypt_policy_v1` or `_v2`) if it has none, which needs it to be an
+    /// empty directory; one it has already must be the same (EEXIST).
+    pub fn set_policy(&self, dir: &Path, policy: &[u8]) -> io::Result<()> {
+        let error = io::Error::from_raw_os_error;
+        let new = match (policy.first(), policy.len()) {
+            (Some(0), 12) => [&[1], &policy[1..], &[0; NONCE][..]].concat(),
+            (Some(2), 24) => [policy, &[0; NONCE][..]].concat(),
+            _ => return Err(error(libc::EINVAL)),
+        };
+        let metadata = fs::symlink_metadata(dir)?;
+        if let Some(existing) = context(dir)? {
+            if self::policy(&existing).as_deref() != Some(policy) {
+                return Err(error(libc::EEXIST));
+            }
+            // A boot that ended between storing the policy and recording
+            // it leaves the root to record now.
+            let spec = Spec::of_context(&existing).ok_or_else(|| error(libc::EINVAL))?;
+            let recorded = self
+                .roots()?
+                .iter()
+                .any(|root| root.inode == metadata.ino());
+            if recorded || dir.parent().map(context).transpose()?.flatten().is_some() {
+                return Ok(());
+            }
+            return self.policy_root(spec, metadata.ino());
+        }
+        if !metadata.is_dir() {
+            return Err(error(libc::ENOTDIR));
+        }
+        let empty = || Ok::<_, io::Error>(fs::read_dir(dir)?.next().is_none());
+        if !empty()? {
+            return Err(error(libc::ENOTEMPTY));
+        }
+        if !supported(policy) {
+            return Err(error(libc::EINVAL));
+        }
+        store(dir, &new)?;
+        // A guest process may have created an entry meanwhile: as on Linux
+        // the directory was not empty, so it and what inherited its policy
+        // lose it again.
+        if !empty()? {
+            withdraw(dir)?;
+            for entry in fs::read_dir(dir)? {
+                withdraw(&entry?.path())?;
+            }
+            return Err(error(libc::ENOTEMPTY));
+        }
+        let spec = Spec::of_context(&new).ok_or_else(|| error(libc::EINVAL))?;
+        self.policy_root(spec, metadata.ino()).inspect_err(|_| {
+            let _ = withdraw(dir);
         })
     }
 
@@ -504,8 +774,13 @@ fn live(root: &Root, mut fsid: libc::fsid_t) -> io::Result<bool> {
     };
     if n < 0 {
         let error = io::Error::last_os_error();
+        // ENOENT: the path fsgetpath gave is gone. The inode was removed
+        // as the lookup ran, or APFS still named it for a moment after its
+        // removal (seen after `rm -rf` of a tree with roots): a root that
+        // is gone, as `removed` drops, rather than a change that fails for
+        // every caller until it is dropped.
         return match error.raw_os_error() {
-            Some(libc::ENOATTR | libc::ERANGE) => Ok(false),
+            Some(libc::ENOATTR | libc::ERANGE | libc::ENOENT) => Ok(false),
             _ => Err(error),
         };
     }
@@ -683,6 +958,55 @@ mod tests {
         let again = Owner::locate(&runtime).unwrap().unwrap();
         again.cipher(&[0; 16], &mut name);
         assert_eq!(&name, b"name");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A policy stored on a directory whose recording a boot did not
+    /// reach is recorded when it is set again, and only for a root.
+    #[test]
+    fn a_policy_set_again_records_its_root() {
+        let dir = crate::scratch_dir("fscrypt-rerecord");
+        let (runtime, data) = (dir.join("run"), dir.join("data"));
+        fs::create_dir_all(&runtime).unwrap();
+        fs::create_dir_all(data.join("misc/vold")).unwrap();
+        Owner::prepare(&runtime, &data).unwrap();
+        let owner = Owner::locate(&runtime).unwrap().unwrap();
+        owner.encrypt().unwrap();
+        assert!(owner.has_policies().unwrap());
+        assert!(owner.roots().unwrap().is_empty());
+        let policy = [&[2u8, 1, 4, 2, 0, 0, 0, 0][..], &[7; 16]].concat();
+        let misc = data.join("misc");
+        store(&misc, &[&policy[..], &[0; NONCE]].concat()).unwrap();
+        inherit(&misc, &misc.join("vold")).unwrap();
+        owner.set_policy(&misc.join("vold"), &policy).unwrap();
+        assert!(owner.roots().unwrap().is_empty());
+        owner.set_policy(&misc, &policy).unwrap();
+        let roots = owner.roots().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].inode, fs::metadata(&misc).unwrap().ino());
+        assert!(owner.locking());
+        owner.set_policy(&misc, &policy).unwrap();
+        assert!(owner.roots().unwrap() == roots);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The first protector claimed is kept; another is answered with it,
+    /// and a record naming none is corrupt.
+    #[test]
+    fn the_ce_protector_is_claimed_once_and_a_corrupt_record_is_refused() {
+        let dir = crate::scratch_dir("fscrypt-ce-protector");
+        let (runtime, data) = (dir.join("run"), dir.join("data"));
+        fs::create_dir_all(&runtime).unwrap();
+        Owner::prepare(&runtime, &data).unwrap();
+        let owner = Owner::locate(&runtime).unwrap().unwrap();
+        let claim = |protector| owner.claim_ce_protection(protector).unwrap();
+        assert_eq!(claim(CeProtector::Original), None);
+        assert_eq!(claim(CeProtector::Original), None);
+        assert_eq!(claim(CeProtector::AppHost), Some(CeProtector::Original));
+        fs::write(data.join("fscrypt").join(CE_PROTECTOR), "something").unwrap();
+        let error = owner.claim_ce_protection(CeProtector::AppHost).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("corrupt"), "{error}");
         fs::remove_dir_all(dir).unwrap();
     }
 

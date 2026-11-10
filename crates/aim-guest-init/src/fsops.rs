@@ -105,6 +105,15 @@ fn host_permissions(mode: u32, host: &Path) -> fs::Permissions {
     fs::Permissions::from_mode(mode | owner)
 }
 
+/// A new inode of a writable area takes its directory's fscrypt policy,
+/// as the kernel gives it one (`fscrypt_prepare_new_inode`).
+fn inherit(host: &Path) -> std::io::Result<()> {
+    match host.parent() {
+        Some(parent) => aim_storage::fscrypt::inherit(parent, host),
+        None => Ok(()),
+    }
+}
+
 pub struct FsOps {
     pub map: PathMap,
     /// Perform changes; a dry run only describes them.
@@ -540,7 +549,8 @@ impl FsOps {
             Area::Writable { .. } => {
                 if self.apply {
                     match fs::create_dir(&resolved.host) {
-                        Ok(()) => {}
+                        Ok(()) => inherit(&resolved.host)
+                            .map_err(|e| format!("mkdir() failed on {path}: {e}"))?,
                         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                             if !resolved.host.is_dir() {
                                 return Err(format!("mkdir() failed on {path}: File exists"));
@@ -690,6 +700,8 @@ impl FsOps {
                     if !existed {
                         let _ =
                             fs::set_permissions(&resolved.host, fs::Permissions::from_mode(0o600));
+                        inherit(&resolved.host)
+                            .map_err(|e| format!("Unable to write to file '{path}': {e}"))?;
                     }
                 }
                 Ok(Effect::Applied(format!(
@@ -789,7 +801,9 @@ impl FsOps {
             Area::Writable { .. } => {
                 if self.apply {
                     match std::os::unix::fs::symlink(target, &resolved.host) {
-                        Ok(()) => {}
+                        Ok(()) => inherit(&resolved.host).map_err(|e| {
+                            format!("symlink() failed to create {link} -> {target}: {e}")
+                        })?,
                         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                         Err(e) => {
                             return Err(format!(

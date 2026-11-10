@@ -192,8 +192,11 @@ With the derived image built (`cargo aim build`, which mounts it at
 aim-display --socket /tmp/display.sock &
 guest-init --image IMAGE --data DATA --run \
   --gpu _build/angle-source/out/AimRelease --display /tmp/display.sock \
-  --only logd,servicemanager,hwservicemanager,vendor.graphics.allocator,vendor.hwcomposer-3,surfaceflinger,bootanim
+  --only logd,servicemanager,hwservicemanager,vold,vdc,keystore2,vendor.keymint-default,vendor.graphics.allocator,vendor.hwcomposer-3,surfaceflinger,bootanim
 ```
+
+- vold, vdc, keystore2 and the KeyMint HAL encrypt `/data`: a subset
+  without them ends at `installkey` (ADR 0016).
 
 - SurfaceFlinger needs `hwservicemanager` from the image: it registers
   the deprecated HIDL `IDisplayService` and waits for

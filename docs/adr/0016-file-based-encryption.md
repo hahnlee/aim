@@ -3,12 +3,11 @@
 Status: accepted 2026-11-10 (#2761). The owner chose the recommended path:
 option B, CE protected by a Mac Keychain item, FileVault for confidentiality
 at rest (D not now), and existing data directories recreated by a breaking
-migration on a branch. Slices 1 and 2 and slice 4's CE protection are
-implemented (#2845, #2846, #2847, #2849): vold manages the keys as
-`FsCrypt.cpp` does and the app host protects and unlocks CE with the
-keychain's secret once `ro.crypto.type` is `file`, which only slice 3
-sets, so the guest is a device without file-based encryption (FBE) until
-slice 3 lands.
+migration on a branch. Slices 1 to 4 are implemented (#2845, #2846, #2847,
+#2848, #2849): the guest is a device with file-based encryption (FBE),
+`ro.crypto.state=encrypted` and `ro.crypto.type=file`, vold manages the
+keys as `FsCrypt.cpp` does and the app host protects and unlocks CE with
+the keychain's secret.
 
 ## Context
 
@@ -44,10 +43,10 @@ checked in the image's `framework.jar`). Everything else follows from them:
   reads an app file's policy with `FS_IOC_GET_ENCRYPTION_POLICY_EX` and
   validates its modes and flags.
 
-Today every owner says "no FBE": the fstab (`image/vendor/etc/fstab.aim`),
+Before slice 3 every owner said "no FBE": the fstab (`image/vendor/etc/fstab.aim`),
 guest-init's `mount_all` (`ro.crypto.state=unencrypted`), `installkey` and
 `mkdir encryption=` (no-ops), the replaced vold (directories without keys;
-`unlockCeStorage` only records the user), and the syscall layer, which has
+`unlockCeStorage` only recorded the user), and the syscall layer, which had
 no fscrypt ioctl. Setting the two properties alone would be the
 success-returning stub AGENTS.md forbids: the ioctls answer ENOTTY, CE
 storage is never locked, and CTS fails. So the work is to make the guest
@@ -157,7 +156,41 @@ turns FBE on and depends on slice 4's CE protection: it lands after it.
    in `fstab.aim`, `mount_all` reporting FILE_ENCRYPTED
    (`ro.crypto.state=encrypted`, `ro.crypto.type=file`), `installkey`, and
    `mkdir encryption=`/`key=` as `FscryptSetDirectoryPolicy`; the data
-   migration of decision 4.
+   migration of decision 4. Implemented (#2848). guest-init's `mount_all`
+   reads the named fstab's `/data` entry and, for `fileencryption=`, does
+   what `queue_fs_event` does for FILE_ENCRYPTED; `installkey` makes
+   `/data/unencrypted` and runs `vdc cryptfs enablefilecrypto`, and
+   `init_user0` its `vdc`, each failure rebooting into recovery as
+   `ExecVdcRebootOnFailure` does; `mkdir`'s options are parsed as
+   `ParseMkdir` does and the policy of `/data/unencrypted/ref` (or
+   `per_boot_ref`) with the options of `mode` is set through the fscrypt
+   owner (`Owner::set_policy`, as root with CAP_FOWNER, EnsurePolicy's
+   checks), `Attempt` and `DeleteIfNecessary` as the original treats
+   them. What guest-init itself creates under `/data` (`mkdir`, `write`,
+   `symlink`, the persistent properties) inherits the directory's policy.
+   A reboot into recovery (a failed policy) has no recovery to go to, so
+   that boot ends. vold reads `IsFbeEnabled` at each call, as the
+   original does: it starts at `early-fs`, before `mount_all` sets it.
+   The device's `on fs` no longer makes `/data/misc/keystore` (#1253): it
+   can only be made with the system DE key, after `installkey`, as on a
+   device. The app host image lets `rm` run (`--only`): boot_completed's
+   `rm -rf /data/per_boot` removes the previous boot's directory, whose
+   per-boot key is gone, before it is made again.
+   The migration (decision 4): `mount_all` refuses a `/data` with entries
+   that no earlier `mount_all` marked encrypted (`DataMount::predates_fbe`;
+   the mark, `Owner::encrypt`, comes before the first directory is made, so
+   a boot that ends between a directory and its policy is not taken for one
+   from before), so a data directory from before is recreated, never
+   mixed. A policy set again on a directory that has it records its root,
+   which a boot that ended after storing it did not. A data
+   template's files cannot be in `/data`, whose directories get their
+   policies from the new directory's own keys; the template keeps them
+   beside it (`template/`), and guest-init moves them in after
+   `init_user0`, each taking its new directory's policy before it moves,
+   as if their owners had written them, so a boot that stops part way
+   leaves the rest staged for the next and none in `/data` without one;
+   copies (`aim_storage::copy`) never carry a
+   context, which names a key of its own volume.
 4. **App host**: CE protection per decision 2 in `lock_settings` and the
    user's unlock. Implemented (#2849), in the original's order for an
    unsecured user: StorageManagerService's `restoreCeUnlockedUsers` asks
@@ -189,11 +222,31 @@ turns FBE on and depends on slice 4's CE protection: it lands after it.
    item missing) is logged and the user stays locked (Direct Boot): the
    app host's boot stops after `LOCKED_BOOT_COMPLETED` instead of failing.
    Every user is unsecured to LockSettings here: the Mac's session is the
-   credential. With slice 3 the FBE branches of the ported
-   `fixAppsDataOnBoot` and `UserDataPreparer` then run as on a device;
-   remaining: measure 3 fresh and 3 warm
-   boots against main (boot-measurement discipline) and run CTS
-   `EncryptionTest` and `FileBasedEncryptionPolicyTest`.
+   credential. A throwaway data directory (a test's, the build's: any but
+   aimctl's default, or one booted with `guest-init --ce-keychain`) keeps
+   its secrets in a keychain file of its own beside it
+   (`aim_storage::data::keychain_of`, `<data>.keychain`, out of the
+   user's search list, taken out again at each open, the list's read and
+   write serialized among aim's processes by a lock file of the user's),
+   which `data::remove` removes with it, so nothing of it reaches the
+   user's login keychain (#2882).
+   A data directory has one CE protector. The derived image runs the
+   original LockSettingsService, which protects user 0's CE key with its
+   synthetic password (a blob under `system_de/0/spblob`, sealed by
+   Keystore), and the app host image the keychain's secret; neither can
+   open the other's, and both record the migration done in
+   `locksettings.db`, so a data directory booted by one and then the other
+   would leave user 0 in Direct Boot. guest-init's `mount_all` records,
+   with the fscrypt owner's state (`fscrypt/ce-protector`), the protector
+   of the image that first mounts a data directory (the app host's in an
+   image with `/system/etc/aim/app-host-services`), and refuses the other
+   image's with both named. Unwrapping the original's protector in the app
+   host (as `SyntheticPasswordManager` does for an unsecured user) would
+   let the original's data directories move to the app host, but not back;
+   it is not done. With slice 3 the FBE
+   branches of the ported `fixAppsDataOnBoot` and `UserDataPreparer` run
+   as on a device. Remaining: CTS `EncryptionTest` and
+   `FileBasedEncryptionPolicyTest`.
 
 ## Risks
 
@@ -207,8 +260,12 @@ turns FBE on and depends on slice 4's CE protection: it lands after it.
 - Host-side writers bypass the syscall layer: the app host and aim-system
   write `/data/system*` and prepare app data directly or through installd.
   They must create files through the ABI's inheritance (or the owner's
-  API), else files appear unencrypted in an encrypted tree; slice 1 adds a
-  check that reports such inodes.
+  `aim_storage::fscrypt::inherit`, as guest-init's builtins and the data
+  template's placement do), else files appear unencrypted in an
+  encrypted tree. The app host's own files (`packages.xml` and the other
+  settings it writes) still do, and on a fresh data directory it writes
+  `/data/system_ce/0` before user 0's CE storage is prepared, which the
+  original `UserDataPreparer` then destroys and prepares again.
 - The hot path: inheritance costs an xattr write per inode created under
   `/data`; lookups pay only while a key is absent. Slice 1 measures
   `startup_bench` and a boot before and after.
@@ -219,7 +276,8 @@ turns FBE on and depends on slice 4's CE protection: it lands after it.
   opens it only with the item's secret: a data directory moved to another
   Mac user or Mac, or whose item was deleted, keeps its CE data locked
   (the unlock fails), as a device whose synthetic password is lost does.
-  Deleting a data directory leaves its item in the keychain.
+  Deleting the user's own data directory by hand leaves its item in the
+  keychain; a throwaway one's keychain file goes with it.
 - `secdiscard` cannot securely erase on a `/data` backed by APFS: its F2FS
   and block-discard ioctls do not exist there, so it falls back to
   overwriting, which a copy-on-write filesystem and SSD remapping do not

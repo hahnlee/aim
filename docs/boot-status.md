@@ -458,12 +458,15 @@ been remeasured; no guest boot was run (2026-10-28).
 ```
 cargo aim build        # <derived> is target/aim/derived/root
 guest-init --image <derived> --data <data> --run \
-    --exclude zygote,surfaceflinger,vold,bpfloader --timeout 45
+    --exclude zygote,surfaceflinger,bpfloader --timeout 45
 ```
 
 - `--exclude` keeps services (and `exec` programs) from starting. A
   `wait_for_prop` or `exec` that only an excluded service would end is
-  satisfied after two seconds, as with `--only`.
+  satisfied after two seconds, as with `--only`. An `exec` whose failure
+  reboots (`installkey`'s and `init_user0`'s `vdc`) left out is a failure:
+  the boot ends, as /data cannot be encrypted without vold, vdc,
+  keystore2 and the KeyMint HAL (ADR 0016).
 - SIGINT, SIGTERM or SIGHUP to `cargo aim boot` stops the guest and
   leaves no guest process. `cargo aim boot` catches those signals rather
   than blocking them (a blocked mask survives exec, so guest-init would
@@ -989,12 +992,32 @@ storage prepared, just before it unlocks) at 7.99 s fresh (7.98-9.57) and
 (`boot_completed` 7.94-13.57 s fresh, 5.03-7.22 s warm). On 2026-10-30 warm
 boots reached 3.720, 4.378 and 4.731 s and a fresh boot 7.602 s, with the
 host load not recorded. Admission now follows `boot_completed` within
-0.07 s. The deferred app-data preparation of 217 packages ends package
-construction in every boot: 1.14-1.34 s fresh, 0.50-0.68 s warm. The
-guest reports no file-based encryption, so the original `fixAppsDataOnBoot`
-prepares DE and CE data, then migrates and recreates every system app's
-data on each boot (#2761; being an FBE device is accepted in ADR 0016; the syscall layer serves fscrypt's policy and keyring ioctls and locked directories (ENOKEY, no-key names), vold creates, stores, installs and evicts the users' keys and sets their policies as `FsCrypt.cpp` does once `ro.crypto.type=file`, and the app host then protects user 0's CE key with a secret of the Mac user's keychain and unlocks it with that secret, but the device is not FBE until slice 3); batching the creations through installd's
-`createAppDataBatched` did not shorten it. Settings'
+0.07 s. Those boots had no file-based encryption, so the original
+`fixAppsDataOnBoot` prepared DE and CE data, then migrated and recreated
+every system app's data on each boot, which ended package construction
+(1.14-1.34 s fresh, 0.50-0.68 s warm; batching through installd's
+`createAppDataBatched` did not shorten it). The guest is now an FBE device
+(ADR 0016, #2848): fstab.aim's `fileencryption=` makes `mount_all` set
+`ro.crypto.state=encrypted` and `ro.crypto.type=file`, `installkey` has
+vold make the system DE key, init's `mkdir encryption=` gives the
+top-level directories its policy, vold gives user 0's DE and CE storage
+theirs, and the app host unlocks CE with the keychain's secret, so the
+boot prepares DE data only (`reconcileAppsData ... 0x1`) and CE data at
+the unlock (#2761). Branch fix/2848 on main `3e18a88f1` (2026-11-10),
+timed from `aimctl start` (a little later than guest-init's own start)
+on throwaway data directories, three fresh boots from the FBE data
+template and the second boot of each, one guest at a time (1-minute load
+14-22): `sys.boot_completed` at 6.52, 7.01 and 7.38 s fresh and 4.88, 5.24
+and 5.46 s warm, aimctl's readiness at 7.8-8.6 s and 6.1-6.7 s. The second
+boot of a data directory installs the same system DE, user 0 DE and CE keys
+(the CE key unlocked with the keychain secret) and a new per-boot key. On a
+fresh directory the app host has written `/data/system_ce/0` before vold
+prepares user 0's CE storage, so `prepareUserStorage` fails ENOTEMPTY and
+the original `UserDataPreparer` recovers by destroying and preparing it
+again. A data directory's CE storage belongs to the image that first
+mounts it: `mount_all` refuses a data directory the derived image
+(the original LockSettingsService) booted to the app host image, and the
+reverse, naming both (ADR 0016). Settings'
 warm median first presented frame was 1.094 s after open (2026-10-30). Raw capture now waits for user-0 DE storage
 about 0.2 s on warm data; fresh data also waits for init to apply the locale.
 Full modes, HDR/color/refresh and DisplayManager information still query
@@ -3763,10 +3786,11 @@ a fresh empty-DATA template exposed a device-init race before this selector:
 `/data/misc/keystore` as `0700 keystore:keystore` only after it starts. The
 first database attach could therefore observe the new host inode before its
 guest owner metadata and fail `open(persistent.sqlite)` with EACCES. The AIM
-device now prepares `/data/misc` and `/data/misc/keystore` immediately after
-its early DATA mount; the original idempotent `post-fs-data` commands still
-reassert the same ownership. The derived-image dry-run proves this command
-precedes the `keystore2` launch. A fresh empty template for image identity
+device then prepared `/data/misc` and `/data/misc/keystore` right after its
+early DATA mount; with file-based encryption (#2848) it no longer can, as
+`/data/misc` takes the system DE key's policy, which exists only after
+`installkey`, and the original `post-fs-data` makes both as on a device.
+The FBE boots of 2026-11-10 logged no keystore database EACCES. A fresh empty template for image identity
 `b5e085834cf101c7` then reaches Settings at 200.2 s, `sys.boot_completed=1` at
 313.8 s and runtime-permission publication at 313.9 s, publishes the required
 70-file template (ASIF SHA-256 `40e134935ee9641c99d069966dc40bb503bfa6ddf9f3fa5fa9f1fe0e092f01df`),

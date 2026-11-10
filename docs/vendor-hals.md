@@ -160,7 +160,9 @@ Wi-Fi positioning or a nearby iPhone's GNSS.
   `linux-run`: the FMQ writer (wrap-around, no overwrite, the event flag),
   the sensor list, the thermal mapping and the fix conversion.
 - End to end on the derived image, with `guest-init --run --only
-  logd,servicemanager,vendor.power-default,vendor.thermal-aim,vendor.sensors-aim,vendor.gnss-aim`:
+  logd,servicemanager,vendor.power-default,vendor.thermal-aim,vendor.sensors-aim,vendor.gnss-aim`
+  (before `/data` was file-encrypted; a subset now also needs vold, vdc,
+  keystore2 and vendor.keymint-default, ADR 0016):
   - the original `service list` shows all four instances;
   - `IThermal` `getTemperatures` (`service call ... 3`) returns
     `skin` NaN/`NONE`, `cpu` 60.9 and `battery` 37.1;

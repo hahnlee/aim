@@ -177,8 +177,11 @@ fn names_that_differ_only_in_case_coexist() {
     let image = DataImage::attach(&dir, None).unwrap();
     assert_eq!(fs::read_to_string(dir.join("foo")).unwrap(), "lower");
     drop(image);
+    // A throwaway data directory's keychain file goes with it.
+    fs::write(data::keychain_of(&dir), "keychain").unwrap();
     data::remove(&dir).unwrap();
     assert!(!data::image_of(&dir).exists());
+    assert!(!data::keychain_of(&dir).exists());
 }
 
 #[test]

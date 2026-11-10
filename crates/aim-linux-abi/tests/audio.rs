@@ -28,11 +28,18 @@ use aim_guest_init::{Boot, BootOptions, RunMode};
 
 const HAL_LOG: &str = "vendor.audio-hal-aidl.log";
 const HAL_TAG: &str = "android.hardware.audio.service-aidl.aim";
+/// The audio services and what they run on; vold, vdc, keystore2 and the
+/// KeyMint HAL are post-fs-data's file-based encryption of /data, which
+/// the boot cannot go on without (ADR 0016).
 const SERVICES: &[&str] = &[
     "logd",
     "servicemanager",
     "hwservicemanager",
     "system_suspend",
+    "vold",
+    "vdc",
+    "keystore2",
+    "vendor.keymint-default",
     "vendor.audio-hal-aidl",
     "audioserver",
 ];

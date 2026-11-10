@@ -309,7 +309,7 @@ fn keys_install_and_evict_through_the_ioctls() {
 fn crypt(data: &Path) -> FsCrypt<SoftKeystore, Keyring> {
     std::fs::create_dir_all(data.join("unencrypted")).unwrap();
     std::fs::create_dir_all(data.join("misc/vold")).unwrap();
-    FsCrypt::new(data.to_path_buf(), true, 36, store(), Keyring::default())
+    FsCrypt::new(data.to_path_buf(), || true, 36, store(), Keyring::default())
 }
 
 #[test]
@@ -407,7 +407,7 @@ fn ephemeral_users_and_devices_without_fbe_store_nothing() {
 
     let mut plain = FsCrypt::new(
         scratch.0.join("plain"),
-        false,
+        || false,
         36,
         store(),
         Keyring::default(),

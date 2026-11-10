@@ -367,7 +367,9 @@ fn hex(bytes: &[u8]) -> String {
 /// and ephemeral users.
 pub struct FsCrypt<K, I> {
     pub data: PathBuf,
-    pub fbe: bool,
+    /// `IsFbeEnabled`, asked at each use: `ro.crypto.type` is set by
+    /// init's `mount_all`, after vold starts.
+    fbe: fn() -> bool,
     pub first_api_level: u32,
     pub storage: KeyStorage<K>,
     pub kernel: I,
@@ -382,7 +384,7 @@ pub struct FsCrypt<K, I> {
 impl<K: Keystore, I: Ioctl> FsCrypt<K, I> {
     pub fn new(
         data: PathBuf,
-        fbe: bool,
+        fbe: fn() -> bool,
         first_api_level: u32,
         storage: KeyStorage<K>,
         kernel: I,
@@ -431,6 +433,11 @@ impl<K: Keystore, I: Ioctl> FsCrypt<K, I> {
 
     fn install(&self, key: &KeyBuffer) -> io::Result<Policy> {
         install_key(&self.kernel, &self.data, &self.options()?, key)
+    }
+
+    /// `IsFbeEnabled`.
+    pub fn fbe(&self) -> bool {
+        (self.fbe)()
     }
 
     /// fscrypt_initialize_systemwide_keys (`fbeEnable`): the system DE key
@@ -585,7 +592,7 @@ impl<K: Keystore, I: Ioctl> FsCrypt<K, I> {
     /// The key part of fscrypt_init_user0: user 0's keys, created if
     /// missing, and every user's DE key installed.
     pub fn init_user0_keys(&mut self) -> io::Result<()> {
-        if !self.fbe {
+        if !self.fbe() {
             return Ok(());
         }
         let keys = self.user_keys();
@@ -603,7 +610,7 @@ impl<K: Keystore, I: Ioctl> FsCrypt<K, I> {
 
     /// fscrypt_create_user_keys.
     pub fn create_user_keys(&mut self, user: u32, ephemeral: bool) -> io::Result<()> {
-        if !self.fbe {
+        if !self.fbe() {
             return Ok(());
         }
         if self.ce.contains_key(&user) {
@@ -621,7 +628,7 @@ impl<K: Keystore, I: Ioctl> FsCrypt<K, I> {
     /// fscrypt_destroy_user_keys: evict the user's keys, then destroy the
     /// stored ones; every step is tried.
     pub fn destroy_user_keys(&mut self, user: u32) -> io::Result<()> {
-        if !self.fbe {
+        if !self.fbe() {
             return Ok(());
         }
         let mut failure = None;
@@ -660,7 +667,7 @@ impl<K: Keystore, I: Ioctl> FsCrypt<K, I> {
     /// fscrypt_set_ce_key_protection: store the user's CE key with
     /// `secret`, then destroy its other stored copies.
     pub fn set_ce_key_protection(&mut self, user: u32, secret: &[u8]) -> io::Result<()> {
-        if !self.fbe {
+        if !self.fbe() {
             return Ok(());
         }
         if secret.is_empty() {
@@ -715,7 +722,7 @@ impl<K: Keystore, I: Ioctl> FsCrypt<K, I> {
 
     /// fscrypt_unlock_ce_storage: install the CE key `secret` opens.
     pub fn unlock_ce_storage(&mut self, user: u32, secret: &[u8]) -> io::Result<()> {
-        if !self.fbe {
+        if !self.fbe() {
             return Ok(());
         }
         if self.ce.contains_key(&user) {
@@ -730,7 +737,7 @@ impl<K: Keystore, I: Ioctl> FsCrypt<K, I> {
 
     /// fscrypt_lock_ce_storage: evict the CE key.
     pub fn lock_ce_storage(&mut self, user: u32) -> io::Result<()> {
-        if !self.fbe {
+        if !self.fbe() {
             return Ok(());
         }
         match self.ce.remove(&user) {
@@ -748,7 +755,7 @@ impl<K: Keystore, I: Ioctl> FsCrypt<K, I> {
         user: u32,
         ce: bool,
     ) -> io::Result<Option<&Policy>> {
-        if !self.fbe {
+        if !self.fbe() {
             return Ok(None);
         }
         if uuid.is_some_and(|u| !u.is_empty()) {

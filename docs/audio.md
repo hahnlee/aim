@@ -269,7 +269,9 @@ every app's audio path on their normal course.
 ## Verified (2026-09-28, MacBook Pro, M2 Pro)
 
 `crates/aim-linux-abi/tests/audio.rs` (24 s) boots `guest-init --only
-logd,servicemanager,hwservicemanager,system_suspend,vendor.audio-hal-aidl,audioserver`.
+logd,servicemanager,hwservicemanager,system_suspend,vold,vdc,keystore2,vendor.keymint-default,vendor.audio-hal-aidl,audioserver`:
+vold, vdc, keystore2 and the KeyMint HAL encrypt /data, which a boot
+whose `installkey` cannot run ends at (ADR 0016).
 Services get /dev/null as stdio, so the test reads the HAL's messages from
 logd (`logcat -s`); the host module's own lines are in the service's log
 file, and the test fails if they show the null sink. The boot is stopped
