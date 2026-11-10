@@ -774,8 +774,13 @@ fn live(root: &Root, mut fsid: libc::fsid_t) -> io::Result<bool> {
     };
     if n < 0 {
         let error = io::Error::last_os_error();
+        // ENOENT: the path fsgetpath gave is gone. The inode was removed
+        // as the lookup ran, or APFS still named it for a moment after its
+        // removal (seen after `rm -rf` of a tree with roots): a root that
+        // is gone, as `removed` drops, rather than a change that fails for
+        // every caller until it is dropped.
         return match error.raw_os_error() {
-            Some(libc::ENOATTR | libc::ERANGE) => Ok(false),
+            Some(libc::ENOATTR | libc::ERANGE | libc::ENOENT) => Ok(false),
             _ => Err(error),
         };
     }
