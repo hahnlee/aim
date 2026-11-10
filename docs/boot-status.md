@@ -147,8 +147,10 @@ arrives during the wait without spinning on a full buffer or a TCP half-close
 (#2779). A pipe or named FIFO is never POLLPRI, POLLRDBAND, POLLWRBAND or
 POLLRDHUP, nor its read end writable, as `pipe_poll` reports it. A pipe's write
 end without readers is POLLERR|POLLOUT|POLLWRNORM to poll, select and epoll,
-never Darwin's HUP, even for a pipe that was full, whose buffer Darwin frees
-with the last reader (#2800, #2801, #2815); its read end without writers is
+never Darwin's HUP (#2800, #2801). A known difference: a pipe that was full
+is writable too, where Linux, keeping the data, reports POLLERR alone; Darwin
+frees the buffer with the last reader, whose close in any process (exit and
+SIGKILL included) leaves no record of the count (#2815). Its read end without writers is
 POLLHUP, readable only with data queued. A named FIFO does not yet report its
 other end's close. A non-TCP socket's half-close (the peer's SHUT_WR, its own SHUT_RD)
 is POLLIN|POLLRDHUP, with POLLHUP only once both directions are shut, as
