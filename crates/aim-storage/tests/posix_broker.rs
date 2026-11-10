@@ -238,13 +238,14 @@ fn explicit_shutdown_releases_endpoint_while_an_arc_is_retained() {
         process: ProcessIdentity::running(actor.id() as i32).unwrap(),
         guest_pid: 41003,
     };
-    let holder = controller.register_guest(owner).unwrap();
+    controller.register_guest(owner).unwrap();
+    assert_eq!(
+        controller.holder_process(owner.process),
+        None,
+        "a holder process starts at the first lock"
+    );
     actor.kill().unwrap();
     controller.shutdown().unwrap();
-    assert!(
-        !holder.is_live(),
-        "controller retires its holder before the guest actor is reaped"
-    );
     assert!(!actor.wait().unwrap().success());
     retained.guest_exited(owner).unwrap();
     assert_eq!(
@@ -303,20 +304,24 @@ fn controller_owns_two_guest_incarnations_and_real_lock_lifetimes() {
     let mut second = Guest::spawn();
     let first_owner = first.owner(41001);
     let second_owner = second.owner(41002);
-    let first_holder = controller.register_guest(first_owner).unwrap();
-    let second_holder = controller.register_guest(second_owner).unwrap();
-    assert_ne!(first_holder, second_holder);
-    assert_eq!(
-        controller.register_guest(first_owner).unwrap(),
-        first_holder,
-        "same incarnation rebind keeps locks"
-    );
+    controller.register_guest(first_owner).unwrap();
+    controller.register_guest(second_owner).unwrap();
+    controller.register_guest(first_owner).unwrap();
     first.init(&endpoint, &path);
     second.init(&endpoint, &path);
     assert_eq!(first.call("attach")[2], 41001);
     assert_eq!(second.call("attach")[2], 41002);
     let ticket = first.call("register")[1];
     second.call("register");
+    let first_holder = controller.holder_process(first_owner.process).unwrap();
+    let second_holder = controller.holder_process(second_owner.process).unwrap();
+    assert_ne!(first_holder, second_holder);
+    controller.register_guest(first_owner).unwrap();
+    assert_eq!(
+        controller.holder_process(first_owner.process),
+        Some(first_holder),
+        "same incarnation rebind keeps locks"
+    );
     assert_eq!(first.call("set 1 0 8")[0], 0);
     assert!(matches!(
         second.call("set 1 0 8")[0] as i32,
@@ -339,9 +344,10 @@ fn controller_owns_two_guest_incarnations_and_real_lock_lifetimes() {
         first_owner,
         "actual exec preserves process birth identity"
     );
+    controller.register_guest(first_owner).unwrap();
     assert_eq!(
-        controller.register_guest(first_owner).unwrap(),
-        first_holder
+        controller.holder_process(first_owner.process),
+        Some(first_holder)
     );
     assert_eq!(
         first.call("register")[1],

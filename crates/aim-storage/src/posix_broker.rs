@@ -380,11 +380,6 @@ impl Holder {
             rebinding: AtomicBool::new(false),
         })
     }
-    fn spawn(config: &Config, owner: Owner, controller: ProcessIdentity) -> io::Result<Arc<Self>> {
-        let holder = Self::new(config, owner, controller);
-        holder.native()?;
-        Ok(holder)
-    }
     /// The holder process, started now if it has not been.
     fn native(&self) -> io::Result<Arc<Native>> {
         let mut native = self.native.lock().unwrap();
@@ -1227,7 +1222,8 @@ impl Controller {
     }
     /// Native admission passes the actual launched child/namespace receipt.
     /// No Mach frame, Darwin UID, or guest-supplied PID can create this entry.
-    pub fn register_guest(&self, owner: Owner) -> io::Result<ProcessIdentity> {
+    /// Its holder process starts at its first lock, as a fork child's does.
+    pub fn register_guest(&self, owner: Owner) -> io::Result<()> {
         if self.stop.load(Ordering::Acquire)
             || !self.process.is_live()
             || !owner.process.is_live()
@@ -1241,11 +1237,10 @@ impl Controller {
             if holder.owner != owner {
                 return Err(error(libc::EINVAL));
             }
-            let native = holder.native()?;
-            if !native.process.is_live() {
+            if !holder.alive() {
                 return Err(error(libc::ECHILD));
             }
-            return Ok(native.process);
+            return Ok(());
         }
         if owners
             .values()
@@ -1253,11 +1248,18 @@ impl Controller {
         {
             return Err(error(libc::EEXIST));
         }
-        let holder = Holder::spawn(&self.config, owner, self.process)?;
-        let process = holder.native()?.process;
-        owners.insert(key(owner.process), holder);
+        owners.insert(
+            key(owner.process),
+            Holder::new(&self.config, owner, self.process),
+        );
         self.state.exits.watch(owner.process);
-        Ok(process)
+        Ok(())
+    }
+    /// The holder process of the registered `owner`, once its first lock
+    /// has started it.
+    pub fn holder_process(&self, owner: ProcessIdentity) -> Option<ProcessIdentity> {
+        let owners = self.state.owners.lock().unwrap();
+        Some(owners.get(&key(owner))?.started()?.process)
     }
     /// Native exec handoff retires old blocking requests, while keeping the
     /// same process's file-backed locks and cached holder descriptors.
