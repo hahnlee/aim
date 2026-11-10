@@ -471,10 +471,10 @@ impl AppHost {
         };
         // TaskLaunchParamsModifier: a mode the options leave undefined is a
         // fullscreen display area's source task's, if fullscreen or freeform.
-        let source_mode = source
-            .filter(|_| !windows && options.mode == 0)
-            .and_then(|s| self.tasks.windowing_mode(s))
-            .filter(|m| matches!(m, 1 | 5));
+        let source_mode = match source.filter(|_| !windows && options.mode == 0) {
+            Some(s) => Some(self.configured_mode(s)?).filter(|m| matches!(m, 1 | 5)),
+            None => None,
+        };
         let launch_mode = match &saved {
             Some(p) if p.windowing_mode != 0 => p.windowing_mode,
             _ => source_mode.unwrap_or(options.mode),
@@ -627,27 +627,29 @@ impl AppHost {
         // The launch mode: the options', else a fullscreen display area's
         // source task's if fullscreen or freeform
         // (`canInheritWindowingModeFromSource`), else the task's own.
-        let source_mode = source
-            .filter(|_| options.mode == 0 && !windows)
-            .and_then(|s| self.tasks.windowing_mode(s))
-            .filter(|m| matches!(m, 1 | 5));
-        let root = self.tasks.parent(id).unwrap_or(id);
-        let in_multi_window = |host: &Self| {
-            host.task_resolved_mode(root)
-                .map(|m| matches!(m, 2 | 5 | 6))
-                .map_err(state)
+        let source_mode = match source.filter(|_| options.mode == 0 && !windows) {
+            Some(s) => Some(self.configured_mode(s)?).filter(|m| matches!(m, 1 | 5)),
+            None => None,
         };
-        let own = self.task_resolved_mode(id).map_err(state)?;
+        let own = self.configured_mode(id)?;
         let launch_mode = match (options.mode, source_mode) {
             (0, Some(m)) => m,
             (0, None) => own,
             (m, _) => m,
         };
+        // `inMultiWindowMode` of a root task's configured mode: pinned,
+        // freeform or multi-window.
+        let multi_window = |mode| matches!(mode, 2 | 5 | 6);
+        let root = self.tasks.parent(id);
+        let root_mode = match root {
+            Some(root) => self.configured_mode(root)?,
+            None => own,
+        };
         // In its own mode with no launch bounds, a task outside a
         // multi-window root task would only record default freeform bounds
         // as its last non-fullscreen ones, which it takes by default entering
         // freeform without them (`desktop_bounds`).
-        if launch_mode == own && options.bounds.is_none() && !in_multi_window(self)? {
+        if launch_mode == own && options.bounds.is_none() && !multi_window(root_mode) {
             return Ok(());
         }
         let display = self.display()?;
@@ -691,32 +693,54 @@ impl AppHost {
         let area_mode = if windows { 5 } else { 1 };
         let update = launch_mode != area_mode
             || (!matches!(requested_mode, 0 | 2) && requested_mode != launch_mode);
-        if update && self.tasks.parent(id).is_none() {
-            let mode = self.valid_task_mode(launch_mode, id)?;
-            if mode != 0 && mode != self.task_resolved_mode(id).map_err(state)? {
-                let change = self.task_change(id, Some(mode), None).map_err(state)?;
-                self.apply_task_change(id, change).map_err(state)?;
+        let mode = match root {
+            None if update => {
+                Some(self.valid_task_mode(launch_mode, id)?).filter(|&m| m != 0 && m != own)
             }
-        }
-        let Some(bounds) = bounds else {
-            return Ok(());
+            _ => None,
         };
-        // A task whose root task is in a multi-window mode (pinned, freeform
-        // or multi-window) requests the bounds (`Task.setBounds`), resolved
-        // in its own mode; any other records them as its last non-fullscreen
-        // bounds, saved when its configuration next changes, and stays.
-        if in_multi_window(self)? {
-            return self
-                .move_task_requesting(id, bounds, Some(Some(bounds)), Mover::Android)
-                .map_err(state);
+        // Then a task whose root task is in a multi-window mode requests the
+        // bounds (`Task.setBounds`), resolved in its own mode, in the same
+        // change as its mode; any other records them as its last
+        // non-fullscreen bounds, saved when its configuration next changes.
+        let root_mode = if root.is_none() {
+            mode.unwrap_or(own)
+        } else {
+            root_mode
+        };
+        let requested = bounds.filter(|_| multi_window(root_mode));
+        if mode.is_some() {
+            let change = self
+                .task_change(id, mode, requested.map(Some))
+                .map_err(state)?;
+            self.apply_task_change(id, change).map_err(state)?;
+        } else if let Some(b) = requested {
+            self.move_task_requesting(id, b, Some(Some(b)), Mover::Android)
+                .map_err(state)?;
         }
-        let mut tasks = self.tasks.tasks.lock().unwrap();
-        let task = tasks
-            .iter_mut()
-            .find(|t| t.id == id)
-            .ok_or_else(|| state(format!("no task {id}")))?;
-        task.restore_bounds = Some(bounds);
+        if let Some(bounds) = bounds.filter(|_| requested.is_none()) {
+            let mut tasks = self.tasks.tasks.lock().unwrap();
+            let task = tasks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .ok_or_else(|| state(format!("no task {id}")))?;
+            task.restore_bounds = Some(bounds);
+        }
         Ok(())
+    }
+
+    /// Task `id`'s windowing mode as its configuration has it
+    /// (`getWindowingMode`): an organizer root task's, its own where its
+    /// configuration is of its own bounds (`Tasks::own_bounds`), else the
+    /// global configuration's, as the root home task's.
+    fn configured_mode(&self, id: i32) -> Result<i32, Exception> {
+        if let Some(root) = self.tasks.root(id) {
+            return Ok(root.windowing_mode);
+        }
+        match self.tasks.own_bounds(id) {
+            Some((mode, _)) => Ok(mode),
+            None => Ok(self.global_configuration()?.window.windowing_mode),
+        }
     }
 
     /// Task `id` is in front and focused: its layer goes over the others,
@@ -4454,6 +4478,141 @@ pub(super) mod tests {
             );
             assert_eq!(task8(), (6, Some(default)));
             assert_eq!(host.tasks.parent(8), Some(root));
+        });
+    }
+
+    /// Turns on freeform window management of `host`'s device.
+    fn enable_freeform(host: &AppHost) {
+        let change = super::super::settings::Change {
+            value: Some("1"),
+            tag: None,
+            make_default: false,
+            package: None,
+            caller_system: true,
+            overrideable_by_restore: false,
+        };
+        host.platform()
+            .unwrap()
+            .settings
+            .insert(
+                super::super::settings::Table::Global,
+                "enable_freeform_support",
+                &change,
+                false,
+            )
+            .unwrap();
+    }
+
+    /// The root home task in window mode is configured as the global
+    /// configuration has it, fullscreen: a start into it, its own or from
+    /// it, lays out nothing.
+    #[test]
+    fn a_start_into_the_root_home_task_keeps_its_bounds() {
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            enable_freeform(host);
+            let (_thread, _, _receive, _) = wct_tasks(host, export, Rect::default());
+            let (home, _) = home_task(host);
+            let place = |host: &AppHost| {
+                let tasks = host.tasks.tasks.lock().unwrap();
+                let t = tasks.iter().find(|t| t.id == home).unwrap();
+                (t.windowing_mode, t.bounds, t.requested_bounds)
+            };
+            let before = place(host);
+            let info = host.activity_info_of("p", "p.Main").unwrap();
+            host.apply_task_launch_options(home, Default::default(), &info, Some(home))
+                .unwrap();
+            assert_eq!(place(host), before);
+        });
+    }
+
+    /// A reused root task whose mode changes takes the launch bounds in the
+    /// same change: its Mac window moves once, to them.
+    #[test]
+    fn a_reused_task_changes_its_mode_and_bounds_at_once() {
+        use super::super::activity_options::LaunchOptions;
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            enable_freeform(host);
+            let old = Rect {
+                left: 100,
+                top: 100,
+                right: 900,
+                bottom: 1500,
+            };
+            let (_thread, activities, mut receive, _) = wct_tasks(host, export, old);
+            host.activities
+                .records
+                .lock()
+                .unwrap()
+                .get_mut(&activities[1])
+                .unwrap()
+                .info
+                .resize_mode = 2;
+            {
+                let mut tasks = host.tasks.tasks.lock().unwrap();
+                let t = tasks.iter_mut().find(|t| t.id == 8).unwrap();
+                t.windowing_mode = 1;
+                t.requested_mode = 1;
+                t.requested_bounds = None;
+                t.resolved_bounds = None;
+                t.restore_bounds = None;
+            }
+            let mut bytes = Vec::new();
+            let _ = receive.read_to_end(&mut bytes);
+            let info = host.activity_info_of("p", "p.Main").unwrap();
+            let options = LaunchOptions {
+                mode: 5,
+                ..Default::default()
+            };
+            host.apply_task_launch_options(8, options, &info, None)
+                .unwrap();
+            let display = host.display().unwrap();
+            let area = Rect {
+                left: 0,
+                top: 0,
+                right: display.0.width,
+                bottom: display.0.height,
+            };
+            let default = super::super::freeform::default_bounds(
+                &super::super::freeform::Activity::from(&info),
+                area,
+                display.0.density_dpi(),
+                false,
+                &[],
+            );
+            assert_eq!(host.tasks.windowing_mode(8), Some(5));
+            assert_eq!(host.tasks.bounds(8), Some(default));
+            let mut bytes = Vec::new();
+            let _ = receive.read_to_end(&mut bytes);
+            let records: Vec<_> = bytes
+                .chunks_exact(size_of::<Record>())
+                // SAFETY: `Record` is plain old data, `c` one's bytes.
+                .map(|c| unsafe { std::ptr::read_unaligned(c.as_ptr().cast::<Record>()) })
+                .filter(|r| r.op == window::TASK && r.task == 8)
+                .map(|r| r.bounds)
+                .collect();
+            let d = [default.left, default.top, default.right, default.bottom];
+            assert_eq!(records, [d]);
+        });
+    }
+
+    /// On a fullscreen display area, a start from the root home task, of
+    /// the global configuration's fullscreen mode, takes a reused
+    /// multi-window task to fullscreen (`canInheritWindowingModeFromSource`).
+    #[test]
+    fn a_start_from_the_root_home_task_inherits_its_fullscreen_mode() {
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let (_thread, _, _receive, _) = tasks_in_mode(host, export, Rect::default(), false);
+            let (home, _) = home_task(host);
+            {
+                let mut tasks = host.tasks.tasks.lock().unwrap();
+                let t = tasks.iter_mut().find(|t| t.id == 7).unwrap();
+                t.windowing_mode = 6;
+                t.requested_mode = 6;
+            }
+            let info = host.activity_info_of("p", "p.Main").unwrap();
+            host.apply_task_launch_options(7, Default::default(), &info, Some(home))
+                .unwrap();
+            assert_eq!(host.tasks.windowing_mode(7), Some(1));
         });
     }
 
