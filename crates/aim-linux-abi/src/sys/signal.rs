@@ -1747,22 +1747,35 @@ fn libc_getpid() -> i32 {
 
 /// A signal another process of the namespace sent through the agent
 /// (`ptrace`): to thread `tid` of this process, or to the process (0).
-pub fn from_peer(tid: i32, info: Siginfo) -> i64 {
+/// The result, and the SIGKILL or SIGSTOP the sender raises through
+/// Darwin before it returns: Darwin ends or stops the whole process, its
+/// agent with it, at once, so the agent cannot reply after raising it,
+/// and Linux makes it pending before the sender's tgkill returns (a later
+/// SIGCONT from the sender undoes the stop).
+pub fn from_peer(tid: i32, info: Siginfo) -> (i64, Option<i32>) {
     if !valid(info.signo as u64) {
-        return -(EINVAL as i64);
+        return (-(EINVAL as i64), None);
     }
     // Only the namespace's own processes reach the agent: a private
     // namespace's init drops what it has no handler for, as `kill` does.
     if unkillable_ignores(if tid == 0 { thread::main_tid() } else { tid }, info.signo) {
-        return 0;
+        return (0, None);
     }
-    if tid == 0 {
-        return send_process(info);
+    let th = match tid {
+        0 => None,
+        _ => match thread::find(tid) {
+            Some(th) => Some(th),
+            None => return (-(ESRCH as i64), None),
+        },
+    };
+    if matches!(info.signo, SIGKILL | SIGSTOP) {
+        let taken = th.map_or(!thread::group_exiting(), |th| th.accepts_signals());
+        return (0, taken.then_some(info.signo));
     }
-    match thread::find(tid) {
-        Some(th) => send_thread(&th, info),
-        None => -(ESRCH as i64),
-    }
+    (
+        th.map_or_else(|| send_process(info), |th| send_thread(&th, info)),
+        None,
+    )
 }
 
 /// kill(pid, sig). Other processes are signalled through Darwin, which has

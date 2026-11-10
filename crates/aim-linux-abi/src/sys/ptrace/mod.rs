@@ -514,12 +514,26 @@ pub fn remote_signal(pid: i32, tid: i32, info: &crate::sys::sigframe::Siginfo) -
             w.u64(f);
         }
     });
+    // A process that is ending, or ended and is not reaped, keeps its pid,
+    // and a signal to it succeeds (Linux's kill of a zombie): its agent is
+    // gone, or went before it replied. Its other threads are released at
+    // exit (`release_task`), so one sent to them fails.
+    let zombie = |e: i64| e == -(ESRCH as i64) && (tid == 0 || tid == pid) && pidns::ending(pid);
     match call(pid, &req) {
-        Ok((r, _)) => r,
-        // A process that is ending, or ended and is not reaped, keeps its
-        // pid, and a signal to it succeeds (Linux's kill of a zombie):
-        // its agent is gone, or went before it replied.
-        Err(e) if e == -(ESRCH as i64) && pidns::ending(pid) => 0,
+        Ok((r, rest)) => match Reader::new(&rest).i32() {
+            0 => r,
+            // SIGKILL or SIGSTOP, which the target cannot raise and still
+            // reply: pending before this returns, as Linux has it.
+            // SAFETY: plain kill of a process of the namespace.
+            raise => match crate::errno::check(unsafe {
+                libc::kill(pid, crate::sys::signal::to_host(raise))
+            } as i64)
+            {
+                e if zombie(e) => 0,
+                e => e,
+            },
+        },
+        Err(e) if zombie(e) => 0,
         Err(e) => e,
     }
 }
