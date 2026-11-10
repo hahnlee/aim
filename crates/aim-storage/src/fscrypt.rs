@@ -315,7 +315,8 @@ pub fn inherit(parent: &Path, child: &Path) -> io::Result<()> {
 /// policy, takes its directory's, after the directories above it made with
 /// it have taken theirs. Linux gives no inode below an encrypted directory
 /// none, so the walk ends at the first inode with a policy, or at the root
-/// of the volume in a tree without any.
+/// of the volume in a tree without any: the data filesystem is a volume of
+/// its own ([`crate::data`]), so it never leaves `/data`.
 pub fn adopt(path: &Path) -> io::Result<()> {
     let device = fs::symlink_metadata(path)?.dev();
     let mut made = Vec::new();
@@ -1109,6 +1110,12 @@ mod tests {
         fs::write(&recorded, b"").unwrap();
         crate::guest_inode::record(&recorded, Default::default()).unwrap();
         assert!(super::context(&recorded).unwrap().is_some());
+        // An owner that gave its inode a policy when it made it changes
+        // the guest owner without adopting.
+        let changed = system.join("changed");
+        fs::write(&changed, b"").unwrap();
+        crate::guest_inode::change(&changed, Default::default()).unwrap();
+        assert_eq!(super::context(&changed).unwrap(), None);
         // A copy made into a directory without a policy drops its source's.
         let copy = plain.join("copy");
         fs::copy(&file, &copy).unwrap();

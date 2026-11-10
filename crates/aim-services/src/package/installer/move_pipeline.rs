@@ -196,13 +196,13 @@ impl InstallOwner for Adapter {
             .write(true)
             .open(&claim_path)
             .map_err(io_error)?;
-        aim_storage::fscrypt::adopt(&claim_path).map_err(io_error)?;
         let claim = Claim {
             path: claim_path,
             _file: file,
             code: None,
             errors: self.errors.clone(),
         };
+        aim_storage::fscrypt::adopt(&claim.path).map_err(io_error)?;
         let (target_guest, target_host) = if plan.complete {
             let guest = installed_path(plan)?;
             let host = (self.native.apks.files)(&guest)
@@ -277,8 +277,8 @@ impl PreparedMove for Prepared {
         let path = (self.native.apks.files)(&guest)
             .ok_or_else(|| error("Move staging VFS view missing"))?;
         fs::create_dir(&path).map_err(io_error)?;
-        aim_storage::fscrypt::adopt(&path).map_err(io_error)?;
         self.claim.capture(&path)?;
+        aim_storage::fscrypt::adopt(&path).map_err(io_error)?;
         copy_cluster(&self.source_host, &path).map_err(io_error)?;
         // The guest stage is mapped by the same Files owner as the parser.
         self.target_guest = Some(guest);

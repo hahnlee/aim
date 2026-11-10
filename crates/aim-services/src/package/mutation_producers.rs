@@ -290,8 +290,6 @@ impl Owner {
         let stage = (self.native.apks.files)(&stage_guest)
             .ok_or_else(|| illegal("Compressed stage VFS owner unavailable"))?;
         fs::create_dir(&stage).map_err(io_error)?;
-        aim_storage::fscrypt::adopt(&stage).map_err(io_error)?;
-        fs::set_permissions(&stage, fs::Permissions::from_mode(0o755)).map_err(io_error)?;
         let metadata = fs::symlink_metadata(&stage).map_err(io_error)?;
         let mut stage = Stage {
             path: stage,
@@ -300,6 +298,8 @@ impl Owner {
             keep: false,
             errors: self.errors.clone(),
         };
+        aim_storage::fscrypt::adopt(&stage.path).map_err(io_error)?;
+        fs::set_permissions(&stage.path, fs::Permissions::from_mode(0o755)).map_err(io_error)?;
         let mut count = 0;
         for entry in fs::read_dir(source).map_err(io_error)? {
             let entry = entry.map_err(io_error)?;

@@ -265,14 +265,17 @@ turns FBE on and depends on slice 4's CE protection: it lands after it.
   writers that record no guest owner (the instant app store, the native
   writer's lease, compressed and moved package stages) call it directly;
   a host copy takes its directory's policy (`inherit`), not its source's.
-  An inode written past both, or written by an older build, has none;
-  nothing reports such inodes yet (#2906). The app host's writers of
-  `/data/system_ce/<user>` wait for the user's unlock, as their originals
-  do (usage stats, shortcuts, widgets, launch params, accounts' CE
-  database, hibernation), so vold prepares a fresh directory's CE storage
-  at the first try.
+  guest-init's builtins give a policy when they create, so their chown and
+  chmod records (`guest_inode::change`) do not adopt. An inode written past
+  both, or written by an older build, has none; nothing reports such
+  inodes yet (#2906). The app host's writers of `/data/system_ce/<user>`
+  wait for the user's unlock, as their originals do (usage stats,
+  shortcuts, widgets, launch params, accounts' CE database, hibernation),
+  so vold prepares a fresh directory's CE storage at the first try.
 - The hot path: inheritance costs an xattr write per inode created under
-  `/data`; lookups pay only while a key is absent. Slice 1 measures
+  `/data`, and a host-side adoption an xattr read and an `lstat` per
+  directory it climbs, up to the first with a policy or the data volume's
+  root; lookups pay only while a key is absent. Slice 1 measures
   `startup_bench` and a boot before and after.
 - A partial FBE (properties before slices 1-3) is worse than none: the
   properties flip only in slice 3, after the ABI and vold are in.

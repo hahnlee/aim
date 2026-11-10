@@ -493,7 +493,7 @@ impl FsOps {
         if self.apply {
             let on_inode = matches!(resolved.area, Area::Writable { .. } | Area::Kernfs { .. })
                 && fs::symlink_metadata(&resolved.host).is_ok()
-                && crate::guest_inode::record(
+                && crate::guest_inode::change(
                     &resolved.host,
                     crate::guest_inode::GuestInode { uid, gid, mode },
                 )
