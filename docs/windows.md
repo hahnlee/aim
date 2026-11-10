@@ -179,7 +179,8 @@ itself (`OP_WINDOWS`, from guest-init) and, in window mode:
   source task of that size; launch bounds turned to the activity's
   orientation; an activity's `<layout>` size and gravity, which a start
   into its running task applies again (`getLayoutBounds`); then moved off
-  another freeform task's corners), and
+  another freeform task's corners; an unresizeable activity's too, not
+  fullscreen as the original's step 2.3 would have it, by decision, #2785), and
   reports it (`TASK`, `PACKAGE`, `ACTIVITY`, then `FRONT`). Its
   activities' configuration is the freeform task's (`TaskFragment
   .computeConfigResourceOverrides`: its sizes from its bounds). Every
@@ -511,15 +512,18 @@ display covers the main screen only).
 
 An activity start into a running task from anywhere but a shim (an app's
 own `FLAG_ACTIVITY_NEW_TASK` start, a notification's `PendingIntent`,
-`am start`) moves its window by freeform's cascade: freeform lays the
-reused task out again from its persisted bounds, and moves it off itself
-(#613). An activity of a fixed manifest orientation that comes to the top
+`am start`) lays the reused task out again from the params persisted for
+its component (`LaunchParamsController.calculate`): their bounds, kept off
+the other freeform tasks. The app host leaves the task itself out of that
+check, which the original includes, so a running window is not moved off
+itself (#613); bounds another task of the component persisted move it
+there, and a persisted fullscreen mode makes it fullscreen. An activity of a fixed manifest orientation that comes to the top
 of a running task does not turn the window: a freeform task is never the
 display's orientation source, so `onTaskRequestedOrientationChanged` does
 not come, and the top activity's `ActivityInfo` is only in the
 `RunningTaskInfo` past its `Configuration`, with a whole `ApplicationInfo`
 in it. The native task organizer's `onTaskInfoChanged` gives it (#593,
-#463). Both are covered by the window shell, which makes
-window mode desktop windowing (a fullscreen display, freeform tasks: no
-persisted bounds to lay a task out from) and reports the top activity's
+#463). The system_server window shell covered both by making window mode
+desktop windowing (a fullscreen display, freeform tasks: no persisted
+bounds to lay a task out from) and reporting the top activity's
 orientation to the bridge ([task-organizer.md](task-organizer.md)).

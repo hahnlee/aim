@@ -495,16 +495,7 @@ impl AppHost {
         // this display in a freeform display area (window mode) give the mode and
         // the last non-fullscreen bounds. Only a mode this owner supports is reused.
         let saved = if windows && !home && options.bounds.is_none() {
-            let name = crate::package::preferred::unflatten(&real_activity)
-                .ok_or_else(|| Exception::illegal_argument("invalid task component"))?;
-            self.tasks
-                .launch_params(self.data()?)?
-                .get((uid / super::PER_USER_RANGE) as i32, &name)
-                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?
-                .filter(|p| {
-                    p.display_unique_id.as_deref() == Some(format!("local:{}", display.id).as_str())
-                        && matches!(p.windowing_mode, 0 | 1 | 5)
-                })
+            self.persisted_launch_params(uid, &real_activity)?
         } else {
             None
         };
@@ -751,6 +742,28 @@ impl AppHost {
         Ok(id)
     }
 
+    /// `LaunchParamsPersister.getLaunchParams` of `uid`'s `real_activity`:
+    /// its params persisted for this display, if of a mode this owner
+    /// supports.
+    fn persisted_launch_params(
+        &self,
+        uid: u32,
+        real_activity: &str,
+    ) -> Result<Option<Params>, Exception> {
+        let name = crate::package::preferred::unflatten(real_activity)
+            .ok_or_else(|| Exception::illegal_argument("invalid task component"))?;
+        let display = format!("local:{}", self.display()?.0.id);
+        Ok(self
+            .tasks
+            .launch_params(self.data()?)?
+            .get((uid / super::PER_USER_RANGE) as i32, &name)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?
+            .filter(|p| {
+                p.display_unique_id.as_deref() == Some(display.as_str())
+                    && matches!(p.windowing_mode, 0 | 1 | 5)
+            }))
+    }
+
     /// `cascadeBounds` from the task `source`, if freeform: its bounds moved
     /// right and down on the display area `area`.
     fn cascade_from(&self, source: Option<i32>, area: Rect, density_dpi: i32) -> Option<Rect> {
@@ -912,13 +925,25 @@ impl AppHost {
             right: display.0.width,
             bottom: display.0.height,
         };
-        let (requested_mode, overrides) = {
+        let (requested_mode, overrides, uid, real_activity) = {
             let tasks = self.tasks.tasks.lock().unwrap();
             let t = tasks
                 .iter()
                 .find(|t| t.id == id)
                 .ok_or_else(|| state(format!("no task {id}")))?;
-            (t.requested_mode, t.requested_bounds.is_some())
+            (
+                t.requested_mode,
+                t.requested_bounds.is_some(),
+                t.uid,
+                t.real_activity.clone(),
+            )
+        };
+        // `LaunchParamsController.calculate` starts from the task's
+        // persisted params, which a freeform display area records.
+        let saved = if windows {
+            self.persisted_launch_params(uid, &real_activity)?
+        } else {
+            None
         };
         // The bounds the mode's policy takes from the options; a fullscreen or
         // freeform task of no requested bounds lays out freeform bounds from
@@ -933,15 +958,38 @@ impl AppHost {
                 && activity.layout.is_some()
                 && self.supports_freeform()? =>
             {
-                super::freeform::layout_bounds(&activity, area, dpi, false, None)
+                let current = saved.as_ref().map(|p| p.bounds);
+                super::freeform::layout_bounds(&activity, area, dpi, false, current)
             }
             initial => initial,
         };
-        let launch_mode = match launch_mode {
-            0 if windows && initial.is_some() => 5,
-            mode => mode,
+        // Without them, the persisted params give a freeform display area's
+        // launch its mode, and their bounds as they are, kept off the other
+        // freeform tasks if freeform (`fullyResolvedCurrentParam`); a mode
+        // but freeform resolves the launch without bounds.
+        let saved = saved.filter(|_| initial.is_none());
+        let saved_bounds = saved
+            .as_ref()
+            .map(|p| p.bounds)
+            .filter(|b| b.width() > 0 && b.height() > 0);
+        let launch_mode = match (launch_mode, &saved) {
+            (_, Some(p)) if p.windowing_mode != 0 => p.windowing_mode,
+            (0, _) if windows && initial.is_some() => 5,
+            (mode, _) => mode,
         };
-        let bounds = if matches!(launch_mode, 1 | 5) && !overrides {
+        let resolved =
+            saved_bounds.is_some() || saved.is_some_and(|p| !matches!(p.windowing_mode, 0 | 5));
+        // Step 2.3, the policy of unresizeable activities on a freeform
+        // display area, is left out: in window mode they open as freeform
+        // Mac windows as any other (#2785).
+        let bounds = if resolved {
+            saved_bounds.map(|b| match launch_mode {
+                5 => {
+                    super::freeform::restored_bounds(area, &self.tasks.freeform_bounds(Some(id)), b)
+                }
+                _ => b,
+            })
+        } else if matches!(launch_mode, 1 | 5) && !overrides {
             let suggested = initial.or_else(|| {
                 (launch_mode == 5)
                     .then(|| self.cascade_from(source, area, dpi))
@@ -3682,7 +3730,14 @@ pub(super) mod tests {
                     .restore_bounds,
                 Some(expected)
             );
-            // The same task owner used by #1678 resolves fullscreen bounds to the display.
+            // The same task owner used by #1678 resolves fullscreen bounds to
+            // the display, without persisted params of the component, whose
+            // mode would be the launch's.
+            host.tasks
+                .launch_params(host.data().unwrap())
+                .unwrap()
+                .remove_package("p")
+                .unwrap();
             host.apply_task_launch_options(
                 7,
                 super::super::activity_options::LaunchOptions {
@@ -4534,14 +4589,6 @@ pub(super) mod tests {
             // Of no orientation, as parsed: launch bounds keep theirs.
             info.screen_orientation = -1;
             let display = host.display().unwrap();
-            let area = r(0, 0, display.0.width, display.0.height);
-            let default = super::super::freeform::default_bounds(
-                &super::super::freeform::Activity::from(&info),
-                area,
-                display.0.density_dpi(),
-                false,
-                &[],
-            );
             let launch = r(200, 300, 700, 1100);
             let apply = |task, mode, bounds| {
                 let options = LaunchOptions {
@@ -4596,15 +4643,16 @@ pub(super) mod tests {
             assert_eq!(saved(), before);
             host.task_idle(8);
             assert_eq!(saved(), Some((1, launch)));
-            // A freeform launch of no bounds records default freeform bounds.
-            assert_eq!(apply(8, 5, None), (1, fills, None, Some(default)));
+            // A freeform launch of no bounds takes the persisted params, their
+            // mode (`fullyResolvedCurrentParam`) and bounds.
+            assert_eq!(apply(8, 5, None), (1, fills, None, Some(launch)));
 
             // In a freeform root task, a task of no requested bounds takes
-            // the launch's, else default freeform bounds.
+            // the launch's, else the persisted ones.
             let free = host.create_root_task(5, None).unwrap();
             into(8, free);
             let (mode, bounds, ..) = apply(8, 5, None);
-            assert_eq!((mode, bounds), (5, default));
+            assert_eq!((mode, bounds), (5, launch));
             host.tasks
                 .tasks
                 .lock()
@@ -5364,6 +5412,77 @@ pub(super) mod tests {
             host.apply_task_launch_options(8, Default::default(), &info, None, false)
                 .unwrap();
             assert_eq!(host.tasks.own_bounds(8), Some((5, layout)));
+        });
+    }
+
+    /// `LaunchParamsController.calculate` of a start into a running task
+    /// starts from the component's persisted params: their bounds lay a
+    /// freeform task out again, kept off the other freeform tasks but not
+    /// off itself (#613), and their mode is the launch's.
+    #[test]
+    fn a_reused_task_takes_its_persisted_launch_params() {
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            enable_freeform(host);
+            let old = Rect {
+                left: 100,
+                top: 100,
+                right: 900,
+                bottom: 1500,
+            };
+            let (_thread, activities, _receive, _) = wct_tasks(host, export, old);
+            host.activities
+                .records
+                .lock()
+                .unwrap()
+                .get_mut(&activities[1])
+                .unwrap()
+                .info
+                .resize_mode = 2;
+            let info = host.activity_info_of("p", "p.Main").unwrap();
+            let display = format!("local:{}", host.display().unwrap().0.id);
+            let persist = |windowing_mode, bounds| {
+                let real = host.tasks.tasks.lock().unwrap()[1].real_activity.clone();
+                host.tasks
+                    .launch_params(host.data().unwrap())
+                    .unwrap()
+                    .save(
+                        0,
+                        &crate::package::preferred::unflatten(&real).unwrap(),
+                        Params {
+                            display_unique_id: Some(display.clone()),
+                            windowing_mode,
+                            bounds,
+                            ..Default::default()
+                        },
+                        false,
+                    )
+                    .unwrap();
+            };
+            let start = || {
+                host.apply_task_launch_options(8, Default::default(), &info, None, false)
+                    .unwrap();
+                let tasks = host.tasks.tasks.lock().unwrap();
+                let t = tasks.iter().find(|t| t.id == 8).unwrap();
+                (t.windowing_mode, t.bounds, t.restore_bounds)
+            };
+            // Its own bounds, as it persists them: it stays; at task 7's
+            // too, it moves off them.
+            persist(5, old);
+            assert_ne!(start().1, old);
+            let moved = host.tasks.bounds(8).unwrap();
+            persist(5, moved);
+            assert_eq!(start().1, moved);
+            let elsewhere = Rect {
+                left: 150,
+                top: 250,
+                right: 850,
+                bottom: 1350,
+            };
+            persist(5, elsewhere);
+            assert_eq!(start().1, elsewhere);
+            persist(1, old);
+            let (mode, _, restore) = start();
+            assert_eq!((mode, restore), (1, Some(old)));
         });
     }
 
