@@ -3,7 +3,10 @@
 //! lock is the device's keyguard (#1887): the user is present when it is
 //! dismissed, the Mac's screen unlocked, and at start or on waking while
 //! it is not locked, as the original sends it on waking with no lock
-//! screen to show. Sent before the boot has completed, it waits for SystemUI's
+//! screen to show. Unlocked while Android sleeps (it sleeps while the Mac
+//! is locked, docs/power.md), the lock screen is dismissed once the wake
+//! has turned the screen on: one USER_PRESENT, after SCREEN_ON, as a
+//! device's keyguard sends it when dismissed after a wake. Sent before the boot has completed, it waits for SystemUI's
 //! `onBootCompleted` (`mBootSendUserPresent`). `LockPatternUtils
 //! .userPresent`, which reports the unlock to strong auth, is #1888.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
@@ -32,6 +35,10 @@ struct State {
     pending: bool,
     /// Whether the Mac's screen is locked, once told.
     locked: Option<bool>,
+    /// Whether Android is asleep (PowerManager's interactive state).
+    asleep: bool,
+    /// Unlocked while asleep: dismissed once the screen is on.
+    dismissed_asleep: bool,
 }
 
 impl State {
@@ -59,7 +66,8 @@ impl AppHost {
             let mut state = self.keyguard.0.lock().unwrap();
             let dismissed = !locked && state.locked != Some(false);
             state.locked = Some(locked);
-            dismissed && state.user_present()
+            state.dismissed_asleep = dismissed && state.asleep;
+            dismissed && !state.asleep && state.user_present()
         };
         if send {
             self.send_user_present();
@@ -71,11 +79,29 @@ impl AppHost {
     pub(super) fn keyguard_woke(&self) {
         let send = {
             let mut state = self.keyguard.0.lock().unwrap();
-            state.locked == Some(false) && state.user_present()
+            state.asleep = false;
+            !state.dismissed_asleep && state.locked == Some(false) && state.user_present()
         };
         if send {
             self.send_user_present();
         }
+    }
+
+    /// Notifier's SCREEN_ON, sent: a lock screen dismissed while asleep
+    /// has now been shown and dismissed.
+    pub(super) fn keyguard_screen_on(&self) {
+        let send = {
+            let mut state = self.keyguard.0.lock().unwrap();
+            std::mem::take(&mut state.dismissed_asleep) && state.user_present()
+        };
+        if send {
+            self.send_user_present();
+        }
+    }
+
+    /// The policy's `startedGoingToSleep`.
+    pub(super) fn keyguard_slept(&self) {
+        self.keyguard.0.lock().unwrap().asleep = true;
     }
 
     /// SystemUI's `onBootCompleted`, on the boot's BOOT_COMPLETED: the

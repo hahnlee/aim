@@ -645,6 +645,73 @@ fn user_present_follows_a_wake_while_the_mac_is_unlocked() {
     });
 }
 
+/// Android sleeps while the Mac is locked: an unlock then is the lock
+/// screen's dismissal after the wake, one USER_PRESENT after SCREEN_ON,
+/// not one at the unlock and another at the wake.
+#[test]
+fn an_unlock_while_asleep_is_present_once_after_screen_on() {
+    const PRESENT: &str = "android.intent.action.USER_PRESENT";
+    const SCREEN_ON: &str = "android.intent.action.SCREEN_ON";
+    use super::super::power_service::PowerManager;
+    use aim_service_aidl::android_os_ipowermanager as pm;
+    crate::system::with_discovery_binders(|host, _, _, export| {
+        let permissions = super::super::permission_manager::PermissionManager::with_system(
+            host.clone(),
+            Default::default(),
+        );
+        assert!(host.permission_manager.set(Arc::new(permissions)).is_ok());
+        let power = host
+            .power_service
+            .get_or_init(|| Arc::new(PowerManager::new(host.clone())));
+        let received = register_filter(host, export, "p", 10100, false);
+        let mut filter = IntentFilter::default();
+        filter.add_action(PRESENT);
+        filter.add_action(SCREEN_ON);
+        host.broadcasts.state.lock().unwrap().receivers[0].filters[0].filter = filter;
+        let invoke = |code, parcel: &Parcel| {
+            power
+                .transact(&mut Call {
+                    code,
+                    flags: 0,
+                    sender_pid: 1000,
+                    sender_euid: 1000,
+                    data: parcel.reader(),
+                })
+                .unwrap()
+        };
+        host.mac_screen_at_start(true);
+        host.keyguard_boot_completed();
+        let mut p = Parcel::new();
+        pm::GoToSleep {
+            time: 10,
+            reason: 6,
+            flags: 0,
+        }
+        .write(&mut p);
+        pm::read_go_to_sleep_reply(&mut invoke(pm::GO_TO_SLEEP, &p).reader())
+            .unwrap()
+            .unwrap();
+        host.mac_screen_locked(false);
+        assert!(received.recv_timeout(Duration::from_millis(100)).is_err());
+        let mut p = Parcel::new();
+        pm::WakeUp {
+            time: 11,
+            reason: 6,
+            details: Some("android.policy:KEY".into()),
+            op_package_name: Some("android".into()),
+        }
+        .write(&mut p);
+        pm::read_wake_up_reply(&mut invoke(pm::WAKE_UP, &p).reader())
+            .unwrap()
+            .unwrap();
+        let mut actions = Vec::new();
+        while let Ok((intent, _)) = received.recv_timeout(Duration::from_millis(300)) {
+            actions.extend(intent.intent.action);
+        }
+        assert_eq!(actions, [SCREEN_ON, PRESENT]);
+    });
+}
+
 /// Locked at start, the boot completes with nobody present.
 #[test]
 fn user_present_waits_for_an_unlock_after_a_locked_start() {

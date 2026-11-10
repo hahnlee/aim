@@ -8,7 +8,8 @@
 //! (WindowManagerService's hold screen), keeps the Mac's display awake
 //! (`PreventUserIdleDisplaySleep`, docs/power.md); the device's state as
 //! apps read it. Binder sleep/wake requests share this display state;
-//! the Mac's display sleep/session notifications remain #670. There is no
+//! the Mac's display sleep and session lock arrive as the agent's sleep
+//! and wake key requests (docs/power.md). There is no
 //! device idle (doze); battery saver is the
 //! persisted `low_power` setting. Full-policy background-start/firewall
 //! decisions are read natively; remaining policies are #1489.
@@ -461,9 +462,12 @@ impl PowerManager {
             display.power_changed();
         }
         // Notifier's early interactive change: the policy's
-        // `startedWakingUp`, which the keyguard hears.
+        // `startedWakingUp` or `startedGoingToSleep`, which the keyguard
+        // hears.
         if awake {
             self.host.keyguard_woke();
+        } else {
+            self.host.keyguard_slept();
         }
         // Notifier's interactive broadcast: nonsticky, registered receivers,
         // foreground and visible to instant apps, for every user.
@@ -476,6 +480,9 @@ impl PowerManager {
             &self.host,
             super::kept::RawIntent::new(action, 0x5000_0000 | 0x0020_0000, &[]),
         );
+        if awake {
+            self.host.keyguard_screen_on();
+        }
         Ok(())
     }
 

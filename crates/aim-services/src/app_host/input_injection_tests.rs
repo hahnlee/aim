@@ -80,7 +80,7 @@ fn input_injection_permission_target_modes_transform_and_completion() {
             Default::default(),
         );
         assert!(host.permission_manager.set(Arc::new(permissions)).is_ok());
-        let d = Dispatcher::new();
+        let d = Dispatcher::new(|_| false);
         host.attach_agent(export(Arc::new(Agent(d.clone()))));
         let (server, client) = UnixDatagram::pair().unwrap();
         client
@@ -244,7 +244,7 @@ pub(crate) fn permission_probe(host: &Arc<AppHost>, uid: i32) -> i32 {
 
 #[test]
 fn filter_install_routes_hardware_reinjects_once_and_uninstalls() {
-    let d = Dispatcher::new();
+    let d = Dispatcher::new(|_| false);
     let (server, client) = UnixDatagram::pair().unwrap();
     client
         .set_read_timeout(Some(Duration::from_millis(150)))

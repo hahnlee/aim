@@ -127,6 +127,9 @@ struct OpenKeyboard {
 }
 
 pub type InputFilter = Arc<dyn Fn(&[u8], i32) + Send + Sync>;
+/// The window manager policy's key interception before queueing: whether
+/// it consumes a keyboard key instead of passing it to the user.
+pub type KeyPolicy = fn(&KeyEvent) -> bool;
 
 pub struct Dispatcher {
     filter: Mutex<Option<InputFilter>>,
@@ -179,7 +182,7 @@ impl Dispatcher {
         self.refocus(&mut windows, previous);
     }
 
-    pub fn new() -> Arc<Dispatcher> {
+    pub fn new(policy: KeyPolicy) -> Arc<Dispatcher> {
         let keyboard = match open_keyboard() {
             Ok(found) => found,
             Err(error) => {
@@ -207,7 +210,7 @@ impl Dispatcher {
         std::thread::spawn(move || reader.read_touchscreen());
         if let Some((device, map)) = device {
             let reader = dispatcher.clone();
-            std::thread::spawn(move || reader.read_keyboard(device, map));
+            std::thread::spawn(move || reader.read_keyboard(device, map, policy));
             let repeater = dispatcher.clone();
             std::thread::spawn(move || repeater.repeat_keys());
         }
@@ -288,8 +291,9 @@ impl Dispatcher {
 
     /// Reads the keyboard, as long as the agent runs: each key mapped by
     /// `KeyboardInputMapper` (with the HID usage an `MSC_SCAN` before it
-    /// gives) and dispatched; autorepeats (value 2) are dropped.
-    fn read_keyboard(&self, mut device: File, map: KeyMap) {
+    /// gives) and dispatched unless `policy` consumes it; autorepeats
+    /// (value 2) are dropped.
+    fn read_keyboard(&self, mut device: File, map: KeyMap, policy: KeyPolicy) {
         let Some(info) = &self.keyboard else { return };
         let mut mapper = Mapper::new(info.id, info.sources);
         let mut usage = 0;
@@ -312,6 +316,7 @@ impl Dispatcher {
                     let usage_code = std::mem::take(&mut usage);
                     if let Some(key) =
                         mapper.process_key(&map, time, value != 0, code.into(), usage_code)
+                        && !policy(&key)
                     {
                         self.dispatch_key(key);
                     }

@@ -20,6 +20,11 @@ pub const ISO: [(u32, u16); 2] = [(0x0007_0064, 41), (0x0007_0035, 86)];
 /// The consumer page's AC Back, Back's usage.
 pub const AC_BACK: u32 = 0x000c_0224;
 
+/// The generic desktop page's System Sleep and System Wake Up, which
+/// hid-input maps to `KEY_SLEEP` and `KEY_WAKEUP`.
+pub const SYSTEM_SLEEP: u32 = 0x0001_0082;
+pub const SYSTEM_WAKE_UP: u32 = 0x0001_0083;
+
 /// `(kVK, usage, KEY)`.
 const MAP: &[(u16, u32, u16)] = &[
     (0x00, 0x0007_0004, 30),  // A

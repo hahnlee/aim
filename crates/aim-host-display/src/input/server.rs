@@ -57,7 +57,13 @@ struct Inner {
 struct Device {
     index: u32,
     inner: Mutex<Inner>,
+    /// The key (by scan code) the device taps for each reader it is opened
+    /// by, if any: [`Devices::on_open`].
+    on_open: Mutex<Option<OnOpen>>,
 }
+
+/// [`Devices::on_open`]'s question: the scan code to tap now, if any.
+pub type OnOpen = Arc<dyn Fn() -> Option<u32> + Send + Sync>;
 
 /// The devices of one display server.
 pub struct Devices {
@@ -287,6 +293,21 @@ impl Device {
             inner.clients.push(client.clone());
             client
         };
+        let tap = self.on_open.lock().unwrap().clone().and_then(|f| f());
+        if let Some(code) = tap.and_then(|usage| self.inner.lock().unwrap().key_of(usage)) {
+            let now = crate::monotonic_ns();
+            let mut inner = self.inner.lock().unwrap();
+            for value in [1, 0] {
+                let r = Record {
+                    time_ns: now,
+                    kind: EV_KEY,
+                    code,
+                    value,
+                };
+                inner.event(r, now);
+                flush(&mut inner, now);
+            }
+        }
         // What the client writes is injected into the device.
         let mut buf = [Record::default(); 64];
         let mut have = 0usize;
@@ -544,6 +565,7 @@ impl Devices {
                     next_client: 1,
                     keymap,
                 }),
+                on_open: Mutex::new(None),
             });
             let d = device.clone();
             std::thread::spawn(move || {
@@ -608,6 +630,15 @@ impl Devices {
             inner.event(r, time_ns);
         }
         flush(&mut inner, time_ns);
+    }
+
+    /// Ask `f`, each time a reader opens device `index`, for a key (by scan
+    /// code) to press and release then: a level the device reports as a
+    /// key, which a reader that was not there would have missed.
+    pub fn on_open(&self, index: u32, f: OnOpen) {
+        if let Some(d) = self.device(index) {
+            *d.on_open.lock().unwrap() = Some(f);
+        }
     }
 
     /// How many clients have device `index` open.
