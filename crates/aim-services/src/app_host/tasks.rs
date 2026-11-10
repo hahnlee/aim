@@ -2508,6 +2508,11 @@ pub(super) mod tests {
             {
                 let host = launch_host(ready, true);
                 std::fs::create_dir_all(host.data().unwrap().join("system_ce/0")).unwrap();
+                host.tasks
+                    .launch_params(host.data().unwrap())
+                    .unwrap()
+                    .unlock_user(0, BTreeSet::new())
+                    .unwrap();
                 let id = host.new_task(10100, "p", "p.Main", &info, None).unwrap();
                 assert_ne!(host.tasks.bounds(id), Some(saved));
                 // A freeform task persists its last non-fullscreen bounds.
@@ -2550,6 +2555,11 @@ pub(super) mod tests {
                 {
                     let host = launch_host(ready, true);
                     std::fs::create_dir_all(host.data().unwrap().join("system_ce/0")).unwrap();
+                    host.tasks
+                        .launch_params(host.data().unwrap())
+                        .unwrap()
+                        .unlock_user(0, BTreeSet::new())
+                        .unwrap();
                     host.tasks
                         .launch_params(host.data().unwrap())
                         .unwrap()
@@ -2610,6 +2620,11 @@ pub(super) mod tests {
             {
                 let host = launch_host(ready, true);
                 std::fs::create_dir_all(host.data().unwrap().join("system_ce/0")).unwrap();
+                host.tasks
+                    .launch_params(host.data().unwrap())
+                    .unwrap()
+                    .unlock_user(0, BTreeSet::new())
+                    .unwrap();
                 host.tasks
                     .launch_params(host.data().unwrap())
                     .unwrap()

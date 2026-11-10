@@ -76,6 +76,26 @@ fn launch_params_load_when_the_activity_side_unlocks_the_user() {
     });
 }
 
+/// A locked user's CE storage holds no folder for the writer to make: a
+/// save before the unlock stays in memory (`Failed to create folder`).
+#[test]
+fn launch_params_are_written_once_the_user_is_unlocked() {
+    let data = Data::new();
+    data.user(0);
+    let owner = Persister::new(&data.0).unwrap();
+    let component = name("p");
+    owner.save(0, &component, params()).unwrap();
+    owner.queue.shared.flush();
+    assert!(!folder(&data.0, 0).exists());
+    assert_eq!(owner.get(0, &component).unwrap(), Some(params()));
+    owner
+        .unlock_user(0, BTreeSet::from([component.package.clone()]))
+        .unwrap();
+    owner.save(0, &component, params()).unwrap();
+    owner.queue.shared.flush();
+    assert!(file(&folder(&data.0, 0), &component).exists());
+}
+
 #[test]
 fn launch_params_survive_task_owner_restart_in_original_abx() {
     let data = Data::new();
@@ -117,6 +137,7 @@ fn launch_params_package_removal_callback_cleans_all_loaded_users() {
         let kept = name("removed.app.other");
         for user in [0, 10] {
             std::fs::create_dir_all(folder(data, user).parent().unwrap()).unwrap();
+            owner.unlock_user(user, BTreeSet::new()).unwrap();
             owner.save(user, &removed, params()).unwrap();
             owner.save(user, &kept, params()).unwrap();
         }
@@ -141,6 +162,9 @@ fn launch_params_removal_cancels_coalesced_writes_and_preserves_queue_order() {
         data.user(user);
     }
     let owner = Persister::new(&data.0).unwrap();
+    for user in [0, 10] {
+        owner.unlock_user(user, BTreeSet::new()).unwrap();
+    }
     let release = block(&owner);
     let removed = name("removed");
     let kept = name("kept");
@@ -178,6 +202,7 @@ fn launch_params_removal_deletes_a_write_already_taken_by_the_writer() {
     let data = Data::new();
     data.user(0);
     let owner = Persister::new(&data.0).unwrap();
+    owner.unlock_user(0, BTreeSet::new()).unwrap();
     let component = name("removed");
     let (entered, waiting) = mpsc::channel();
     let (release, resume) = mpsc::channel();
@@ -203,6 +228,7 @@ fn launch_params_removal_waits_for_unlock_loads() {
     {
         let owner = Persister::new(&data.0).unwrap();
         for user in [0, 10] {
+            owner.unlock_user(user, BTreeSet::new()).unwrap();
             owner.save(user, &component, params()).unwrap();
         }
     }

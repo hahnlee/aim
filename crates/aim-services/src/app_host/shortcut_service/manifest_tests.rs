@@ -345,3 +345,22 @@ fn ota_forces_unchanged_system_packages_and_saves_scan_markers() {
         assert_eq!(std::fs::read(&user.file).unwrap(), before);
     });
 }
+
+/// `throwIfUserLockedL`: a publisher's call while user 0 is locked fails
+/// before its shortcuts, in CE storage, are loaded or saved.
+#[test]
+fn publisher_calls_wait_for_the_users_unlock() {
+    crate::system::with_discovery_session(|host, _, _| {
+        let service = ShortcutManager::new(host.clone());
+        let dir = host.data().unwrap().join("system_ce/0/shortcut_service");
+        let locked = service.with_user(|_| Ok(())).unwrap_err();
+        assert_eq!(
+            (locked.code, locked.message.as_str()),
+            (EX_ILLEGAL_STATE, "User 0 is locked or not running")
+        );
+        assert!(!dir.exists());
+        host.set_user_unlocked_for_package_test(0, true);
+        service.with_user(|_| Ok(())).unwrap();
+        assert!(dir.join("shortcuts.xml").exists());
+    });
+}

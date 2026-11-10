@@ -263,9 +263,10 @@ turns FBE on and depends on slice 4's CE protection: it lands after it.
   `aim_storage::fscrypt::inherit`, as guest-init's builtins and the data
   template's placement do), else files appear unencrypted in an
   encrypted tree. The app host's own files (`packages.xml` and the other
-  settings it writes) still do, and on a fresh data directory it writes
-  `/data/system_ce/0` before user 0's CE storage is prepared, which the
-  original `UserDataPreparer` then destroys and prepares again.
+  settings it writes) still do. Its writers of `/data/system_ce/<user>`
+  wait for the user's unlock, as their originals do (usage stats,
+  shortcuts, widgets, launch params, accounts' CE database, hibernation),
+  so vold prepares a fresh directory's CE storage at the first try.
 - The hot path: inheritance costs an xattr write per inode created under
   `/data`; lookups pay only while a key is absent. Slice 1 measures
   `startup_bench` and a boot before and after.

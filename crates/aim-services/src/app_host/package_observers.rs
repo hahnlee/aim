@@ -384,6 +384,7 @@ mod tests {
             .unwrap()
             .join("system_ce/0/launch_params/a.b-.Main.xml");
         std::fs::create_dir_all(saved.parent().unwrap().parent().unwrap()).unwrap();
+        params.unlock_user(0, Default::default()).unwrap();
         params
             .save(
                 0,

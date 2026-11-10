@@ -104,6 +104,8 @@ type Records = BTreeMap<ComponentName, Params>;
 struct State {
     users: BTreeMap<i32, Records>,
     loading: BTreeMap<i32, JoinHandle<Result<Option<Records>, String>>>,
+    /// The users unlocked, whose CE storage holds their folders.
+    unlocked: BTreeSet<i32>,
 }
 
 impl State {
@@ -161,6 +163,7 @@ impl Persister {
             eprintln!("app host: launch params duplicate unlock for {user}");
             return Ok(());
         }
+        state.unlocked.insert(user);
         let folder = folder(&self.data, user);
         let queue = self.queue.shared.clone();
         let task = std::thread::Builder::new()
@@ -182,6 +185,12 @@ impl Persister {
             || previous.bounds != params.bounds
             || previous.window_layout_affinity == params.window_layout_affinity;
         *previous = params.clone();
+        // A locked user's CE storage is not prepared, or not readable: the
+        // writer cannot make its folder.
+        if !state.unlocked.contains(&user) {
+            eprintln!("app host: launch params: Failed to create folder for {user}");
+            return Ok(());
+        }
         self.queue.shared.write(
             name.clone(),
             file(&folder(&self.data, user), name),

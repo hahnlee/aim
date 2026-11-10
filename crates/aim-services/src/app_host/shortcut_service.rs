@@ -2230,14 +2230,20 @@ impl ShortcutManager {
         Ok(package.to_owned())
     }
 
-    /// `getUserShortcutsLocked(0)`: the user loaded, then
-    /// `checkPackageChanges` (removed packages cleaned up, updated ones
-    /// rescanned, the scan time saved).
+    /// `throwIfUserLockedL(0)`, then `getUserShortcutsLocked(0)`: the user
+    /// loaded from its CE storage, then `checkPackageChanges` (removed
+    /// packages cleaned up, updated ones rescanned, the scan time saved).
     fn with_user<T>(
         &self,
         f: impl FnOnce(&mut User) -> Result<T, Exception>,
     ) -> Result<T, Exception> {
         let mut guard = self.user.lock().unwrap();
+        if !self.host.user_unlocking_or_unlocked(0)? {
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "User 0 is locked or not running",
+            ));
+        }
         if guard.is_none() {
             *guard = Some(self.load_user()?);
         }

@@ -751,8 +751,11 @@ pub struct AppHost {
     /// AppOps' started ops, their watchers and the async-noted ops.
     app_ops: appops_service::State,
     /// UsageStatsService's current intervals of user 0, made at the first
-    /// event or query.
+    /// event or query once the user is unlocking.
     usage: Mutex<Option<usage_events::UserStats>>,
+    /// The events reported while user 0 is locked (`mReportedEvents`),
+    /// locked after `usage`.
+    usage_reported: Mutex<Vec<usage_events::Event>>,
     /// The attribution sources whose data delivery started
     /// (`PermissionCheckerService.sRunningAttributionSources`).
     running_attributions: Mutex<permission_checker::Running>,
@@ -893,6 +896,7 @@ impl AppHost {
             focus: Mutex::default(),
             app_ops: Default::default(),
             usage: Mutex::new(None),
+            usage_reported: Mutex::default(),
             running_attributions: Mutex::default(),
         })
     }

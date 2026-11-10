@@ -1010,12 +1010,15 @@ template and the second boot of each, one guest at a time (1-minute load
 14-22): `sys.boot_completed` at 6.52, 7.01 and 7.38 s fresh and 4.88, 5.24
 and 5.46 s warm, aimctl's readiness at 7.8-8.6 s and 6.1-6.7 s. The second
 boot of a data directory installs the same system DE, user 0 DE and CE keys
-(the CE key unlocked with the keychain secret) and a new per-boot key. On a
-fresh directory the app host has written `/data/system_ce/0` before vold
-prepares user 0's CE storage, so `prepareUserStorage` fails ENOTEMPTY and
-the original `UserDataPreparer` recovers by destroying and preparing it
-again. A data directory's CE storage belongs to the image that first
-mounts it: `mount_all` refuses a data directory the derived image
+(the CE key unlocked with the keychain secret) and a new per-boot key. The
+app host writes nothing under `/data/system_ce/0` before user 0 unlocks
+(#2902): usage events reported while it is locked wait in memory, and
+shortcuts, widgets and launch params wait for the unlock, so vold prepares
+a fresh directory's CE storage at the first try (no ENOTEMPTY, no destroy
+and retry) and what services write there after the unlock is kept across
+a warm boot (branch fix/2902, a fresh and a warm boot of one throwaway
+data directory, 2026-11-10). A data directory's CE storage belongs to the
+image that first mounts it: `mount_all` refuses a data directory the derived image
 (the original LockSettingsService) booted to the app host image, and the
 reverse, naming both (ADR 0016). Settings'
 warm median first presented frame was 1.094 s after open (2026-10-30). Raw capture now waits for user-0 DE storage
