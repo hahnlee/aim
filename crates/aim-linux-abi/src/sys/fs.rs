@@ -809,7 +809,7 @@ fn special_read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
         Ok(pin) => pin,
         Err(error) => return Some(-(error as i64)),
     };
-    if let Err(error) = prepare_iov(&pin, iov, false) {
+    if let Err(error) = prepare_iov(&pin, iov, false, false) {
         return Some(-(error as i64));
     }
     use std::os::fd::AsRawFd;
@@ -823,7 +823,7 @@ fn special_write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
         Ok(pin) => pin,
         Err(error) => return Some(-(error as i64)),
     };
-    if let Err(error) = prepare_iov(&pin, iov, true) {
+    if let Err(error) = prepare_iov(&pin, iov, true, false) {
         return Some(-(error as i64));
     }
     use std::os::fd::AsRawFd;
@@ -875,7 +875,7 @@ fn special_pio(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> Option<i
         Ok(pin) => pin,
         Err(error) => return Some(-(error as i64)),
     };
-    if let Err(error) = prepare_iov(&pin, &one(buf, len), write) {
+    if let Err(error) = prepare_iov(&pin, &one(buf, len), write, true) {
         return Some(-(error as i64));
     }
     use std::os::fd::AsRawFd;
@@ -1201,7 +1201,13 @@ fn iovs(ptr: u64, n: u64) -> Result<Vec<libc::iovec>, i64> {
         })
         .collect())
 }
-fn prepare_iov(pin: &fdtab::Pinned, iov: &[libc::iovec], write: bool) -> Result<(), errno::Errno> {
+/// `positioned`: the transfer is at a given offset, not the file's.
+fn prepare_iov(
+    pin: &fdtab::Pinned,
+    iov: &[libc::iovec],
+    write: bool,
+    positioned: bool,
+) -> Result<(), errno::Errno> {
     if matches!(pin.kind(), Some(Kind::Path(_))) {
         return Err(EBADF);
     }
@@ -1241,11 +1247,18 @@ fn prepare_iov(pin: &fdtab::Pinned, iov: &[libc::iovec], write: bool) -> Result<
     if length == 0 {
         return Ok(());
     }
+    // A current-position transfer that faults in a later vector has moved
+    // the offset (`prepare_file_write`): only one vector can skip the walk.
+    let file = (matches!(pin.kind(), Some(Kind::Regular(_))) || pin.regular_access().is_some())
+        && (positioned || iov.iter().filter(|vector| vector.iov_len != 0).count() <= 1);
     for vector in iov {
+        let (address, length) = (vector.iov_base as u64, vector.iov_len);
         if write {
-            super::user_memory::prepare_read(vector.iov_base as u64, vector.iov_len)?;
+            super::user_memory::prepare_read(address, length)?;
+        } else if file {
+            super::user_memory::prepare_file_write(address, length, positioned)?;
         } else {
-            super::user_memory::prepare_write(vector.iov_base as u64, vector.iov_len)?;
+            super::user_memory::prepare_write(address, length)?;
         }
     }
     Ok(())
@@ -1351,7 +1364,7 @@ pub fn preadv(write: bool, v2: bool, a: [u64; 6]) -> i64 {
         Err(error) => return error,
     };
     let vectors = vectors.as_slice();
-    if let Err(error) = prepare_iov(&pin, vectors, write) {
+    if let Err(error) = prepare_iov(&pin, vectors, write, pos >= 0) {
         return -(error as i64);
     }
     if let Err(error) = rw_flags(flags) {

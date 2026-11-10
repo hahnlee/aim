@@ -9398,7 +9398,17 @@ shipped (#722), so the scan parses every package: 0.63-1.03 s against
 0.42-0.48 s on a repeat boot, `pms_start` to `pms_ready` 0.85-1.35 s
 (host load 8-14, 2026-10-02). Between the mount and zygote-start, init runs its exec
 programs one after another (about 25-120 ms each, mostly starting
-`linux-run`); the longest are bpfloader (0.3-0.6 s) and
+`linux-run`). A process's POSIX lock holder (`aim-lock-holder`) starts
+at its first lock, for a process init launches as for a fork child;
+init's launches had each waited about 8 ms for one, so zygote-start
+came 0.25-0.35 s later on a warm boot (2026-11-11). The app host image
+has the derived image's translation cache beside its root (its entries,
+copied once and kept across regenerations, indexed for the image's own
+files by `linux-translate --image`):
+without it every ELF of every process took the load-time rewrite, a
+private rewritten copy of its code, and loading a program took 2.7 ms
+instead of 1.2 ms (medians); first boots reach zygote 0.2-0.4 s sooner
+(2026-11-11). The longest are bpfloader (0.3-0.6 s) and
 `aconfigd-mainline init` (0.12-0.36 s) (#529). bpfloader takes about
 0.35 s on a warm resident boot: three process images (netbpfload execs
 uprobestatsbpfload, then the platform bpfloader), netbpfload's 200,000

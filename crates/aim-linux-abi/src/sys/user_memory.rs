@@ -311,21 +311,41 @@ fn range(address: u64, length: usize) -> Result<u64, Errno> {
     address.checked_add(length as u64).ok_or(errno::EFAULT)
 }
 
-fn prepare(address: u64, length: usize, access: Access) -> Result<(), Errno> {
+fn prepare(address: u64, length: usize, access: Access) -> Result<u64, Errno> {
     let end = range(address, length)?;
-    if length == 0 {
-        return Ok(());
+    if length != 0 {
+        super::verity_pager::prepare_user_range(address, length as u64, access)?;
     }
-    super::verity_pager::prepare_user_range(address, length as u64, access)?;
-    let required = match access {
-        Access::Read => libc::PROT_READ,
-        Access::Write => libc::PROT_WRITE,
-        Access::Execute => libc::PROT_EXEC,
-    };
+    Ok(end)
+}
+
+/// One fault-contained load per page, as the kernel's copy from it makes:
+/// protection is per page, so the word holding the first byte of each
+/// page's part stands for all of it. Nothing is written.
+fn probe(address: u64, end: u64) -> Result<(), Errno> {
+    let mut at = address;
+    while at < end {
+        UserWord(at & !3)
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .map(drop)?;
+        at = (at & !(PAGE - 1)) + PAGE;
+    }
+    Ok(())
+}
+
+/// Prepare a readable user range before acquiring descriptor/I/O locks.
+pub(super) fn prepare_read(address: u64, length: usize) -> Result<(), Errno> {
+    let end = prepare(address, length, Access::Read)?;
+    probe(address, end)
+}
+
+/// Prepare a writable user range before acquiring descriptor/I/O locks.
+pub(super) fn prepare_write(address: u64, length: usize) -> Result<(), Errno> {
+    let end = prepare(address, length, Access::Write)?;
     let mut at = address;
     while at < end {
         let (start, stop, protection, _) = crate::patch::vm::region(at).ok_or(errno::EFAULT)?;
-        if start > at || stop <= at || protection & required == 0 {
+        if start > at || stop <= at || protection & libc::PROT_WRITE == 0 {
             return Err(errno::EFAULT);
         }
         at = stop.min(end);
@@ -333,14 +353,23 @@ fn prepare(address: u64, length: usize, access: Access) -> Result<(), Errno> {
     Ok(())
 }
 
-/// Prepare a readable user range before acquiring descriptor/I/O locks.
-pub(super) fn prepare_read(address: u64, length: usize) -> Result<(), Errno> {
-    prepare(address, length, Access::Read)
-}
-
-/// Prepare a writable user range before acquiring descriptor/I/O locks.
-pub(super) fn prepare_write(address: u64, length: usize) -> Result<(), Errno> {
-    prepare(address, length, Access::Write)
+/// [`prepare_write`] for a regular file's transfer into the range. Its
+/// pages need only be mapped (a load each) where the transfer's own EFAULT
+/// matches Linux's: a positioned one (`positioned`) moves no offset, and
+/// a range in one page is writable throughout or not at all, so a fault
+/// copies nothing. A current-position transfer across pages keeps the
+/// walk: Darwin advances the offset by a partial copy that it reports as
+/// EFAULT, where Linux returns the partial count.
+pub(super) fn prepare_file_write(
+    address: u64,
+    length: usize,
+    positioned: bool,
+) -> Result<(), Errno> {
+    let end = prepare(address, length, Access::Write)?;
+    if !positioned && length != 0 && address / PAGE != (end - 1) / PAGE {
+        return prepare_write(address, length);
+    }
+    probe(address, end)
 }
 
 pub fn read_exact(address: u64, length: usize) -> Result<Vec<u8>, Errno> {
@@ -414,6 +443,60 @@ mod tests {
         fn drop(&mut self) {
             assert_eq!(unsafe { libc::munmap(self.0, (2 * PAGE) as usize) }, 0);
         }
+    }
+
+    #[test]
+    fn prepared_ranges_need_each_page_s_access_and_write_nothing() {
+        if isolated("prepared_ranges_need_each_page_s_access_and_write_nothing") {
+            return;
+        }
+        let mapping = Mapping::new();
+        let address = mapping.address();
+        write_exact(address + PAGE - 3, b"edge\0").unwrap();
+        // Across the page boundary, from an unaligned start.
+        assert_eq!(prepare_write(address + PAGE - 3, 6), Ok(()));
+        assert_eq!(prepare_read(address + 1, 2 * PAGE as usize - 1), Ok(()));
+        assert_eq!(read_exact(address + PAGE - 3, 5).unwrap(), b"edge\0");
+        assert_eq!(
+            unsafe {
+                libc::mprotect(
+                    mapping.0.byte_add(PAGE as usize),
+                    PAGE as usize,
+                    libc::PROT_READ,
+                )
+            },
+            0
+        );
+        assert_eq!(prepare_write(address, PAGE as usize), Ok(()));
+        assert_eq!(prepare_write(address + PAGE - 3, 6), Err(errno::EFAULT));
+        assert_eq!(prepare_read(address + PAGE - 3, 6), Ok(()));
+        // A regular file's transfer finds the read-only page itself: its
+        // preparation writes nothing, so a page it does not fill is left
+        // as it was (shared, clean, uncommitted).
+        assert_eq!(prepare_file_write(address + PAGE - 3, 6, true), Ok(()));
+        assert_eq!(
+            prepare_file_write(address + PAGE - 3, 6, false),
+            Err(errno::EFAULT)
+        );
+        assert_eq!(prepare_file_write(address + PAGE, 6, false), Ok(()));
+        assert_eq!(read_exact(address + PAGE - 3, 5).unwrap(), b"edge\0");
+        assert_eq!(
+            unsafe {
+                libc::mprotect(
+                    mapping.0.byte_add(PAGE as usize),
+                    PAGE as usize,
+                    libc::PROT_NONE,
+                )
+            },
+            0
+        );
+        assert_eq!(prepare_read(address + PAGE - 3, 6), Err(errno::EFAULT));
+        assert_eq!(
+            prepare_file_write(address + PAGE - 3, 6, true),
+            Err(errno::EFAULT)
+        );
+        assert_eq!(prepare_read(1, 1), Err(errno::EFAULT));
+        assert_eq!(prepare_write(0, 0), Ok(()));
     }
 
     #[test]

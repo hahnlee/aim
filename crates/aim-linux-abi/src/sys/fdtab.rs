@@ -967,15 +967,19 @@ pub fn pin_guest_io(fd: i32) -> Result<Pinned, crate::errno::Errno> {
     let borrow = Borrow(fd);
     require_guest_visible(fd)?;
     let kind = get(fd);
+    let cached = REGULAR_ACCESS[fd as usize].load(Ordering::Relaxed);
+    // A regular file description, or a plain fd found regular since it was
+    // published, is no FUSE marker socket: only others are asked (a
+    // getsockopt).
+    let regular = matches!(kind, Some(Kind::Regular(_))) || cached != 0 && kind.is_none();
     if !matches!(kind, None | Some(Kind::Regular(_)))
         || super::fuse_client::get(fd).is_some()
-        || super::fuse_device::is_typed(fd)
+        || !regular && super::fuse_device::is_typed(fd)
     {
         clear_regular_access(fd);
         drop(borrow);
         return pin_guest(fd);
     }
-    let cached = REGULAR_ACCESS[fd as usize].load(Ordering::Relaxed);
     let access = if cached != 0 && kind.is_none() {
         Some(cached as i32 - 1)
     } else {
@@ -2276,6 +2280,66 @@ fn keep_inherited_hidden(parent: Vec<i32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_read_into_a_partly_read_only_buffer_keeps_the_offset() {
+        if isolated_kernel_test(
+            "sys::fdtab::tests::a_read_into_a_partly_read_only_buffer_keeps_the_offset",
+        ) {
+            return;
+        }
+        use std::os::fd::IntoRawFd;
+        let (_guard, root) = crate::vfs::test_view();
+        let path = root.join("partial-read");
+        let bytes: Vec<u8> = (0..65536u32).map(|i| i as u8).collect();
+        std::fs::write(&path, &bytes).unwrap();
+        let fd = std::fs::File::open(path).unwrap().into_raw_fd();
+        publish_guest(fd).unwrap();
+        let page = super::super::mem::PAGE as usize;
+        // SAFETY: a private mapping this test owns: its second page read-only.
+        let buffer = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                2 * page,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(buffer, libc::MAP_FAILED);
+        let second = unsafe { buffer.byte_add(page) };
+        assert_eq!(unsafe { libc::mprotect(second, page, libc::PROT_READ) }, 0);
+        // Darwin advances the offset by the pages a faulting copy filled.
+        let across = buffer as u64;
+        let read = |at: u64, length: u64| super::super::fs::read([fd as u64, at, length, 0, 0, 0]);
+        assert_eq!(
+            read(across, page as u64 + 4096),
+            -(crate::errno::EFAULT as i64)
+        );
+        assert_eq!(super::super::fs::lseek([fd as u64, 0, 1, 0, 0, 0]), 0);
+        // Within one page a fault copies nothing; a positioned read moves
+        // no offset.
+        assert_eq!(read(second as u64, 4), -(crate::errno::EFAULT as i64));
+        let pread = super::super::fs::pread64([fd as u64, across, page as u64 + 4096, 0, 0, 0]);
+        assert!(
+            pread == -(crate::errno::EFAULT as i64) || pread == page as i64,
+            "{pread}"
+        );
+        assert_eq!(super::super::fs::lseek([fd as u64, 0, 1, 0, 0, 0]), 0);
+        assert_eq!(read(buffer as u64, 8), 8);
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(buffer as *const u8, 8) },
+            &bytes[..8]
+        );
+        assert_eq!(read(buffer as u64, 8), 8);
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(buffer as *const u8, 8) },
+            &bytes[8..16]
+        );
+        assert_eq!(unsafe { libc::munmap(buffer, 2 * page) }, 0);
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+    }
 
     #[test]
     fn regular_cache_is_invalidated_by_exec_and_owner_installation() {
