@@ -101,8 +101,12 @@ pub fn read(path: &Path) -> io::Result<Option<GuestInode>> {
     Ok(decode(&b[..n as usize]))
 }
 
-/// Records `a`'s fields over those `path` already has.
+/// Records `a`'s fields over those `path` already has. A host-side owner
+/// records each inode it makes in a writable area, so here such an inode
+/// also takes the fscrypt policy the kernel would have given it
+/// ([`crate::fscrypt::adopt`]).
 pub fn record(path: &Path, a: GuestInode) -> io::Result<()> {
+    crate::fscrypt::adopt(path)?;
     let old = read(path)?.unwrap_or_default();
     let b = encode(GuestInode {
         uid: a.uid.or(old.uid),

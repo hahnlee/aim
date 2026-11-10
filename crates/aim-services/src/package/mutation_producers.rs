@@ -290,6 +290,7 @@ impl Owner {
         let stage = (self.native.apks.files)(&stage_guest)
             .ok_or_else(|| illegal("Compressed stage VFS owner unavailable"))?;
         fs::create_dir(&stage).map_err(io_error)?;
+        aim_storage::fscrypt::adopt(&stage).map_err(io_error)?;
         fs::set_permissions(&stage, fs::Permissions::from_mode(0o755)).map_err(io_error)?;
         let metadata = fs::symlink_metadata(&stage).map_err(io_error)?;
         let mut stage = Stage {
@@ -321,6 +322,7 @@ impl Owner {
                 .write(true)
                 .open(&temporary)
                 .map_err(io_error)?;
+            aim_storage::fscrypt::adopt(&temporary).map_err(io_error)?;
             let mut gzip = flate2::read::MultiGzDecoder::new(source);
             io::copy(&mut gzip, &mut output).map_err(io_error)?;
             output.flush().map_err(io_error)?;

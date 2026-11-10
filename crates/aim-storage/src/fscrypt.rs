@@ -297,14 +297,41 @@ fn withdraw(path: &Path) -> io::Result<()> {
 
 /// `fscrypt_prepare_new_inode` for an inode a host-side owner made (init's
 /// builtins): `child`, just created in `parent`, takes the parent's policy
-/// with a nonce of its own.
+/// with a nonce of its own, or has none in a parent without one, even if
+/// a host copy brought its source's.
 pub fn inherit(parent: &Path, child: &Path) -> io::Result<()> {
-    let Some(context) = context(parent)? else {
-        return Ok(());
-    };
     let kind = fs::symlink_metadata(child)?.file_type();
-    if kind.is_dir() || kind.is_file() || kind.is_symlink() {
-        store(child, &context)?;
+    if !(kind.is_dir() || kind.is_file() || kind.is_symlink()) {
+        return Ok(());
+    }
+    match context(parent)? {
+        Some(context) => store(child, &context),
+        None => withdraw(child),
+    }
+}
+
+/// `fscrypt_prepare_new_inode` for an inode a host-side owner made without
+/// the syscall layer (the app host's services): `path`, unless it has a
+/// policy, takes its directory's, after the directories above it made with
+/// it have taken theirs. Linux gives no inode below an encrypted directory
+/// none, so the walk ends at the first inode with a policy, or at the root
+/// of the volume in a tree without any.
+pub fn adopt(path: &Path) -> io::Result<()> {
+    let device = fs::symlink_metadata(path)?.dev();
+    let mut made = Vec::new();
+    let mut at = path;
+    while context(at)?.is_none() {
+        let Some(parent) = at.parent().filter(|parent| !parent.as_os_str().is_empty()) else {
+            return Ok(());
+        };
+        if fs::symlink_metadata(parent)?.dev() != device {
+            return Ok(());
+        }
+        made.push(at);
+        at = parent;
+    }
+    for child in made.into_iter().rev() {
+        inherit(child.parent().unwrap(), child)?;
     }
     Ok(())
 }
@@ -1046,6 +1073,48 @@ mod tests {
             owner.remove_key(v2, 1000, false).unwrap(),
             Removal::OtherUsers
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// What the app host makes host-side below an encrypted directory takes
+    /// its policy, as the kernel would have given it, with a nonce of its
+    /// own; what already has one keeps it.
+    #[test]
+    fn host_made_inodes_adopt_the_policy_of_their_tree() {
+        let dir = crate::scratch_dir("fscrypt-adopt");
+        let context = [&[1u8, 1, 4, 0][..], &[1; 8], &[0; 16]].concat();
+        let (system, plain) = (dir.join("system"), dir.join("plain"));
+        fs::create_dir_all(&plain).unwrap();
+        fs::create_dir(&system).unwrap();
+        store(&system, &context).unwrap();
+        let nested = system.join("users/0");
+        fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("settings.xml");
+        fs::write(&file, b"").unwrap();
+        adopt(&file).unwrap();
+        for made in [system.join("users"), nested.clone(), file.clone()] {
+            let own = super::context(&made).unwrap().expect("adopted");
+            assert_eq!(policy(&own), policy(&context), "{}", made.display());
+            assert_ne!(own[12..], context[12..]);
+        }
+        let kept = super::context(&file).unwrap();
+        crate::guest_inode::record(&file, Default::default()).unwrap();
+        assert_eq!(super::context(&file).unwrap(), kept);
+        // A tree without a policy stays without.
+        fs::write(plain.join("file"), b"").unwrap();
+        adopt(&plain.join("file")).unwrap();
+        assert_eq!(super::context(&plain.join("file")).unwrap(), None);
+        // guest_inode::record is the host-side creation path.
+        let recorded = system.join("recorded");
+        fs::write(&recorded, b"").unwrap();
+        crate::guest_inode::record(&recorded, Default::default()).unwrap();
+        assert!(super::context(&recorded).unwrap().is_some());
+        // A copy made into a directory without a policy drops its source's.
+        let copy = plain.join("copy");
+        fs::copy(&file, &copy).unwrap();
+        assert!(super::context(&copy).unwrap().is_some());
+        inherit(&plain, &copy).unwrap();
+        assert_eq!(super::context(&copy).unwrap(), None);
         fs::remove_dir_all(dir).unwrap();
     }
 }
