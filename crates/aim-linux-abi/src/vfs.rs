@@ -27,7 +27,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use crate::errno::{self, Errno};
 use crate::sys::fscrypt::Lock;
@@ -2593,7 +2593,7 @@ pub fn load_own_mounts(text: &str) -> Result<(), Errno> {
 /// One inverse namespace view for a generated procfs read. Host aliases are
 /// resolved once per view; a later read observes mount and symlink changes.
 pub(crate) struct HostPathView {
-    mounts: Vec<(String, PathBuf)>,
+    mounts: Arc<Vec<(String, PathBuf)>>,
     root: PathBuf,
     canonical_mounts: std::cell::OnceCell<Vec<(String, PathBuf)>>,
     canonical_root: std::cell::OnceCell<PathBuf>,
@@ -2601,14 +2601,30 @@ pub(crate) struct HostPathView {
 
 impl HostPathView {
     pub(crate) fn capture() -> Option<Self> {
+        /// The visible mounts of the last mount table seen: finding them
+        /// compares every mount with every other, and the table changes far
+        /// less often than a stat asks.
+        static VISIBLE: Mutex<Option<(Vec<Mount>, Arc<Vec<(String, PathBuf)>>)>> = Mutex::new(None);
         let v = VFS.get()?;
         let mounts = v.mounts.read().unwrap();
+        let mut visible = VISIBLE.lock().unwrap();
+        let current = match visible.as_ref() {
+            Some((table, current)) if *table == *mounts => current.clone(),
+            _ => {
+                let current: Arc<Vec<_>> = Arc::new(
+                    mounts
+                        .iter()
+                        .filter(|m| !hidden(&mounts, m))
+                        .map(|m| (m.guest.clone(), m.host.clone()))
+                        .collect(),
+                );
+                *visible = Some((mounts.clone(), current.clone()));
+                current
+            }
+        };
+        drop(visible);
         Some(Self {
-            mounts: mounts
-                .iter()
-                .filter(|m| !hidden(&mounts, m))
-                .map(|m| (m.guest.clone(), m.host.clone()))
-                .collect(),
+            mounts: current,
             root: v.root.clone(),
             canonical_mounts: std::cell::OnceCell::new(),
             canonical_root: std::cell::OnceCell::new(),

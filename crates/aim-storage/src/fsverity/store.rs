@@ -200,6 +200,18 @@ impl Store {
         })
     }
     pub fn lock_inode(&self, data: &impl AsFd) -> Result<Admission> {
+        let inode = self.open_inode(data)?;
+        let admission = inode.admission()?;
+        Ok(Admission {
+            store: self.clone(),
+            inode,
+            admission,
+        })
+    }
+    /// The handle of the regular file `data`, without admission: what a
+    /// read-only open needs, as a Linux open for reading waits for no
+    /// enable (only one for writing is refused while an enable runs).
+    pub fn open_inode(&self, data: &impl AsFd) -> Result<Inode> {
         let metadata = tree::stat(data)?;
         if metadata.st_mode & libc::S_IFMT == libc::S_IFDIR {
             return Err(Error::Linux(21));
@@ -207,13 +219,7 @@ impl Store {
         if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
             return Err(Error::Linux(EINVAL));
         }
-        let inode = Inode::open(&self.runtime, data.as_fd())?;
-        let admission = inode.admission()?;
-        Ok(Admission {
-            store: self.clone(),
-            inode,
-            admission,
-        })
+        Ok(Inode::open(&self.runtime, data.as_fd())?)
     }
     fn path(&self, identity: Identity) -> PathBuf {
         self.directory.join(hex(&binding(identity)))

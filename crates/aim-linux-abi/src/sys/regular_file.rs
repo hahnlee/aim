@@ -99,15 +99,16 @@ pub struct Description {
 }
 impl Description {
     pub fn new(fd: BorrowedFd<'_>, flags: u64, store: Arc<Store>) -> Result<Arc<Self>, Errno> {
-        let admission = store.lock_inode(&fd).map_err(core)?;
-        let identity = admission.identity();
-        let inode = admission.inode().clone();
-        let writer = if matches!(flags & 3, 1 | 2) {
-            Some(admission.writer_lease().map_err(core)?)
+        // Only a writer needs admission, to take its lease consistently
+        // with an enable; a reader waits for none, as on Linux.
+        let (inode, writer) = if matches!(flags & 3, 1 | 2) {
+            let admission = store.lock_inode(&fd).map_err(core)?;
+            let writer = admission.writer_lease().map_err(core)?;
+            (admission.inode().clone(), Some(writer))
         } else {
-            None
+            (store.open_inode(&fd).map_err(core)?, None)
         };
-        drop(admission);
+        let identity = inode.identity();
         inode.keep_offset_lock().map_err(io)?;
         Ok(Arc::new(Self {
             flags: flags & !super::fs::O_CLOEXEC,
@@ -619,6 +620,54 @@ mod offset_tests {
         drop(opening);
         reader.join().unwrap();
         assert_eq!(read.unwrap(), (16, [7u8; 16]));
+    }
+
+    /// A read-only open waits for no admission (an enable or a writer's
+    /// open in progress); a writer's open does.
+    #[test]
+    fn only_a_writers_open_waits_for_admission() {
+        let (_view, root) = vfs::test_view();
+        let path = root.join("data/open-admission");
+        std::fs::write(&path, b"data").unwrap();
+        let store = Arc::new(
+            Store::new(
+                &root.join("open-admission-proofs"),
+                &root.join("open-admission-locks"),
+            )
+            .unwrap(),
+        );
+        let held = File::open(&path).unwrap();
+        let admission = store.lock_inode(&held).unwrap();
+        let open = |write: bool| {
+            let (path, store) = (path.clone(), store.clone());
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let opener = std::thread::spawn(move || {
+                let file = File::options().read(true).write(write).open(path).unwrap();
+                let flags = if write { 2 } else { 0 };
+                sender
+                    .send(Description::new(file.as_fd(), flags, store).is_ok())
+                    .unwrap();
+            });
+            (opener, receiver)
+        };
+        let (reader, read) = open(false);
+        assert_eq!(
+            read.recv_timeout(std::time::Duration::from_secs(2)),
+            Ok(true)
+        );
+        reader.join().unwrap();
+        let (writer, written) = open(true);
+        assert!(
+            written
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err()
+        );
+        drop(admission);
+        assert_eq!(
+            written.recv_timeout(std::time::Duration::from_secs(2)),
+            Ok(true)
+        );
+        writer.join().unwrap();
     }
 
     /// A description keeps two host descriptors, its source and the offset
