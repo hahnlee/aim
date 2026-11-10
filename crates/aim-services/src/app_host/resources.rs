@@ -466,7 +466,7 @@ impl PackageResources {
         let tables = apks
             .iter()
             .map(|apk| {
-                apk.file_if_present("resources.arsc")
+                apk.asset("resources.arsc")
                     .map_err(|e| e.to_string())?
                     .map(|b| {
                         if indexed {
