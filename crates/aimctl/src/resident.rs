@@ -296,18 +296,21 @@ fn start_display(
         .map_err(|e| format!("aim-display: {e}"))
 }
 
-/// Waits until `display` listens at its socket; false when it ended or did
-/// not within [`DISPLAY_PATIENCE`].
-fn display_up(files: &Files, display: &mut Child) -> Result<bool, String> {
-    let socket = files.display();
-    let deadline = Instant::now() + DISPLAY_PATIENCE;
-    while !socket.exists() {
-        if Instant::now() > deadline || display.try_wait().map_err(|e| e.to_string())?.is_some() {
-            return Ok(false);
-        }
-        std::thread::sleep(Duration::from_millis(10));
+/// Whether `display` has come up: Some(true) once it listens at its socket,
+/// Some(false) when it ended or did not within `deadline`, None while it
+/// is still starting.
+fn display_state(
+    files: &Files,
+    display: &mut Child,
+    deadline: Instant,
+) -> Result<Option<bool>, String> {
+    if files.display().exists() {
+        return Ok(Some(true));
     }
-    Ok(true)
+    if Instant::now() > deadline || display.try_wait().map_err(|e| e.to_string())?.is_some() {
+        return Ok(Some(false));
+    }
+    Ok(None)
 }
 
 /// `aimctl run`: the guest in the foreground until guest-init ends, or
@@ -478,28 +481,31 @@ fn supervise(files: &Files, state: &mut State) -> Result<ExitCode, String> {
         .args(guest_init_args(files, &state.inputs)?)
         .spawn()
         .map_err(|e| format!("guest-init: {e}"))?;
-    if !display_up(files, &mut children.0[0])? {
-        // SAFETY: signals the child we started, which stops what it began.
-        unsafe { libc::kill(guest.id() as i32, libc::SIGTERM) };
-        let _ = guest.wait();
-        return Err("aim-display did not come up".into());
-    }
-    if state.windows {
-        children.0.push(
-            Command::new(program("aim-apps"))
-                .args(shims_args(files, files.is_default(), &state.inputs))
-                .spawn()
-                .map_err(|e| format!("aim-apps: {e}"))?,
-        );
-    }
     let guest_birth = ProcessIdentity::running(guest.id() as i32);
     let mut binding = None;
     state.guest = Some(guest.id());
     state.write(&files.state())?;
+    let display_deadline = Instant::now() + DISPLAY_PATIENCE;
+    // Until the display server listens: then the shims start. A display
+    // server that does not come up stops the guest as a stop request does.
+    let mut display = None;
     let mut stopping: Option<Instant> = None;
     let status = loop {
         if let Some(status) = guest.try_wait().map_err(|e| e.to_string())? {
             break status;
+        }
+        if display.is_none() {
+            display = display_state(files, &mut children.0[0], display_deadline)?;
+            match display {
+                Some(true) if state.windows => children.0.push(
+                    Command::new(program("aim-apps"))
+                        .args(shims_args(files, files.is_default(), &state.inputs))
+                        .spawn()
+                        .map_err(|e| format!("aim-apps: {e}"))?,
+                ),
+                Some(false) => STOP.store(true, Ordering::Relaxed),
+                _ => {}
+            }
         }
         if binding.is_none() && aim_storage::data::image_of(&files.data).exists() {
             binding = Some(DataBinding::capture(files));
@@ -517,7 +523,11 @@ fn supervise(files: &Files, state: &mut State) -> Result<ExitCode, String> {
             }
             _ => {}
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(if display.is_none() {
+            10
+        } else {
+            100
+        }));
     };
     drop(children);
     let deadline = stopping.map_or_else(
@@ -539,6 +549,9 @@ fn supervise(files: &Files, state: &mut State) -> Result<ExitCode, String> {
         (Err(sweep), Err(finish)) => return Err(format!("{sweep}; DATA finish: {finish}")),
         (Err(error), _) | (_, Err(error)) => return Err(error),
         (Ok(()), Ok(())) => {}
+    }
+    if display == Some(false) {
+        return Err("aim-display did not come up".into());
     }
     if !status.success() {
         return Err(format!("guest-init stopped with {status}"));
@@ -850,6 +863,36 @@ mod tests {
 
     fn strings(args: &[OsString]) -> Vec<&str> {
         args.iter().map(|a| a.to_str().unwrap()).collect()
+    }
+
+    #[test]
+    fn the_display_server_is_up_at_its_socket_and_down_once_it_ends() {
+        let root = std::env::temp_dir().join(format!("aimctl-display-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let files = Files::of(&root.join("data")).unwrap();
+        fs::create_dir_all(files.dir()).unwrap();
+        let later = Instant::now() + Duration::from_secs(10);
+        let mut running = Command::new("/bin/sleep").arg("10").spawn().unwrap();
+        assert_eq!(display_state(&files, &mut running, later).unwrap(), None);
+        // A deadline passed is a display server that did not come up.
+        let past = Instant::now() - Duration::from_millis(1);
+        assert_eq!(
+            display_state(&files, &mut running, past).unwrap(),
+            Some(false)
+        );
+        fs::write(files.display(), b"").unwrap();
+        assert_eq!(
+            display_state(&files, &mut running, past).unwrap(),
+            Some(true)
+        );
+        fs::remove_file(files.display()).unwrap();
+        running.kill().unwrap();
+        running.wait().unwrap();
+        assert_eq!(
+            display_state(&files, &mut running, later).unwrap(),
+            Some(false)
+        );
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

@@ -193,6 +193,11 @@ fn main() {
     options.merge_androidboot(androidboot);
     let mut boot = match Boot::prepare(options) {
         Ok(boot) => boot,
+        // Nothing has started: a stop then is a clean one.
+        Err(error) if error == boot::STOPPED_PREPARING => {
+            eprintln!("guest-init: {error}");
+            std::process::exit(0);
+        }
         Err(error) => {
             eprintln!("guest-init: {error}");
             std::process::exit(1);

@@ -361,6 +361,8 @@ pub struct Boot {
 
 /// `servicemanager` sets it once it serves calls.
 const SERVICEMANAGER_READY: &str = "servicemanager.ready";
+/// [`Boot::prepare`]'s error when a stop request ended it: a clean stop.
+pub const STOPPED_PREPARING: &str = "stop requested while the boot prepared";
 /// How long the display server may take to listen at its socket.
 const DISPLAY_PATIENCE: Duration = Duration::from_secs(10);
 
@@ -370,7 +372,7 @@ fn wait_for_display(socket: &Path) -> Result<(), String> {
     let deadline = Instant::now() + DISPLAY_PATIENCE;
     while !socket.exists() {
         if stop_requested() {
-            return Err("stop requested while the display server started".into());
+            return Err(STOPPED_PREPARING.into());
         }
         if Instant::now() > deadline {
             return Err(format!(
