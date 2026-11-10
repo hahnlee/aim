@@ -631,6 +631,22 @@ impl AppHost {
             ),
         };
         let parent = parent.map(|(root, _)| root);
+        // `getTaskBounds` also gives a fullscreen task default freeform
+        // bounds, its last non-fullscreen ones (`layoutTask`), without others.
+        let restore = match windowing_mode {
+            5 => Some(bounds),
+            _ => options.bounds.or(layout).or(saved_bounds),
+        };
+        let restore = match restore {
+            None if windowing_mode == 1 && !home => Some(super::freeform::default_bounds(
+                &activity,
+                area,
+                display.density_dpi(),
+                false,
+                &self.tasks.freeform_bounds(None),
+            )),
+            restore => restore,
+        };
         let id = {
             let mut next = self.tasks.next.lock().unwrap();
             *next += 1;
@@ -679,11 +695,7 @@ impl AppHost {
                 parent,
                 requested_bounds: requested,
                 resolved_bounds: launch_bounds.or(requested),
-                restore_bounds: (windowing_mode == 5)
-                    .then_some(bounds)
-                    .or(options.bounds)
-                    .or(layout)
-                    .or(saved_bounds),
+                restore_bounds: restore,
                 min_size: activity.min_size,
                 layer: None,
                 launch,
@@ -911,13 +923,6 @@ impl AppHost {
             Some(root) => mode_of(root)?,
             None => own,
         };
-        // In its own mode with no launch bounds, a task outside a
-        // multi-window root task would only record default freeform bounds
-        // as its last non-fullscreen ones, which it takes by default entering
-        // freeform without them (`desktop_bounds`).
-        if launch_mode == own && options.bounds.is_none() && !multi_window(root_mode) {
-            return Ok(());
-        }
         let display = self.display()?;
         let area = Rect {
             left: 0,
@@ -1553,8 +1558,8 @@ impl AppHost {
     }
 
     /// The bounds task `id` takes on leaving the Mac's full screen when it
-    /// has neither requested nor last non-fullscreen bounds (launched
-    /// fullscreen): a new freeform task's, as the shell gives a task it
+    /// has neither requested nor last non-fullscreen bounds: a new
+    /// freeform task's, as the shell gives a task it
     /// moves to the desktop, rather than the display area's, whose window
     /// would have its title bar above the screen.
     fn desktop_bounds(&self, id: i32) -> Result<Option<Rect>, String> {
@@ -4081,8 +4086,8 @@ pub(super) mod tests {
             assert_eq!(task7(), (5, old));
             assert_eq!(last(&mut receive), Some(([100, 100, 1000, 1500], 5)));
 
-            // A task launched fullscreen has no freeform bounds to go back
-            // to: leaving takes a new freeform task's, not the display's.
+            // A task of no freeform bounds to go back to: leaving takes a
+            // new freeform task's, not the display's.
             {
                 let mut tasks = host.tasks.tasks.lock().unwrap();
                 let t = tasks.iter_mut().find(|t| t.id == 7).unwrap();
@@ -5464,6 +5469,52 @@ pub(super) mod tests {
         });
     }
 
+    /// `getTaskBounds` gives a fullscreen task default freeform bounds as
+    /// its last non-fullscreen ones (`layoutTask`): a new one, and a start
+    /// into a running one that leaves its mode and bounds as they are.
+    #[test]
+    fn fullscreen_tasks_record_default_restore_bounds() {
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let (_thread, _, _receive, _) = tasks_in_mode(host, export, Rect::default(), false);
+            let info = host.activity_info_of("p", "p.Main").unwrap();
+            let display = host.display().unwrap();
+            let area = Rect {
+                left: 0,
+                top: 0,
+                right: display.0.width,
+                bottom: display.0.height,
+            };
+            let default = super::super::freeform::default_bounds(
+                &super::super::freeform::Activity::from(&info),
+                area,
+                display.0.density_dpi(),
+                false,
+                &[],
+            );
+            let restore = |id| {
+                let tasks = host.tasks.tasks.lock().unwrap();
+                let t = tasks.iter().find(|t| t.id == id).unwrap();
+                (t.windowing_mode, t.restore_bounds)
+            };
+            host.tasks
+                .tasks
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|t| t.id == 8)
+                .unwrap()
+                .restore_bounds = None;
+            host.apply_task_launch_options(8, Default::default(), &info, None, false)
+                .unwrap();
+            assert_eq!(restore(8), (1, Some(default)));
+            *host.tasks.next.lock().unwrap() = 100;
+            let id = host
+                .new_task_with_options(10100, "p", "p.Main", &info, None, Default::default())
+                .unwrap();
+            assert_eq!(restore(id), (1, Some(default)));
+        });
+    }
+
     /// `p/p.Main` of no orientation and a 600 x 900 window layout at the
     /// top left (`Gravity.TOP | Gravity.LEFT`).
     fn layout_info(host: &AppHost) -> ActivityInfo {
@@ -5652,8 +5703,8 @@ pub(super) mod tests {
             assert_eq!(task(7), (5, requested, Some(requested)));
             assert_eq!(saved(), (5, requested));
 
-            // A task launched fullscreen without launch bounds has neither, so in
-            // freeform it fills the display area and records nothing.
+            // A fullscreen task of neither requested nor restore bounds fills
+            // the display area in freeform and records nothing.
             {
                 let mut tasks = host.tasks.tasks.lock().unwrap();
                 let t = tasks.iter_mut().find(|t| t.id == 8).unwrap();
