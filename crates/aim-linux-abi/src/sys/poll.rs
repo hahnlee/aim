@@ -2357,6 +2357,55 @@ mod reportable_tests {
         close(&[fd, both]);
     }
 
+    /// EPOLLWRBAND is a writable datagram or AF_UNIX socket's
+    /// (`sock_writeable`, `unix_writable`), asked alone or with EPOLLOUT;
+    /// never a TCP socket's or a pipe's (`tcp_poll`, `pipe_poll`).
+    #[test]
+    fn epoll_reports_wrband_as_linux_poll_does() {
+        let _view = crate::vfs::test_view();
+        const EPOLLOUT: u32 = 0x4;
+        const EPOLLWRBAND: u32 = 0x200;
+        let udp = crate::sys::net::socket([2, 2 | O_NONBLOCK, 0, 0, 0, 0]);
+        let mut pair = [0i32; 2];
+        assert_eq!(
+            crate::sys::net::socketpair([1, 1 | O_NONBLOCK, 0, pair.as_mut_ptr() as u64, 0, 0]),
+            0
+        );
+        for fd in [udp, pair[0] as i64] {
+            for events in [EPOLLOUT | EPOLLWRBAND, EPOLLWRBAND] {
+                let ep = watching(fd, events);
+                assert_eq!(waited(ep, 0), (1, events as u64), "fd {fd}: {events:#x}");
+                close(&[ep]);
+            }
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (tcp, connected) = connected_to(1, listener.local_addr().unwrap().port());
+        assert_eq!(connected, -115);
+        let (_peer, _) = listener.accept().unwrap();
+        let ep = watching(tcp, EPOLLOUT | EPOLLWRBAND);
+        assert_eq!(waited(ep, 2_000), (1, EPOLLOUT as u64));
+        let band = watching(tcp, EPOLLWRBAND);
+        assert_eq!(waited(band, 0).0, 0);
+        let mut pipe = [0i32; 2];
+        assert_eq!(
+            fs::pipe2([pipe.as_mut_ptr() as u64, O_CLOEXEC, 0, 0, 0, 0]),
+            0
+        );
+        let pipe_band = watching(pipe[1] as i64, EPOLLWRBAND);
+        assert_eq!(waited(pipe_band, 0).0, 0);
+        close(&[
+            udp,
+            pair[0] as i64,
+            pair[1] as i64,
+            tcp,
+            ep,
+            band,
+            pipe[0] as i64,
+            pipe[1] as i64,
+            pipe_band,
+        ]);
+    }
+
     /// A refused non-blocking TCP connect: `tcp_done` shuts it both ways,
     /// so `tcp_poll` reports HUP, IN and OUT, and ERR until SO_ERROR
     /// returns ECONNREFUSED once.

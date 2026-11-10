@@ -157,7 +157,8 @@ unconnected, listening, its peer closed) do, so SHUT_RD adds IN|RDHUP; a
 waiter already blocked is not woken by it; a fork child copies the record and
 a recvmmsg's kept error, an exec or SCM_RIGHTS receiver does not (#2781,
 #2919). A shut AF_UNIX or datagram socket that is writable is
-POLLWRBAND too. A stream or seqpacket peer's close with data unread is not
+POLLWRBAND too, and epoll reports EPOLLWRBAND, alone or with EPOLLOUT, for a
+writable datagram or AF_UNIX socket only (#2925). A stream or seqpacket peer's close with data unread is not
 ECONNRESET/POLLERR, as Linux's `unix_release_sock` makes it. A poll with no event
 on a socket or pipe reports its hangup and error too, waking for one that
 arrives during the wait without spinning on a full buffer or a TCP half-close

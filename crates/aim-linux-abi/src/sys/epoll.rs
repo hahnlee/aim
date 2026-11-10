@@ -91,6 +91,7 @@ const EPOLLERR: u32 = 0x8;
 const EPOLLHUP: u32 = 0x10;
 const EPOLLRDNORM: u32 = 0x40;
 const EPOLLWRNORM: u32 = 0x100;
+const EPOLLWRBAND: u32 = 0x200;
 const EPOLLRDHUP: u32 = 0x2000;
 const EPOLLEXCLUSIVE: u32 = 1 << 28;
 const EPOLLWAKEUP: u32 = 1 << 29;
@@ -144,7 +145,7 @@ impl Interest {
         self.events & (EPOLLIN | EPOLLRDNORM | EPOLLRDHUP | EPOLLPRI) != 0
     }
     fn wants_write(&self) -> bool {
-        self.events & (EPOLLOUT | EPOLLWRNORM) != 0
+        self.events & (EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND) != 0
     }
     /// Whether the interest has an EVFILT_READ knote: one that wants no
     /// filter keeps one, so that closing the fd still drops it.
@@ -188,7 +189,8 @@ fn pty_ctl(
             Err(error) => return -(error as i64),
         };
         Some(Interest {
-            events: u32::from_le_bytes(bytes[..4].try_into().unwrap()),
+            // A tty is never EPOLLWRBAND (`n_tty_poll`).
+            events: u32::from_le_bytes(bytes[..4].try_into().unwrap()) & !EPOLLWRBAND,
             data: u64::from_le_bytes(bytes[8..].try_into().unwrap()),
             disabled: false,
             seen: 0,
@@ -552,6 +554,12 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
             }
             None => n.events |= EPOLLERR | EPOLLHUP,
         }
+        // EPOLLWRBAND only of a socket's `datagram_poll`, `unix_poll` and
+        // `unix_dgram_poll` (`sock_writeable`, `unix_writable`), never of
+        // TCP's or any other file's.
+        if !matches!(&kind, Some(Kind::Sock(s)) if !s.tcp()) {
+            n.events &= !EPOLLWRBAND;
+        }
         n
     });
     let mut interest = ep.interest.lock().unwrap();
@@ -662,7 +670,7 @@ fn bits(k: &libc::kevent, i: &Interest) -> u32 {
         if k.filter == libc::EVFILT_READ {
             b |= i.events & (EPOLLIN | EPOLLRDNORM | EPOLLRDHUP);
         } else if k.filter == libc::EVFILT_WRITE {
-            b |= i.events & (EPOLLOUT | EPOLLWRNORM);
+            b |= i.events & (EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND);
         }
         if shut.hangup() {
             b |= EPOLLHUP;
@@ -696,7 +704,7 @@ fn bits(k: &libc::kevent, i: &Interest) -> u32 {
             b |= EPOLLHUP;
         }
     } else if k.filter == libc::EVFILT_WRITE {
-        b |= i.events & (EPOLLOUT | EPOLLWRNORM);
+        b |= i.events & (EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND);
         if eof {
             b |= if k.fflags != 0 { EPOLLERR } else { EPOLLHUP };
         } else if super::net::pending_error(k.ident as i32).is_some() {
