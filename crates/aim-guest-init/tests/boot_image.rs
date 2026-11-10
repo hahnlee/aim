@@ -91,6 +91,35 @@ fn fixture_image_dry_run_boot() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// An image named relative to the working directory is handed on
+/// absolute: the path map's host paths are read by owners that require
+/// them absolute (a relative one failed a run with EPROTO, #2903).
+#[test]
+fn a_relative_image_is_handed_on_absolute() {
+    let root = common::temp_dir("boot-relative");
+    let image = common::fixture_image(&root);
+    let cwd = std::env::current_dir().unwrap();
+    let up = cwd.components().count() - 1;
+    let relative: PathBuf = std::iter::repeat_n(Path::new(".."), up)
+        .collect::<PathBuf>()
+        .join(image.strip_prefix("/").unwrap());
+    let boot = Boot::prepare(BootOptions::new(
+        relative,
+        root.join("data"),
+        RunMode::DryRun,
+    ))
+    .unwrap();
+    assert_eq!(boot.layout.image, std::fs::canonicalize(&image).unwrap());
+    let map = std::fs::read_to_string(boot.layout.path_map_file()).unwrap();
+    for line in map.lines() {
+        let fields: Vec<_> = line.split('\t').collect();
+        assert!(fields.len() < 3 || fields[2].starts_with('/'), "{line}");
+    }
+    drop(boot);
+    common::make_writable(&root);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn excluded_services_are_not_started() {
     let root = common::temp_dir("boot-exclude");

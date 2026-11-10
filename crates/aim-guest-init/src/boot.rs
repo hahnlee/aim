@@ -3,7 +3,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -651,7 +651,27 @@ impl Boot {
     /// Everything before init's main loop: the runtime layout, property
     /// areas and `PropertyInit`, the ueventd role, the APEX list, scripts,
     /// the boot queue and (run mode) the property sockets.
-    pub fn prepare(options: BootOptions) -> Result<Self, String> {
+    pub fn prepare(mut options: BootOptions) -> Result<Self, String> {
+        // The paths the boot hands to its owners and processes (the path
+        // map's host paths, the runtime's, the binary every guest process
+        // runs) are absolute, whatever the working directory of whoever
+        // reads them; a relative one is taken from guest-init's. The image
+        // exists, so it is resolved, as the data directory's parent is.
+        options.image = std::fs::canonicalize(&options.image)
+            .map_err(|error| format!("{}: {error}", options.image.display()))?;
+        let absolute = |path: &Path| {
+            std::path::absolute(path).map_err(|error| format!("{}: {error}", path.display()))
+        };
+        for path in [
+            &mut options.runtime,
+            &mut options.linux_run,
+            &mut options.gpu,
+            &mut options.vulkan,
+            &mut options.display,
+            &mut options.ce_keychain,
+        ] {
+            *path = path.as_deref().map(absolute).transpose()?;
+        }
         // The boot's start, as the kernel's boot is init's: `ro.boottime.*`
         // and the timeline count from here.
         let epoch = Instant::now();
