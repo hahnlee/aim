@@ -3012,6 +3012,8 @@ fn recv(
     // its ECONNRESET socket error, is none: the receive goes on.
     if let (Err(-104), Some(s)) = (&r, socket.as_ref().filter(|s| s.unix_datagram())) {
         s.peer_gone.store(true, Ordering::Relaxed);
+        // Taken, which a peeking receive does not.
+        get_int(input.fd(), libc::SOL_SOCKET, libc::SO_ERROR);
         r = receive(input, iov, want_name, ctrl_cap, flags);
     }
     let r = match r {

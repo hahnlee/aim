@@ -2701,6 +2701,37 @@ mod reportable_tests {
         close(&[fd]);
     }
 
+    /// A peeking receive takes no datagram, nor Darwin's socket error for
+    /// an AF_UNIX datagram peer's close, which is none on Linux: it fails
+    /// with EAGAIN, as the next does.
+    #[test]
+    fn a_unix_datagram_peek_past_its_peers_close_is_eagain() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_unix_datagram_peek_past_its_peers_close_is_eagain",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        const MSG_PEEK: u64 = 2;
+        const MSG_DONTWAIT: u64 = 0x40;
+        let (fd, peer) = unix_datagram_pair(false);
+        close(&[peer]);
+        let mut buffer = [0u8; 4];
+        let peek = |buffer: &mut [u8; 4]| {
+            crate::sys::net::recvfrom([
+                fd as u64,
+                buffer.as_mut_ptr() as u64,
+                4,
+                MSG_PEEK | MSG_DONTWAIT,
+                0,
+                0,
+            ])
+        };
+        assert_eq!(peek(&mut buffer), -11);
+        assert_eq!(peek(&mut buffer), -11);
+        close(&[fd]);
+    }
+
     /// A refused non-blocking TCP connect: `tcp_done` shuts it both ways,
     /// so `tcp_poll` reports HUP, IN and OUT, and ERR until SO_ERROR
     /// returns ECONNREFUSED once.
