@@ -1492,6 +1492,7 @@ mod tests {
             host: std::ffi::CString::new(node.to_str().unwrap()).unwrap(),
             guest: format!("/dev/input/event{MOUSE}"),
             area: Area::Input,
+            unlocked: false,
         };
         let fd = open(&r, 2).unwrap() as i32;
         assert!(fd >= 0);
