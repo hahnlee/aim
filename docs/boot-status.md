@@ -218,7 +218,11 @@ is POLLIN|POLLRDHUP, with POLLHUP only once both directions are shut, as
 The app host's power owner serves DEVICE_POWER-guarded Binder wake/sleep requests,
 with timestamp ordering, shared interactive/display queries, display-state callbacks
 and registered SCREEN_ON/OFF broadcasts (#2607). Display/screen blockers follow
-that state. Host regression checks cover denial, no-op and stale wake ordering;
+that state. Asleep, SurfaceFlinger powers the display off (`setPowerMode`, as
+DisplayPowerController sets it) and the display-off sleep token pauses then
+stops every task's activities, in window mode every task window's, without
+Mac window changes; waking releases it before powering the display on, and
+the visible tasks' activities resume (#2954; host tests only). Host regression checks cover denial, no-op and stale wake ordering;
 the Mac's display sleep and session lock reach it as the agent's sleep and wake
 keys (#670); no app-host check was run.
 The Mac's screens put Android to sleep and wake it from the device's side: when

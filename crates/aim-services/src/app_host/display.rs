@@ -7,16 +7,22 @@
 use std::sync::Arc;
 
 use aim_binder_host::local::{LocalProcess, Strong};
-use aim_binder_host::parcel::{BAD_VALUE, Parcel, Reader, Result as ParcelResult};
+use aim_binder_host::parcel::{BAD_VALUE, Binder, Parcel, Reader, Result as ParcelResult};
 
 use super::service_manager::wait_for_service;
 
 /// SurfaceFlinger's AIDL service.
 pub(super) const SERVICE: &str = "SurfaceFlingerAIDL";
 const DESCRIPTOR: &str = "android.gui.ISurfaceComposer";
-/// `getPhysicalDisplayIds`, `getStaticDisplayInfo`,
-/// `getDynamicDisplayInfoFromId`: their order in the interface.
+/// `getPhysicalDisplayIds`, `getPhysicalDisplayToken`, `setPowerMode`,
+/// `getStaticDisplayInfo`, `getDynamicDisplayInfoFromId`: their order in
+/// the interface.
 const GET_PHYSICAL_DISPLAY_IDS: u32 = 6;
+const GET_PHYSICAL_DISPLAY_TOKEN: u32 = 7;
+const SET_POWER_MODE: u32 = 9;
+/// `SurfaceControl.POWER_MODE_OFF`, `POWER_MODE_NORMAL`.
+const POWER_MODE_OFF: i32 = 0;
+const POWER_MODE_NORMAL: i32 = 2;
 const GET_STATIC_DISPLAY_INFO: u32 = 12;
 const GET_DYNAMIC_DISPLAY_INFO_FROM_ID: u32 = 13;
 const GET_OVERLAY_SUPPORT: u32 = 68;
@@ -224,6 +230,42 @@ impl Display {
             active.vsync_rate,
         );
         Ok(display)
+    }
+
+    /// `SurfaceControl.setDisplayPowerMode` of the default display, as
+    /// `LocalDisplayAdapter` sets the state DisplayPowerController gives
+    /// it: `POWER_MODE_NORMAL` on, `POWER_MODE_OFF` off. SurfaceFlinger
+    /// then stops or resumes composing it and its vsyncs.
+    pub fn set_power_mode(process: &Arc<LocalProcess>, on: bool) -> Result<(), String> {
+        let sf = wait_for_service(process, SERVICE)?;
+        let ids = call(&sf, GET_PHYSICAL_DISPLAY_IDS, |_| {}, ints64)?;
+        let id = *ids.first().ok_or("SurfaceFlinger has no display")?;
+        let token = call(
+            &sf,
+            GET_PHYSICAL_DISPLAY_TOKEN,
+            |p| p.write_i64(id),
+            |r| r.read_binder(),
+        )?
+        .ok_or("SurfaceFlinger has no token of its display")?;
+        // Held while it is passed back.
+        let _token = match token {
+            Binder::Handle(h) => process.strong(h),
+            Binder::Local(_) => return Err("a local display token".into()),
+        };
+        let mode = if on {
+            POWER_MODE_NORMAL
+        } else {
+            POWER_MODE_OFF
+        };
+        call(
+            &sf,
+            SET_POWER_MODE,
+            |p| {
+                p.write_binder(Some(token));
+                p.write_i32(mode);
+            },
+            |_| Ok(()),
+        )
     }
 
     /// `getOverlaySupport`'s reply data after its status, as DisplayManager

@@ -205,6 +205,8 @@ pub struct Activities {
     pub(super) styles: Mutex<(u64, HashMap<StyleKey, WindowStyle>)>,
     /// The tasks' `WindowContainerToken`s, by task.
     pub(super) task_tokens: Mutex<HashMap<i32, Binder>>,
+    /// `RootWindowContainer.mSleepTokens` of the default display, by tag.
+    sleep_tokens: Mutex<std::collections::BTreeSet<&'static str>>,
 }
 
 impl Activities {
@@ -322,7 +324,30 @@ impl Activities {
     }
 }
 
+/// `RootWindowContainer.DISPLAY_OFF_SLEEP_TOKEN_TAG`: the token the window
+/// policy holds while the display is off (`DisplayPolicy.screenTurnedOff`).
+pub(super) const DISPLAY_OFF_SLEEP_TOKEN: &str = "Display-off";
+
 impl AppHost {
+    /// `ActivityTaskManagerService.SleepTokenAcquirer.acquire` (`held`) or
+    /// `release` of `tag` on the default display, then
+    /// `updateSleepIfNeededLocked`: the display sleeps while it holds a
+    /// token (`DisplayContent.shouldSleep`), and its tasks' activities
+    /// follow (`applySleepTokens`).
+    pub(super) fn set_sleep_token(self: &Arc<Self>, tag: &'static str, held: bool) {
+        let sleeping = {
+            let mut tokens = self.activities.sleep_tokens.lock().unwrap();
+            if held {
+                tokens.insert(tag);
+            } else {
+                tokens.remove(tag);
+            }
+            !tokens.is_empty()
+        };
+        let commands = self.activities.stack.lock().unwrap().set_sleeping(sleeping);
+        self.run(commands);
+    }
+
     /// The window style of an activity of `info` (`getWindowStyle`): read
     /// from its package's resources per code version, user, configuration and theme. One whose
     /// theme cannot be read is opaque, as the original's is when

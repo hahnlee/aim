@@ -458,8 +458,18 @@ impl PowerManager {
             }
             self.update_blockers(&mut state);
         }
+        // DisplayPowerController: the window policy's `screenTurningOn`
+        // before the display powers on, its `screenTurnedOff` once it is
+        // off, which release and acquire the display-off sleep token.
         if let Some(display) = self.host.display_manager.get() {
-            display.power_changed();
+            use super::activity::DISPLAY_OFF_SLEEP_TOKEN;
+            if awake {
+                self.host.set_sleep_token(DISPLAY_OFF_SLEEP_TOKEN, false);
+            }
+            display.set_power(awake);
+            if !awake {
+                self.host.set_sleep_token(DISPLAY_OFF_SLEEP_TOKEN, true);
+            }
         }
         // Notifier's early interactive change: the policy's
         // `startedWakingUp` or `startedGoingToSleep`, which the keyguard

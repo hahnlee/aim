@@ -401,6 +401,9 @@ pub struct Stack {
     removed_from_recents: BTreeSet<i32>,
     /// The task last reported focused.
     front: Option<i32>,
+    /// `DisplayContent.mSleeping`: the display holds sleep tokens
+    /// (`applySleepTokens`).
+    sleeping: bool,
     /// `mTopResumedActivity`, `mLastReportedTopResumedActivity`,
     /// `mTopResumedActivityWaitingForPrev`, and the latest loss.
     top_resumed: Option<u64>,
@@ -505,7 +508,8 @@ impl Stack {
     /// hide one another; nor does the root home task in window mode, the
     /// Mac desktop under every app's window, though it is fullscreen.
     pub fn visibility(&self, task: i32) -> Visibility {
-        if self.behind_desktop(task) || self.top(task).is_none() {
+        // A sleeping display shows no activity (`shouldBeVisibleUnchecked`).
+        if self.sleeping || self.behind_desktop(task) || self.top(task).is_none() {
             return Visibility::Invisible;
         }
         let mut translucent = false;
@@ -1248,7 +1252,8 @@ impl Stack {
         for t in hidden {
             self.pause(t, user_leaving, out);
         }
-        let focused = self.focused();
+        // A sleeping display resumes nothing (`shouldSleepActivities`).
+        let focused = self.focused().filter(|_| !self.sleeping);
         let mut order: Vec<i32> = focused.into_iter().collect();
         order.extend(
             self.tasks
@@ -1489,7 +1494,10 @@ impl Stack {
             self.complete_finishing(token, &mut out);
         }
         self.resume_focused(false, &mut out);
-        if self.focused().is_none() || self.get(token).is_some_and(|a| self.behind_desktop(a.task))
+        // Asleep, a paused activity stops (`checkReadyForSleepLocked`).
+        if self.sleeping
+            || self.focused().is_none()
+            || self.get(token).is_some_and(|a| self.behind_desktop(a.task))
         {
             self.stop_hidden(None, &mut out);
         }
@@ -1564,6 +1572,17 @@ impl Stack {
         self.stop_hidden(None, &mut out);
         self.settle(&mut out);
         out
+    }
+
+    /// `applySleepTokens` of a display whether it sleeps: asleep, every
+    /// task's resumed activities pause (`goToSleepIfPossible`), then stop
+    /// as no activity is visible; awake, the visible tasks' top
+    /// activities resume and the others visible start again.
+    pub(super) fn set_sleeping(&mut self, sleeping: bool) -> Vec<Command> {
+        if std::mem::replace(&mut self.sleeping, sleeping) == sleeping {
+            return Vec::new();
+        }
+        self.ensure_visible()
     }
 
     /// `activityStopped` of a stop that saved instance state, or did not:
@@ -2919,6 +2938,64 @@ mod tests {
         );
         assert_eq!(s.paused(1), [Destroy(1)]);
         assert_eq!(s.destroyed(1), [TaskEmpty(7)]);
+    }
+
+    /// `applySleepTokens`: asleep, the resumed activities of every task
+    /// window pause, then stop; awake, they resume. The focus and the
+    /// tasks stay as they were.
+    #[test]
+    fn a_sleeping_display_pauses_and_stops_every_task_until_it_wakes() {
+        let mut s = Stack {
+            freeform: true,
+            ..Default::default()
+        };
+        launch_new(&mut s, 1, 7, "A", 0);
+        launch_new(&mut s, 2, 8, "B", 0);
+        s.top_resumed_released(None);
+        let tasks = |c: &[Command]| {
+            c.iter()
+                .any(|c| matches!(c, Front(_) | Back(_) | Hide(_) | TaskEmpty(_)))
+        };
+        let out = s.set_sleeping(true);
+        assert!(!tasks(&out));
+        for token in [1, 2] {
+            assert!(out.contains(&Pause {
+                token,
+                finishing: false,
+                user_leaving: false
+            }));
+        }
+        assert!(out.contains(&TopResumed {
+            token: 2,
+            on_top: false
+        }));
+        assert_eq!(s.set_sleeping(true), []);
+        for token in [1, 2] {
+            let out = s.paused(token);
+            assert!(!tasks(&out));
+            assert!(!out.iter().any(|c| matches!(c, Resume { .. })));
+            assert_eq!(
+                out,
+                [
+                    Visible {
+                        token,
+                        visible: false
+                    },
+                    Stop(token)
+                ]
+            );
+            assert!(s.stopped(token, true));
+        }
+        let out = s.set_sleeping(false);
+        assert!(!tasks(&out));
+        for token in [1, 2] {
+            assert!(out.contains(&Resume {
+                token,
+                results: Vec::new(),
+                new_intents: Vec::new()
+            }));
+        }
+        assert_eq!(s.focused(), Some(8));
     }
 
     #[test]
