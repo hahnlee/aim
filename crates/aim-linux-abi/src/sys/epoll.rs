@@ -671,13 +671,17 @@ fn bits(k: &libc::kevent, i: &Interest) -> u32 {
             if k.fflags != 0 {
                 b |= EPOLLERR;
             }
-        } else if k.data == 0 || !i.wants_read() {
+        } else if k.data == 0
+            || !i.wants_read()
+            || matches!(fdtab::get(k.ident as i32), Some(Kind::Sock(s)) if s.datagram())
+        {
             // Darwin's filt_soread fires for a pending socket error, a
             // datagram's without EOF, as for readable data: a firing with
             // nothing to read, or a hangup-only knote's, may be the
             // error's, which `sock_poll` reports as EPOLLERR, with EPOLLIN
             // only for a queued datagram, a zero-length one included (its
-            // address counts in Darwin's queued bytes, not in `data`).
+            // address counts in Darwin's queued bytes, not in `data`). A
+            // datagram socket's error may also arrive behind a queued one.
             if let Some(queued) = super::net::pending_error(k.ident as i32) {
                 b = EPOLLERR | if queued == 0 { 0 } else { b };
             }

@@ -1609,6 +1609,46 @@ mod reportable_tests {
         close(&[fd, readable]);
     }
 
+    /// A datagram queued before a pending error: `sock_poll` reports
+    /// EPOLLIN and EPOLLERR, and `__skb_try_recv_datagram` returns the
+    /// error, taking it, before the datagram.
+    #[test]
+    fn a_pending_error_is_received_before_a_queued_datagram() {
+        let _view = crate::vfs::test_view();
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let (fd, connected) = connected_to(2, peer.local_addr().unwrap().port());
+        assert_eq!(connected, 0);
+        let mut local = [0u8; 16];
+        let mut len = 16u32;
+        assert_eq!(
+            crate::sys::net::getsockname([
+                fd as u64,
+                local.as_mut_ptr() as u64,
+                &mut len as *mut u32 as u64,
+                0,
+                0,
+                0
+            ]),
+            0
+        );
+        let port = u16::from_be_bytes([local[2], local[3]]);
+        peer.send_to(b"xy", ("127.0.0.1", port)).unwrap();
+        drop(peer);
+        let readable = watching(fd, 0x1);
+        assert_eq!(waited(readable, 2_000), (1, 0x1));
+        assert_eq!(refusal(fd, || polled_for(fd, 0, 500)), (1, POLLERR));
+        assert_eq!(polled(fd, POLLIN), (1, POLLIN | POLLERR));
+        assert_eq!(waited(readable, 0), (1, 0x1 | 0x8));
+        let mut buffer = [0u8; 4];
+        assert_eq!(received(fd, &mut buffer), -111);
+        assert_eq!(polled(fd, POLLIN), (1, POLLIN));
+        assert_eq!(waited(readable, 0), (1, 0x1));
+        assert_eq!(received(fd, &mut buffer), 2);
+        assert_eq!(&buffer[..2], b"xy");
+        assert_eq!(received(fd, &mut buffer), -11);
+        close(&[fd, readable]);
+    }
+
     /// A reset with data queued: `tcp_reset` sets ECONNRESET and
     /// `tcp_done` shuts the socket both ways, so it polls IN, OUT, HUP and
     /// ERR, and stays readable once SO_ERROR took the error.

@@ -140,7 +140,9 @@ full buffer; one left with no event keeps a
 knote, so closing its fd still removes it (#2700). A socket's pending error
 (an ICMP-refused UDP send, a refused connect) is EPOLLERR/POLLERR, without
 EPOLLIN for an empty queue, until a receive, send or SO_ERROR returns it once,
-read from the socket's `soi_error` without clearing it; a closed TCP connection
+read from the socket's `soi_error` without clearing it; an IP datagram or raw
+socket's receive returns it before any queued datagram, which stays EPOLLIN
+with the error's EPOLLERR (#2780); a closed TCP connection
 polls IN|OUT|HUP as `tcp_done` shuts it both ways (#2713), never Darwin's
 POLLPRI|POLLRDBAND at EOF, to select as well. A TCP socket never connected
 (`TCP_CLOSE`, bound or not) is OUT|HUP to poll, select and epoll at once, which

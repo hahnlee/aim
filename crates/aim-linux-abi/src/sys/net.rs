@@ -169,6 +169,12 @@ pub struct Sock {
 }
 
 impl Sock {
+    /// An AF_INET or AF_INET6 datagram or raw socket, whose pending error
+    /// `sock_poll` reports, and a receive returns, whatever is queued.
+    pub(super) fn datagram(&self) -> bool {
+        self.ty != SockType::Stream && matches!(self.family, Family::Inet(_))
+    }
+
     fn new(ty: SockType) -> Arc<Sock> {
         Sock::of(ty, Family::Unix)
     }
@@ -2813,6 +2819,14 @@ fn recv(
         || socket
             .as_ref()
             .is_some_and(|s| s.ty == SockType::Dgram && matches!(&s.family, Family::Inet(_)));
+    // `__skb_try_recv_datagram` returns a pending error, taking it, before
+    // any queued datagram, which Darwin's receive returns first.
+    if socket.as_ref().is_some_and(|s| s.datagram()) {
+        let error = get_int(input.fd(), libc::SOL_SOCKET, libc::SO_ERROR).unwrap_or(0);
+        if error != 0 {
+            return Err(-(errno::from_darwin(error) as i64));
+        }
+    }
     let r = receive(input, iov, want_name, ctrl_cap, flags)?;
     if flags & L_MSG_PEEK == 0
         && let Some(s) = socket
