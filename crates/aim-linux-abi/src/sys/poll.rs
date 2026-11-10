@@ -2195,7 +2195,9 @@ mod reportable_tests {
         let unconnected = POLLOUT | POLLWRNORM | POLLWRBAND | POLLHUP;
         for ty in [1u64, 5] {
             let socket = || {
-                let fd = crate::sys::net::socket([1, ty | O_NONBLOCK, 0, 0, 0, 0]);
+                // Close-on-exec: a process a test running in parallel
+                // spawns would otherwise hold the peer open.
+                let fd = crate::sys::net::socket([1, ty | O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0]);
                 assert!(fd >= 0, "socket {fd}");
                 fd
             };
@@ -2254,7 +2256,8 @@ mod reportable_tests {
                 (1, POLLOUT | POLLWRNORM | POLLWRBAND),
                 "type {ty}"
             );
-            let accepted = crate::sys::net::accept4([fd as u64, 0, 0, O_NONBLOCK, 0, 0]);
+            let accepted =
+                crate::sys::net::accept4([fd as u64, 0, 0, O_NONBLOCK | O_CLOEXEC, 0, 0]);
             assert!(accepted >= 0, "accept {accepted}");
             close(&[accepted]);
             let hung = watching(client, 0x1 | 0x4);
