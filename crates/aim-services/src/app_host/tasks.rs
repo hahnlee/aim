@@ -610,13 +610,29 @@ impl AppHost {
     }
 
     /// A reused task takes the launch's windowing mode and bounds
-    /// (`ActivityStarter.setTargetRootTaskIfNeeded`).
+    /// (`ActivityStarter.setTargetRootTaskIfNeeded`), started from the
+    /// task `source` if any.
     pub(super) fn apply_task_launch_options(
         self: &Arc<Self>,
         id: i32,
         options: super::activity_options::LaunchOptions,
         info: &ActivityInfo,
+        source: Option<i32>,
     ) -> Result<(), Exception> {
+        let current = self.tasks.windowing_mode(id);
+        // TaskLaunchParamsModifier: a mode the options leave undefined is a
+        // fullscreen display area's source task's, if fullscreen or freeform,
+        // and updates a root task of another (`shouldUpdateExistingTaskWindowingMode`).
+        let inherited = source
+            .filter(|_| {
+                options.mode == 0 && !self.tasks.window_mode() && self.tasks.parent(id).is_none()
+            })
+            .and_then(|s| self.tasks.windowing_mode(s))
+            .filter(|m| matches!(m, 1 | 5) && Some(*m) != current);
+        let options = super::activity_options::LaunchOptions {
+            mode: inherited.unwrap_or(options.mode),
+            ..options
+        };
         if options.mode == 0 && options.bounds.is_none() {
             return Ok(());
         }
@@ -634,12 +650,15 @@ impl AppHost {
             return self.layout_task_in_root(id, root, options, info, area);
         }
         // A multi-window root task of the display area, made so or kept so
-        // (TaskLaunchParamsModifier takes the task's mode for one the
-        // options leave undefined): launch bounds are requested
-        // (`initial_launch_bounds`, `LaunchParamsController.layoutTask`),
-        // else it keeps its requested ones, as a WCT `setWindowingMode`
-        // leaves them.
-        if valid == 6 || (valid == 0 && self.tasks.windowing_mode(id) == Some(6)) {
+        // (TaskLaunchParamsModifier takes the task's mode for one left
+        // undefined): launch bounds are requested (`initial_launch_bounds`,
+        // `LaunchParamsController.layoutTask`), else it keeps its requested
+        // ones, as a WCT `setWindowingMode` leaves them. A mode it cannot
+        // take gives no launch bounds, and it stays as it is.
+        if valid == 0 && options.mode != 0 && current == Some(6) {
+            return Ok(());
+        }
+        if valid == 6 || (options.mode == 0 && current == Some(6)) {
             let change = self
                 .task_change(id, (valid == 6).then_some(6), options.bounds.map(Some))
                 .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
@@ -2533,7 +2552,7 @@ pub(super) mod tests {
                 }
                 // A reused root task takes a mode it supports and keeps its own
                 // for one it does not.
-                let apply_at = |task: i32, info: &ActivityInfo, mode: i32, bounds| {
+                let apply_from = |task: i32, info: &ActivityInfo, mode: i32, bounds, source| {
                     host.apply_task_launch_options(
                         task,
                         LaunchOptions {
@@ -2542,8 +2561,12 @@ pub(super) mod tests {
                             ..Default::default()
                         },
                         info,
+                        source,
                     )
                     .map(|()| host.tasks.windowing_mode(task).unwrap())
+                };
+                let apply_at = |task: i32, info: &ActivityInfo, mode: i32, bounds| {
+                    apply_from(task, info, mode, bounds, None)
                 };
                 let apply =
                     |task: i32, info: &ActivityInfo, mode: i32| apply_at(task, info, mode, None);
@@ -2570,6 +2593,24 @@ pub(super) mod tests {
                 let later = r(100, 200, 700, 1000);
                 assert_eq!(apply_at(task, &resizeable, 0, Some(later)).unwrap(), 6);
                 assert_eq!(host.tasks.own_bounds(task), Some((6, later)));
+                // A mode it cannot take (pinned, on this device) leaves it and
+                // its bounds.
+                assert_eq!(
+                    apply_at(task, &resizeable, 2, Some(r(0, 0, 600, 600))).unwrap(),
+                    6
+                );
+                assert_eq!(host.tasks.own_bounds(task), Some((6, later)));
+                // Started from a fullscreen task, a fullscreen display area's
+                // launch of undefined mode takes the source's mode
+                // (`canInheritWindowingModeFromSource`); a freeform one's keeps
+                // the task's.
+                let (source, _) = start(&resizeable, 1, None).unwrap();
+                let source_mode = host.tasks.windowing_mode(source).unwrap();
+                let inherited = if windows { 6 } else { source_mode };
+                assert_eq!(
+                    apply_from(task, &resizeable, 0, None, Some(source)).unwrap(),
+                    inherited
+                );
                 let (task, _) = start(&fixed, 1, None).unwrap();
                 for mode in [5, 6] {
                     assert_eq!(apply(task, &fixed, mode).unwrap(), 1);
@@ -3383,6 +3424,7 @@ pub(super) mod tests {
                     ..Default::default()
                 },
                 &host.activity_info_of("p", "p.Main").unwrap(),
+                None,
             )
             .unwrap();
             let display = host.display().unwrap();
@@ -4238,7 +4280,7 @@ pub(super) mod tests {
                     bounds,
                     ..Default::default()
                 };
-                host.apply_task_launch_options(task, options, &info)
+                host.apply_task_launch_options(task, options, &info, None)
                     .unwrap();
                 let tasks = host.tasks.tasks.lock().unwrap();
                 let t = tasks.iter().find(|t| t.id == task).unwrap();
