@@ -96,27 +96,25 @@ pub struct Description {
     pub writer: Option<WriterLease>,
     pub store: Arc<Store>,
     inode: Inode,
-    admission: aim_storage::fsverity::RetainedAdmission,
 }
 impl Description {
     pub fn new(fd: BorrowedFd<'_>, flags: u64, store: Arc<Store>) -> Result<Arc<Self>, Errno> {
-        let configuration = configuration()?.ok_or(errno::EOPNOTSUPP)?;
-        let inode = Inode::open(&configuration.leases, fd).map_err(io)?;
         let admission = store.lock_inode(&fd).map_err(core)?;
         let identity = admission.identity();
-        let retained = admission.retain();
+        let inode = admission.inode().clone();
         let writer = if matches!(flags & 3, 1 | 2) {
             Some(admission.writer_lease().map_err(core)?)
         } else {
             None
         };
+        drop(admission);
+        inode.keep_offset_lock().map_err(io)?;
         Ok(Arc::new(Self {
             flags: flags & !super::fs::O_CLOEXEC,
             identity,
             writer,
             store,
             inode,
-            admission: retained,
         }))
     }
     pub fn check_write(&self) -> Result<(), Errno> {
@@ -244,6 +242,7 @@ pub fn restore(fd: i32, flags: u64, writer_fd: Option<i32>) -> Result<Arc<Descri
     let source = unsafe { BorrowedFd::borrow_raw(fd) };
     let identity = Identity::from_fd(source).map_err(io)?;
     let inode = Inode::open(&configuration.leases, source).map_err(io)?;
+    inode.keep_offset_lock().map_err(io)?;
     let writer = if let Some(writer_fd) = writer_fd {
         let carrier = PrivateFd::allocate(|| {
             let copy = unsafe { libc::fcntl(writer_fd, libc::F_DUPFD_CLOEXEC, 0) };
@@ -257,18 +256,12 @@ pub fn restore(fd: i32, flags: u64, writer_fd: Option<i32>) -> Result<Arc<Descri
     } else {
         None
     };
-    let admission = configuration
-        .store
-        .lock_inode(&source)
-        .map_err(core)?
-        .retain();
     Ok(Arc::new(Description {
         flags,
         identity,
         writer,
         store: configuration.store.clone(),
         inode,
-        admission,
     }))
 }
 pub fn import(
@@ -301,6 +294,7 @@ pub fn import(
         return Err(71);
     }
     let inode = Inode::open(&configuration.leases, source).map_err(io)?;
+    inode.keep_offset_lock().map_err(io)?;
     let writer = if let Some(writer) = writer {
         let carrier = PrivateFd::allocate(|| {
             let fd = aim_binder_host::mach::port_to_fd(writer.as_port())
@@ -321,18 +315,12 @@ pub fn import(
     } else {
         None
     };
-    let admission = configuration
-        .store
-        .lock_inode(&source)
-        .map_err(core)?
-        .retain();
     Ok(Arc::new(Description {
         flags: metadata.flags,
         identity,
         writer,
         store: configuration.store.clone(),
         inode,
-        admission,
     }))
 }
 
@@ -407,13 +395,15 @@ impl Description {
         if Identity::from_fd(fd).map_err(io)? != self.identity {
             return Err(errno::EBADF);
         }
-        let admission = self.admission.lock().map_err(core)?;
-        let enabled = admission.enabled().map_err(core)?;
+        // No admission, as a Linux read or write takes no lock against an
+        // open or an enable: an enable excludes writers, so this file's
+        // bytes are the same on either side of one, and verity once
+        // enabled stays.
+        let enabled = self.store.lookup(self.identity).map_err(core)?;
         if write && enabled.is_some() {
             return Err(errno::EPERM);
         }
         let Some(metadata) = enabled else {
-            drop(admission);
             let result = unsafe {
                 match (position, write) {
                     (Some(position), true) => {
@@ -579,6 +569,92 @@ mod offset_tests {
         assert_eq!(description.seek(source.as_fd(), 0, libc::SEEK_CUR), 16);
         assert_eq!(description.rw(source.as_fd(), &[iov], None, false), 8);
         assert_eq!(u64::from_le_bytes(bytes), 2);
+    }
+
+    fn verified(root: &Path, name: &str) -> (File, Arc<Store>) {
+        let path = root.join("data").join(name);
+        std::fs::write(&path, vec![7u8; 8192]).unwrap();
+        let source = File::open(&path).unwrap();
+        let store = Arc::new(
+            Store::new(
+                &root.join(format!("{name}-proofs")),
+                &root.join(format!("{name}-locks")),
+            )
+            .unwrap(),
+        );
+        let admission = store.lock_inode(&source).unwrap();
+        let enable = admission.begin_enable().unwrap();
+        drop(admission);
+        let prepared = enable
+            .build(
+                aim_storage::fsverity::BuildOptions::new(1, 4096, vec![], 4096, 4096).unwrap(),
+                &[],
+                || false,
+            )
+            .unwrap();
+        enable.commit(prepared).unwrap();
+        (source, store)
+    }
+
+    /// A read waits for no open or enable of its file (which hold
+    /// admission), as on Linux, so overlapping reads cannot starve them.
+    #[test]
+    fn verified_read_does_not_wait_for_admission() {
+        let (_view, root) = vfs::test_view();
+        let (source, store) = verified(root, "verified-admission");
+        let description = Description::new(source.as_fd(), 0, store.clone()).unwrap();
+        let other = source.try_clone().unwrap();
+        let opening = store.lock_inode(&other).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut bytes = [0u8; 16];
+            let iov = libc::iovec {
+                iov_base: bytes.as_mut_ptr().cast(),
+                iov_len: bytes.len(),
+            };
+            let count = description.rw(source.as_fd(), &[iov], Some(4090), false);
+            sender.send((count, bytes)).unwrap();
+        });
+        let read = receiver.recv_timeout(std::time::Duration::from_secs(2));
+        drop(opening);
+        reader.join().unwrap();
+        assert_eq!(read.unwrap(), (16, [7u8; 16]));
+    }
+
+    /// A description keeps three host descriptors: its source, the lease
+    /// directory and the offset lock file, opened with the description so
+    /// that a later read or write needs none.
+    #[test]
+    fn description_keeps_source_lease_directory_and_offset_lock() {
+        let (_view, root) = vfs::test_view();
+        let path = root.join("data/description-budget");
+        std::fs::write(&path, b"budget").unwrap();
+        let source = File::open(&path).unwrap();
+        let locks = root.join("description-budget-locks");
+        let store = Arc::new(Store::new(&root.join("description-budget-proofs"), &locks).unwrap());
+        let description = Description::new(source.as_fd(), 0, store).unwrap();
+        let (path, locks) = (
+            std::fs::canonicalize(&path).unwrap(),
+            std::fs::canonicalize(&locks).unwrap(),
+        );
+        let kept = (0..unsafe { libc::getdtablesize() })
+            .filter(|&fd| fd != source.as_raw_fd())
+            .filter_map(|fd| {
+                let mut buffer = [0u8; libc::PATH_MAX as usize];
+                if unsafe { libc::fcntl(fd, libc::F_GETPATH, buffer.as_mut_ptr()) } < 0 {
+                    return None;
+                }
+                let end = buffer.iter().position(|&byte| byte == 0).unwrap();
+                Some(PathBuf::from(std::ffi::OsStr::from_bytes(&buffer[..end])))
+            })
+            .filter(|kept| *kept == path || kept.starts_with(&locks))
+            .collect::<Vec<_>>();
+        assert_eq!(kept.len(), 3, "{kept:?}");
+        assert!(
+            kept.iter()
+                .any(|kept| kept.extension().is_some_and(|suffix| suffix == "offset"))
+        );
+        drop(description);
     }
 }
 
