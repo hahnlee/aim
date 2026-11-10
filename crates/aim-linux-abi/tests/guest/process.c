@@ -730,7 +730,7 @@ static void pidfd_setfl(void) {
 
 // Each fd number keeps its own close-on-exec flag across fork, also when
 // it shares its open file (a kqueue the child makes again) with others,
-// and the open file keeps its O_NONBLOCK.
+// and the open file keeps its O_NONBLOCK and O_ASYNC.
 static void kqueue_fd_cloexec_fork(void) {
   int go[2];
   CHECK(pipe(go) == 0, "pipe");
@@ -750,7 +750,9 @@ static void kqueue_fd_cloexec_fork(void) {
     fds[2 * i + 1] = fcntl(objects[i], F_DUPFD_CLOEXEC, 0);
     CHECK(fds[2 * i] >= 0 && fds[2 * i + 1] >= 0, "dup %d", i);
   }
-  CHECK(fcntl(objects[1], F_SETFL, O_NONBLOCK) == 0 && fcntl(objects[2], F_SETFL, O_NONBLOCK) == 0,
+  CHECK(fcntl(objects[0], F_SETFL, O_ASYNC) == 0 &&
+            fcntl(objects[1], F_SETFL, O_NONBLOCK | O_ASYNC) == 0 &&
+            fcntl(objects[2], F_SETFL, O_NONBLOCK) == 0,
         "F_SETFL");
   pid_t child = fork();
   if (child == 0) {
@@ -759,6 +761,7 @@ static void kqueue_fd_cloexec_fork(void) {
     bad |= fcntl(objects[0], F_GETFD) != FD_CLOEXEC || fcntl(objects[1], F_GETFD) != FD_CLOEXEC ||
            fcntl(objects[2], F_GETFD) != 0;
     for (int i = 0; i < 6; i++) bad |= !(fcntl(fds[i], F_GETFL) & O_NONBLOCK) != (i < 2);
+    for (int i = 0; i < 6; i++) bad |= !(fcntl(fds[i], F_GETFL) & O_ASYNC) != (i >= 4);
     _exit(bad);
   }
   int st;

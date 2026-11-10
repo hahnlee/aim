@@ -99,8 +99,8 @@ The design is the one Cygwin uses on Windows. The parent spawns a fresh
    state and rebuilds what the state names:
    - kqueues for epolls, inotifies and pidfds on their numbers, one per
      open file and duplicated onto each of its fds, then each fd's own
-     close-on-exec flag and its open file's O_NONBLOCK, as the parent
-     recorded them per fd;
+     close-on-exec flag and its open file's O_NONBLOCK and O_ASYNC, as the
+     parent recorded them per fd;
    - the timerfds' expiries on the timer kqueue;
    - its by-pid entry;
    - a new binder connection;

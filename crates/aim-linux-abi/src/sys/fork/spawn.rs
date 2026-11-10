@@ -27,7 +27,7 @@
 //! - **Descriptors** are inherited by `posix_spawn` (all but kqueues, which
 //!   Darwin cannot pass; the layer rebuilds its epoll, inotify and pidfd
 //!   kqueues from its state), and each fd's close-on-exec flag set again,
-//!   with a rebuilt kqueue's O_NONBLOCK.
+//!   with a rebuilt kqueue's O_NONBLOCK and O_ASYNC.
 //! - **The thread.** Its registers, thread pointer and shadow call stack (a
 //!   host mapping, copied) go in the blob.
 
@@ -655,10 +655,10 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
 
     let pid = match spawned {
         Ok((pid, fds)) => {
-            w.seq(fds.iter(), |w, (fd, cloexec, nonblock)| {
+            w.seq(fds.iter(), |w, (fd, cloexec, status)| {
                 w.i32(*fd);
                 w.bool(*cloexec);
-                w.bool(*nonblock);
+                w.i32(*status);
             });
             if let Err(error) = crate::vfs::publish_fork_mounts(pid, &mount_text) {
                 unsafe {
@@ -811,7 +811,7 @@ fn new_port() -> Result<Port, i64> {
 fn spawn(
     exe: &CString,
     runtime: &[CString],
-    fds: &[(i32, bool, bool)],
+    fds: &[(i32, bool, i32)],
     private_fds: &[(i32, i32)],
     port: Port,
 ) -> Result<i32, i64> {
@@ -824,7 +824,7 @@ fn spawn(
 }
 fn reservation_text(
     kqueues: &[i32],
-    fds: &[(i32, bool, bool)],
+    fds: &[(i32, bool, i32)],
     transfers: &[(i32, i32)],
 ) -> Result<CString, i64> {
     validate_transfers(transfers)?;
@@ -1486,15 +1486,15 @@ pub fn reserve_fds(list: &str) -> Result<(), crate::errno::Errno> {
 }
 
 /// Give fd `fd` its close-on-exec flag and, for a kqueue made again here,
-/// its O_NONBLOCK.
-fn restore_descriptor_flags(fd: i32, cloexec: bool, nonblock: bool) -> Result<(), errno::Errno> {
+/// its status flags (O_NONBLOCK and O_ASYNC, host bits).
+fn restore_descriptor_flags(fd: i32, cloexec: bool, status: i32) -> Result<(), errno::Errno> {
     let flags = if cloexec { libc::FD_CLOEXEC } else { 0 };
     // SAFETY: plain fcntl.
     if unsafe { libc::fcntl(fd, libc::F_SETFD, flags) } < 0 {
         return Err(errno::last());
     }
-    if nonblock {
-        fdtab::set_status_flags(fd, libc::O_NONBLOCK)?;
+    if status != 0 {
+        fdtab::set_status_flags(fd, status)?;
     }
     Ok(())
 }
@@ -1562,11 +1562,11 @@ fn become_child(h: Handover) -> String {
         }
     }
     r.stage("descriptor-flags");
-    for (fd, cloexec, nonblock) in r.seq(|r| (r.i32(), r.bool(), r.bool())) {
+    for (fd, cloexec, status) in r.seq(|r| (r.i32(), r.bool(), r.i32())) {
         if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
             return "fork inherited descriptor missing".into();
         }
-        if let Err(error) = restore_descriptor_flags(fd, cloexec, nonblock) {
+        if let Err(error) = restore_descriptor_flags(fd, cloexec, status) {
             return format!("fork descriptor flags: errno {error}");
         }
     }
@@ -1901,8 +1901,8 @@ mod fd_owner_tests {
         fdtab::publish_guest(retired).unwrap();
         assert_eq!(crate::sys::fs::close([retired as u64, 0, 0, 0, 0, 0]), 0);
         fdtab::after_fork_child().unwrap();
-        for (fd, cloexec, nonblock) in reader.seq(|r| (r.i32(), r.bool(), r.bool())) {
-            restore_descriptor_flags(fd, cloexec, nonblock).unwrap();
+        for (fd, cloexec, status) in reader.seq(|r| (r.i32(), r.bool(), r.i32())) {
+            restore_descriptor_flags(fd, cloexec, status).unwrap();
         }
         assert!(reader.ok());
         assert!(fdtab::visible(guest));
@@ -2020,10 +2020,10 @@ mod fd_owner_tests {
         let (fds, guest_owners) = fdtab::fork_guest_snapshot().unwrap();
         fdtab::fork_save(&mut writer);
         crate::sys::sync_file::fork_save(&mut writer);
-        writer.seq(fds.iter(), |w, (fd, cloexec, nonblock)| {
+        writer.seq(fds.iter(), |w, (fd, cloexec, status)| {
             w.i32(*fd);
             w.bool(*cloexec);
-            w.bool(*nonblock)
+            w.i32(*status)
         });
         let private = writer.take_private().unwrap();
         let explicit = fdtab::hold_fork_private(high.as_fd()).unwrap();

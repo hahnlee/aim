@@ -566,10 +566,11 @@ fn hold_fork_private_locked(
     })
 }
 /// Each guest fd with its close-on-exec flag and, for a kqueue (which the
-/// child makes again, so it inherits no status flags), its O_NONBLOCK;
-/// and the receipts of the inherited fds' owners.
+/// child makes again, so it inherits no status flags), its O_NONBLOCK and
+/// O_ASYNC (host bits, else 0); and the receipts of the inherited fds'
+/// owners.
 pub(crate) fn fork_guest_snapshot()
--> Result<(Vec<(i32, bool, bool)>, Vec<ForkPrivateFd>), crate::errno::Errno> {
+-> Result<(Vec<(i32, bool, i32)>, Vec<ForkPrivateFd>), crate::errno::Errno> {
     let mut flags = Vec::new();
     let mut owners = Vec::new();
     let kqueues = kqueue_fds();
@@ -579,7 +580,17 @@ pub(crate) fn fork_guest_snapshot()
             return Err(crate::errno::last());
         }
         let kqueue = kqueues.contains(&fd);
-        flags.push((fd, value & libc::FD_CLOEXEC != 0, kqueue && nonblocking(fd)));
+        let status = if kqueue {
+            // SAFETY: plain fcntl.
+            let status = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if status < 0 {
+                return Err(crate::errno::last());
+            }
+            status & (libc::O_NONBLOCK | libc::O_ASYNC)
+        } else {
+            0
+        };
+        flags.push((fd, value & libc::FD_CLOEXEC != 0, status));
         if !kqueue {
             owners.push(hold_fork_private(unsafe {
                 std::os::fd::BorrowedFd::borrow_raw(fd)

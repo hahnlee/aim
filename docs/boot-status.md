@@ -135,8 +135,8 @@ on events and POLL_HUP when the device goes, and a pty POLL_IN on input and
 POLL_OUT on write space; a pty's O_ASYNC is its description's in the pty
 keeper, and both keep every owner in the layer (#2877). A fork child
 gives each rebuilt pidfd, epoll and inotify fd its own close-on-exec flag
-(#2840) and its open file's O_NONBLOCK, and a pidfd (a kqueue) cannot
-be sent over SCM_RIGHTS (#2838). Darwin attaches no `NOTE_REAP` to a zombie, so a pidfd opened (or inherited
+(#2840) and its open file's O_NONBLOCK and O_ASYNC (#2876), and a pidfd (a
+kqueue) cannot be sent over SCM_RIGHTS (#2838). Darwin attaches no `NOTE_REAP` to a zombie, so a pidfd opened (or inherited
 across fork) while its process is already a zombie gets that reap notice only
 when this same process reaps it; one held by any other process then reports
 POLLHUP only to a poll for POLLIN. An inotify is readable only while events
