@@ -102,13 +102,22 @@ pub(super) fn policies(root: &Path, m: &Membership, pid: i32) -> Result<Vec<(i32
             Ok((c, r, state))
         })
         .collect::<Result<_, Errno>>()?;
+    // A policy follows from the thread's group in each hierarchy alone, so
+    // the threads of one group (most of a process's) read its values once.
+    let mut known: std::collections::HashMap<Vec<String>, Policy> = Default::default();
     tids(pid)
         .into_iter()
         .filter(|tid| super::super::thread::owner(*tid) == pid)
         .map(|tid| {
+            let groups: Vec<String> = hierarchies
+                .iter()
+                .map(|(_, _, state)| group_of(state, tid))
+                .collect();
+            if let Some(p) = known.get(&groups) {
+                return Ok((tid, *p));
+            }
             let mut p = Policy::default();
-            for (c, root, state) in &hierarchies {
-                let group = group_of(state, tid);
+            for ((c, root, _), group) in hierarchies.iter().zip(&groups) {
                 let mut dir = root.join(group.trim_start_matches('/'));
                 if *c == Controller::Cpu && dir != *root {
                     p.min = INTERACTIVE;
@@ -124,6 +133,7 @@ pub(super) fn policies(root: &Path, m: &Membership, pid: i32) -> Result<Vec<(i32
                 }
             }
             p.min = p.min.min(p.max);
+            known.insert(groups, p);
             Ok((tid, p))
         })
         .collect()
