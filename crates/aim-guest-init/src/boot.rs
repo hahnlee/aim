@@ -1454,8 +1454,6 @@ impl Boot {
         }
     }
 
-    /// Sets a property for the host, as init sets one, and runs its
-    /// triggers.
     /// One event of the boot loop's: a child's exit is reaped by the
     /// loop's next process poll.
     fn handle_event(&mut self, event: PropertyEvent) {
@@ -1466,6 +1464,8 @@ impl Boot {
         }
     }
 
+    /// Sets a property for the host, as init sets one, and runs its
+    /// triggers.
     fn set_host_property(&mut self, name: &str, value: &str) {
         if let Err(error) = self.executor.set_host_property(name, value) {
             self.report.log.push(format!("{name}={value}: {error}"));
@@ -1534,9 +1534,12 @@ impl Boot {
                 self.report.log.push("stop requested".to_string());
                 break;
             }
-            // As init's main loop polls its epoll between commands: what
-            // came in while a command ran is handled before the next.
-            while let Some(event) = self.events.as_ref().and_then(|r| r.try_recv().ok()) {
+            // As init's main loop polls its epoll between commands, one
+            // event that came in while a command ran is handled before the
+            // next; one per iteration, as init handles one control message
+            // (`HandleControlMessages`), so that a stream of them starves
+            // neither the queue nor the stop and deadline checks.
+            if let Some(event) = self.events.as_ref().and_then(|r| r.try_recv().ok()) {
                 self.handle_event(event);
             }
             self.pump_outbox();
