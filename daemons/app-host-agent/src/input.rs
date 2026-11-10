@@ -338,8 +338,8 @@ impl Dispatcher {
         channel: OwnedFd,
         display: (i32, i32),
         region: Region,
-    ) {
-        let channel = injection::Channel::new(channel);
+    ) -> std::io::Result<()> {
+        let channel = injection::Channel::new(channel)?;
         let drained = channel.clone();
         let dispatcher = self.clone();
         std::thread::spawn(move || {
@@ -354,6 +354,7 @@ impl Dispatcher {
             region,
         });
         self.refocus(&mut windows, None);
+        Ok(())
     }
 
     /// The window of channel `index` comes to the front and takes the focus.
@@ -750,13 +751,21 @@ fn drain(channel: &injection::Channel, dispatcher: &Dispatcher, index: i32) {
             let Some(socket) = socket.as_ref() else {
                 return;
             };
+            match channel.wait(socket.as_raw_fd(), libc::POLLIN) {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(error) => {
+                    log::warn!("input channel: {error}");
+                    return;
+                }
+            }
             // SAFETY: a receive into a local buffer; close waits for this borrow.
             unsafe {
                 libc::recv(
                     socket.as_raw_fd(),
                     buffer.as_mut_ptr().cast(),
                     buffer.len(),
-                    0,
+                    libc::MSG_DONTWAIT,
                 )
             }
         };
@@ -764,7 +773,11 @@ fn drain(channel: &injection::Channel, dispatcher: &Dispatcher, index: i32) {
             dispatcher.finished(index, u32::from_ne_bytes(buffer[4..8].try_into().unwrap()));
         }
         if n == 0
-            || (n < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted)
+            || (n < 0
+                && !matches!(
+                    std::io::Error::last_os_error().kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ))
         {
             return;
         }

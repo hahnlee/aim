@@ -163,18 +163,20 @@ mod tests {
             let dispatcher = dispatcher::Dispatcher::new();
             let (server, client) = UnixDatagram::pair().unwrap();
             client.set_read_timeout(Some(TIMEOUT)).unwrap();
-            dispatcher.add_window(
-                0,
-                server.into(),
-                (500, 500),
-                Region {
-                    frame: [0, 0, 100, 100],
-                    touchable: [0, 0, 100, 100],
-                    watch_outside: false,
-                    owner: 10001,
-                    owner_pid: 42,
-                },
-            );
+            dispatcher
+                .add_window(
+                    0,
+                    server.into(),
+                    (500, 500),
+                    Region {
+                        frame: [0, 0, 100, 100],
+                        touchable: [0, 0, 100, 100],
+                        watch_outside: false,
+                        owner: 10001,
+                        owner_pid: 42,
+                    },
+                )
+                .unwrap();
             let mut bytes = [0; 512];
             client.recv(&mut bytes).unwrap(); // focus
             let (entered, entering) = mpsc::channel();

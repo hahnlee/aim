@@ -111,7 +111,8 @@ fn input_injection_permission_target_modes_transform_and_completion() {
                 owner: 10100,
                 owner_pid: 42,
             },
-        );
+        )
+        .unwrap();
         let mut buf = [0; 512];
         client.recv(&mut buf).unwrap();
         let manager = InputManager::new(host.clone());
@@ -260,7 +261,8 @@ fn filter_install_routes_hardware_reinjects_once_and_uninstalls() {
             owner: 10100,
             owner_pid: 42,
         },
-    );
+    )
+    .unwrap();
     let mut buffer = [0; 512];
     client.recv(&mut buffer).unwrap(); // focus
     let (tx, rx) = std::sync::mpsc::channel();

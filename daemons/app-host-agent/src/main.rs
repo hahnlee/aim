@@ -772,7 +772,7 @@ impl IAppHostAgent for Agent {
         let index = self
             .channels
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.input.add_window(index, server, display, region);
+        self.input.add_window(index, server, display, region)?;
         Ok((index, client))
     }
 

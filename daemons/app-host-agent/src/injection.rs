@@ -148,19 +148,62 @@ struct Outbound {
 }
 pub(super) struct Channel {
     pub(super) socket: std::sync::RwLock<Option<OwnedFd>>,
+    /// A pipe whose read end is readable once the channel closes. Darwin
+    /// can miss the wakeup of a datagram receive that starts while another
+    /// thread shuts the socket down, and sleep forever, so no thread waits
+    /// on the socket alone ([`Channel::wait`]).
+    closing: [OwnedFd; 2],
     state: Mutex<Outbound>,
     changed: Condvar,
 }
 impl Channel {
-    pub(super) fn new(socket: OwnedFd) -> Arc<Self> {
+    pub(super) fn new(socket: OwnedFd) -> std::io::Result<Arc<Self>> {
+        let mut pipe = [0; 2];
+        // SAFETY: a pipe into a local array; both ends are owned below.
+        if unsafe { libc::pipe(pipe.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let closing =
+            pipe.map(|fd| unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) });
+        for fd in &closing {
+            // SAFETY: a descriptor flag of a pipe this function owns.
+            if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
         let c = Arc::new(Self {
             socket: std::sync::RwLock::new(Some(socket)),
+            closing,
             state: Mutex::new(Outbound::default()),
             changed: Condvar::new(),
         });
         let writer = c.clone();
         std::thread::spawn(move || writer.publish());
-        c
+        Ok(c)
+    }
+    /// Wait until the socket `fd`, borrowed from [`Channel::socket`], has
+    /// `events`: false once the channel closes.
+    pub(super) fn wait(&self, fd: i32, events: i16) -> std::io::Result<bool> {
+        let mut fds = [
+            libc::pollfd {
+                fd,
+                events,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: self.closing[0].as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        // SAFETY: two pollfds of descriptors that outlive the call.
+        while unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+        Ok(fds[1].revents == 0)
     }
     pub(super) fn enqueue(&self, message: Vec<u8>, injection: Option<Weak<Injection>>) {
         let mut s = self.state.lock().unwrap();
@@ -185,14 +228,10 @@ impl Channel {
         for (_, i) in s.pending.drain() {
             finish(Some(i));
         }
-        // Shutdown wakes local recv/poll; only close signals a Darwin datagram
+        // Wake the socket's waiters; only close signals a Darwin datagram
         // peer. Wait for socket users, not the threads' later window callbacks.
-        {
-            let socket = self.socket.read().unwrap();
-            unsafe {
-                libc::shutdown(socket.as_ref().unwrap().as_raw_fd(), libc::SHUT_RDWR);
-            }
-        }
+        // SAFETY: one byte into the pipe this channel owns; it stays unread.
+        unsafe { libc::write(self.closing[1].as_raw_fd(), [0u8].as_ptr().cast(), 1) };
         self.socket.write().unwrap().take();
         self.changed.notify_all();
     }
@@ -237,19 +276,17 @@ impl Channel {
                 self.close();
                 return;
             }
-            let mut fd = libc::pollfd {
-                fd,
-                events: libc::POLLOUT,
-                revents: 0,
-            };
             // Retain the outbound head until the nonblocking socket is writable.
-            let result = unsafe { libc::poll(&mut fd, 1, -1) };
+            let writable = self.wait(fd, libc::POLLOUT);
             drop(socket);
-            if result < 0
-                && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
-            {
-                self.close();
-                return;
+            match writable {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(error) => {
+                    log::warn!("input channel: {error}");
+                    self.close();
+                    return;
+                }
             }
         }
     }
@@ -278,7 +315,8 @@ fn result_and_finished_share_deadline_and_removal_releases_completion() {
             owner: 10100,
             owner_pid: 42,
         },
-    );
+    )
+    .unwrap();
     let mut buffer = [0; 512];
     client.recv(&mut buffer).unwrap();
     let e = Event {
@@ -342,7 +380,8 @@ fn removal_closes_socket_while_channel_references_survive() {
                 owner: 10100,
                 owner_pid: 42,
             },
-        );
+        )
+        .unwrap();
         let channel = d.windows.lock().unwrap().stack[0].channel.clone();
         d.sync_windows(&[]);
         assert!(channel.socket.read().unwrap().is_none());
