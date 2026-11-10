@@ -98,12 +98,23 @@ impl Params {
     }
 }
 
-type Records = BTreeMap<ComponentName, Params>;
+/// `PersistableLaunchParams`: the params, and when they were captured or
+/// their file last modified (`mTimestamp`, ms since the epoch).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Record {
+    params: Params,
+    timestamp: i64,
+}
+
+type Records = BTreeMap<ComponentName, Record>;
 
 #[derive(Default)]
 struct State {
     users: BTreeMap<i32, Records>,
     loading: BTreeMap<i32, JoinHandle<Result<Option<Records>, String>>>,
+    /// `mWindowLayoutAffinityMap`: the components each window layout
+    /// affinity was saved or loaded with, of any user.
+    affinities: BTreeMap<String, BTreeSet<ComponentName>>,
 }
 
 impl State {
@@ -113,10 +124,23 @@ impl State {
                 .join()
                 .map_err(|_| format!("launch params loader for {user} panicked"))??;
             if let Some(records) = records {
+                for (name, record) in &records {
+                    self.add_affinity(name, &record.params);
+                }
                 self.users.insert(user, records);
             }
         }
         Ok(())
+    }
+
+    /// `addComponentNameToLaunchParamAffinityMapIfNotNull`.
+    fn add_affinity(&mut self, name: &ComponentName, params: &Params) {
+        if let Some(affinity) = &params.window_layout_affinity {
+            self.affinities
+                .entry(affinity.clone())
+                .or_default()
+                .insert(name.clone());
+        }
     }
 }
 
@@ -185,11 +209,15 @@ impl Persister {
         let records = state.users.entry(user).or_default();
         let previous = records.entry(name.clone()).or_default();
         // Preserve the pin's Objects.equals (without negation) for affinity.
-        let changed = previous.display_unique_id != params.display_unique_id
-            || previous.windowing_mode != params.windowing_mode
-            || previous.bounds != params.bounds
-            || previous.window_layout_affinity == params.window_layout_affinity;
-        *previous = params.clone();
+        let changed = previous.params.display_unique_id != params.display_unique_id
+            || previous.params.windowing_mode != params.windowing_mode
+            || previous.params.bounds != params.bounds
+            || previous.params.window_layout_affinity == params.window_layout_affinity;
+        previous.params = params.clone();
+        if changed {
+            previous.timestamp = now();
+        }
+        state.add_affinity(name, &params);
         // `LaunchParamsWriteQueueItem.process`: a locked user's CE storage
         // is not prepared, or not writable, so the folder cannot be made.
         if !ce_unlocked {
@@ -205,11 +233,30 @@ impl Persister {
         Ok(())
     }
 
-    /// `LaunchParamsPersister.getLaunchParams`, before launch placement.
-    pub fn get(&self, user: i32, name: &ComponentName) -> Result<Option<Params>, String> {
+    /// `LaunchParamsPersister.getLaunchParams`, before launch placement:
+    /// the record of `user`'s `name`, or the newest of the components saved
+    /// with its window layout `affinity`.
+    pub fn get(
+        &self,
+        user: i32,
+        name: &ComponentName,
+        affinity: Option<&str>,
+    ) -> Result<Option<Params>, String> {
         let mut state = self.state.lock().unwrap();
         state.finish_loading(user)?;
-        Ok(state.users.get(&user).and_then(|m| m.get(name)).cloned())
+        let Some(records) = state.users.get(&user) else {
+            return Ok(None);
+        };
+        let candidates = affinity.and_then(|a| state.affinities.get(a));
+        let newest = candidates
+            .into_iter()
+            .flatten()
+            .filter_map(|c| records.get(c))
+            .fold(records.get(name), |found, c| match found {
+                Some(f) if c.timestamp <= f.timestamp => Some(f),
+                _ => Some(c),
+            });
+        Ok(newest.map(|r| r.params.clone()))
     }
 
     pub fn remove_package(&self, package: &str) -> Result<(), String> {
@@ -294,7 +341,11 @@ fn load(
             .and_then(|b| Params::restore(&b))
         {
             Ok(params) => {
-                records.insert(name, params);
+                // The file's modification time stands for the capture's
+                // after a reboot or a user switch.
+                let modified = entry.metadata().and_then(|m| m.modified());
+                let timestamp = modified.map_or(0, millis);
+                records.insert(name, Record { params, timestamp });
             }
             Err(e) => {
                 eprintln!("app host: launch params restore {}: {e}", path.display());
@@ -306,6 +357,17 @@ fn load(
         queue.cleanup(cleanup);
     }
     Ok(Some(records))
+}
+
+/// `System.currentTimeMillis`.
+fn now() -> i64 {
+    millis(std::time::SystemTime::now())
+}
+
+/// `time` in ms since the epoch (`File.lastModified`), 0 before it.
+fn millis(time: std::time::SystemTime) -> i64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 pub(super) struct Observer(pub Weak<AppHost>);

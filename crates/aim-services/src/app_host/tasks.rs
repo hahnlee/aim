@@ -494,7 +494,11 @@ impl AppHost {
         // this display in a freeform display area (window mode) give the mode and
         // the last non-fullscreen bounds. Only a mode this owner supports is reused.
         let saved = if windows && !home && options.bounds.is_none() {
-            self.persisted_launch_params(uid, &real_activity)?
+            let affinity = info
+                .window_layout
+                .as_ref()
+                .and_then(|l| l.affinity.as_deref());
+            self.persisted_launch_params(uid, &real_activity, affinity)?
         } else {
             None
         };
@@ -736,13 +740,15 @@ impl AppHost {
         Ok(id)
     }
 
-    /// `LaunchParamsPersister.getLaunchParams` of `uid`'s `real_activity`:
-    /// its params persisted for this display, if of a mode this owner
+    /// `LaunchParamsPersister.getLaunchParams` of `uid`'s `real_activity`
+    /// of the window layout `affinity`: its params persisted for this
+    /// display, or the newest of its affinity's, if of a mode this owner
     /// supports.
     fn persisted_launch_params(
         &self,
         uid: u32,
         real_activity: &str,
+        affinity: Option<&str>,
     ) -> Result<Option<Params>, Exception> {
         let name = crate::package::preferred::unflatten(real_activity)
             .ok_or_else(|| Exception::illegal_argument("invalid task component"))?;
@@ -750,7 +756,7 @@ impl AppHost {
         Ok(self
             .tasks
             .launch_params(self.data()?)?
-            .get((uid / super::PER_USER_RANGE) as i32, &name)
+            .get((uid / super::PER_USER_RANGE) as i32, &name, affinity)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?
             .filter(|p| {
                 p.display_unique_id.as_deref() == Some(display.as_str())
@@ -4604,7 +4610,7 @@ pub(super) mod tests {
             let saved = || {
                 let persister = host.tasks.launch_params(host.data().unwrap()).unwrap();
                 persister
-                    .get(0, &name)
+                    .get(0, &name, None)
                     .unwrap()
                     .map(|p| (p.windowing_mode, p.bounds))
             };
@@ -5400,6 +5406,64 @@ pub(super) mod tests {
         });
     }
 
+    /// A new task of an activity of a window layout affinity opens where
+    /// the newest window of a component of that affinity was persisted
+    /// (`getLaunchParams`); a start into a running one leaves it.
+    #[test]
+    fn a_new_task_takes_its_window_layout_affinitys_persisted_bounds() {
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            enable_freeform(host);
+            let old = Rect {
+                left: 100,
+                top: 100,
+                right: 900,
+                bottom: 1500,
+            };
+            let (_thread, _, _receive, _) = wct_tasks(host, export, old);
+            let saved = Rect {
+                left: 300,
+                top: 400,
+                right: 900,
+                bottom: 1300,
+            };
+            let display = format!("local:{}", host.display().unwrap().0.id);
+            host.tasks
+                .launch_params(host.data().unwrap())
+                .unwrap()
+                .save(
+                    0,
+                    &crate::package::preferred::unflatten("p/p.Other").unwrap(),
+                    Params {
+                        display_unique_id: Some(display),
+                        windowing_mode: 5,
+                        bounds: saved,
+                        window_layout_affinity: Some("shared".into()),
+                    },
+                    false,
+                )
+                .unwrap();
+            let mut info = host.activity_info_of("p", "p.Main").unwrap();
+            info.window_layout = Some(crate::package::pkg::WindowLayout {
+                width: -1,
+                width_fraction: -1.0,
+                height: -1,
+                height_fraction: -1.0,
+                gravity: 0,
+                min_width: -1,
+                min_height: -1,
+                affinity: Some("shared".into()),
+            });
+            *host.tasks.next.lock().unwrap() = 100;
+            let id = host
+                .new_task_with_options(10100, "p", "p.Main", &info, None, Default::default())
+                .unwrap();
+            assert_eq!(host.tasks.own_bounds(id), Some((5, saved)));
+            host.apply_task_launch_options(8, Default::default(), &info, None, false)
+                .unwrap();
+            assert_eq!(host.tasks.own_bounds(8), Some((5, old)));
+        });
+    }
+
     /// `p/p.Main` of no orientation and a 600 x 900 window layout at the
     /// top left (`Gravity.TOP | Gravity.LEFT`).
     fn layout_info(host: &AppHost) -> ActivityInfo {
@@ -5550,6 +5614,7 @@ pub(super) mod tests {
                     .get(
                         0,
                         &crate::package::preferred::unflatten("p/p.Main").unwrap(),
+                        None,
                     )
                     .unwrap()
                     .unwrap();

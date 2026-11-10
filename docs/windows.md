@@ -239,9 +239,10 @@ put it is authoritative (as for the clamp of Mac moves, #2823):
   nor the persisted launch params, and does not move the window off
   another window's corners (`adjustBoundsToAvoidConflict`), so tiled
   windows stay tiled. Launch bounds in the start's options still apply.
-- Persisted launch params, which are the component's, only place a new
-  task: a reused task never takes the mode or bounds another task of its
-  component persisted.
+- Persisted launch params, which are the component's (or, as the
+  original reads them, the newest of a component of the same
+  `windowLayoutAffinity`), only place a new task: a reused task never
+  takes the mode or bounds another task persisted.
 - A new task's persisted bounds, where the user last put the component's
   window, come before its activity's `<layout>`, which applies when
   nothing is persisted (the original takes the layout first).
