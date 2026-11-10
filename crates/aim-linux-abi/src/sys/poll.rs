@@ -271,6 +271,11 @@ fn guest_revents(fd: i32, pin: Option<&super::fdtab::Pinned>, h: &libc::pollfd, 
             }
         }
     }
+    // `tcp_poll` reports a writable socket as POLLOUT | POLLWRNORM, where
+    // Darwin adds POLLWRBAND.
+    if matches!(pin.and_then(|pin| pin.kind()), Some(super::fdtab::Kind::Sock(s)) if s.tcp()) {
+        revents &= !POLLWRBAND;
+    }
     revents
 }
 
@@ -2082,6 +2087,7 @@ mod reportable_tests {
         assert_eq!(connected, -115);
         assert_eq!(polled_for(client, POLLOUT, 2_000), (1, POLLOUT));
         assert_eq!(polled(client, POLLIN | POLLOUT), (1, POLLOUT));
+        assert_eq!(polled(client, ALL), (1, POLLOUT | POLLWRNORM));
         assert_eq!(selected(client), (1, false, true));
         assert_eq!(polled(fd, ALL), (1, POLLIN | POLLRDNORM));
         assert_eq!(selected(fd), (1, true, false));

@@ -146,7 +146,8 @@ with the error's EPOLLERR (#2780), as does a raw socket's read; a recvmmsg that
 received datagrams keeps a later error for the next call, which poll reports
 (not inherited by a fork child); a closed TCP connection
 polls IN|OUT|HUP as `tcp_done` shuts it both ways (#2713), never Darwin's
-POLLPRI|POLLRDBAND at EOF, to select as well. A TCP socket never connected
+POLLPRI|POLLRDBAND at EOF, nor a TCP socket's POLLWRBAND (#2918), to select as
+well. A TCP socket never connected
 (`TCP_CLOSE`, bound or not) is OUT|HUP to poll, select and epoll at once, which
 Darwin reports as nothing; edge-triggered once per change, a shutdown included:
 its shutdown fails with ENOTCONN but is recorded, as `inet_shutdown` does, so

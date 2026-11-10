@@ -184,6 +184,11 @@ impl Sock {
         self.ty != SockType::Stream && matches!(self.family, Family::Inet(_))
     }
 
+    /// An AF_INET or AF_INET6 stream socket: TCP.
+    pub(super) fn tcp(&self) -> bool {
+        self.ty == SockType::Stream && matches!(self.family, Family::Inet(_))
+    }
+
     fn new(ty: SockType) -> Arc<Sock> {
         Sock::of(ty, Family::Unix)
     }
