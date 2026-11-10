@@ -864,14 +864,21 @@ pub fn pin_guest(fd: i32) -> Result<Pinned, crate::errno::Errno> {
     let mut fuse = None;
     let descriptor = aim_storage::private_fd::PrivateFd::allocate(|| {
         require_guest_visible(fd).map_err(std::io::Error::from_raw_os_error)?;
-        super::net::adopt(fd);
-        super::dir::adopt(fd).map_err(std::io::Error::from_raw_os_error)?;
-        kind = get(fd);
-        fuse = super::fuse_client::get(fd);
+        // One fstat decides which owner may adopt the fd: this runs under
+        // the lifecycle lock every pin of the process takes.
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         if unsafe { libc::fstat(fd, &mut stat) } < 0 {
             return Err(std::io::Error::last_os_error());
         }
+        match stat.st_mode & libc::S_IFMT {
+            libc::S_IFSOCK => super::net::adopt(fd),
+            libc::S_IFDIR => {
+                super::dir::adopt_directory(fd).map_err(std::io::Error::from_raw_os_error)?
+            }
+            _ => {}
+        }
+        kind = get(fd);
+        fuse = super::fuse_client::get(fd);
         socket_allowed = stat.st_mode & libc::S_IFMT == libc::S_IFSOCK
             && matches!(kind, None | Some(Kind::Sock(_)))
             && !super::fuse_device::is_device(fd)

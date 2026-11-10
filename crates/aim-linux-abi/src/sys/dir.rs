@@ -157,6 +157,14 @@ pub(super) fn adopt(fd: i32) -> Result<(), crate::errno::Errno> {
         return Err(errno::last());
     }
     if stat.st_mode & libc::S_IFMT == libc::S_IFDIR {
+        adopt_directory(fd)?;
+    }
+    Ok(())
+}
+
+/// [`adopt`] of `fd`, which a caller's fstat found to be a directory.
+pub(super) fn adopt_directory(fd: i32) -> Result<(), crate::errno::Errno> {
+    if fdtab::get(fd).is_none() {
         stream_of(fd).map_err(|error| (-error) as crate::errno::Errno)?;
     }
     Ok(())
