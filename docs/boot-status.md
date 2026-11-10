@@ -155,7 +155,8 @@ refused connect) is OUT|HUP to poll, select and epoll at once (an AF_UNIX one
 with POLLWRBAND), which Darwin reports as nothing, and a TCP one's send or
 write fails with EPIPE and SIGPIPE (unless MSG_NOSIGNAL), as
 `sk_stream_wait_connect` fails it, a listening one's too, where Darwin's fails
-with ENOTCONN; a connecting one's waits for the connection, or is EAGAIN
+with ENOTCONN; a connecting one's waits for the connection up to SO_SNDTIMEO
+(then EAGAIN; a signal's EINTR restarts only untimed), or is EAGAIN
 non-blocking; a TCP write raises SIGPIPE for EPIPE like a send (#2927);
 edge-triggered once per
 change, a shutdown included: its shutdown is recorded, as `inet_shutdown` (with

@@ -2352,9 +2352,40 @@ fn wait_connect(fd: i32, flags: u64) -> Result<(), i64> {
     {
         return Err(-(EAGAIN as i64));
     }
-    match fdtab::wait_for(fd, libc::POLLOUT) {
-        0 => Ok(()),
-        error => Err(error),
+    // Up to SO_SNDTIMEO, then EAGAIN; a signal's EINTR is restarted as
+    // ERESTARTSYS untimed, and not timed (`sock_intr_errno`).
+    let mut timeout = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+    let mut len = std::mem::size_of::<libc::timeval>() as u32;
+    // SAFETY: a timeval of ours, of its length.
+    unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDTIMEO,
+            (&mut timeout as *mut libc::timeval).cast(),
+            &mut len,
+        )
+    };
+    let ms = timeout.tv_sec * 1000 + (timeout.tv_usec as i64 + 999) / 1000;
+    let mut ready = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: one pollfd of ours.
+    match unsafe { libc::poll(&mut ready, 1, if ms == 0 { -1 } else { ms as i32 }) } {
+        0 => Err(-(EAGAIN as i64)),
+        n if n > 0 => Ok(()),
+        _ => {
+            let error = errno::last();
+            if error == crate::errno::EINTR && ms != 0 {
+                super::signal::not_restarted();
+            }
+            Err(-(error as i64))
+        }
     }
 }
 

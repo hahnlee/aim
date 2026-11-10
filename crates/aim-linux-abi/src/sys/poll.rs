@@ -2160,6 +2160,42 @@ mod reportable_tests {
         close(&[fresh, listener]);
     }
 
+    /// `sk_stream_wait_connect`: a blocking send on a connecting TCP
+    /// socket waits for the connection up to SO_SNDTIMEO, then fails with
+    /// EAGAIN. The connect goes to TEST-NET-1 (RFC 5737), which nothing
+    /// answers, so it stays in progress.
+    #[test]
+    fn a_send_on_a_connecting_tcp_socket_waits_up_to_its_timeout() {
+        let _view = crate::vfs::test_view();
+        let fd = crate::sys::net::socket([2, 1 | O_NONBLOCK, 0, 0, 0, 0]);
+        let mut address = [0u8; 16];
+        address[..2].copy_from_slice(&2u16.to_le_bytes());
+        address[2..4].copy_from_slice(&9u16.to_be_bytes());
+        address[4..8].copy_from_slice(&[192, 0, 2, 1]);
+        assert_eq!(
+            crate::sys::net::connect([fd as u64, address.as_ptr() as u64, 16, 0, 0, 0]),
+            -115,
+            "TEST-NET-1 needs a route"
+        );
+        let byte = b"x".as_ptr() as u64;
+        assert_eq!(crate::sys::net::sendto([fd as u64, byte, 1, 0, 0, 0]), -11);
+        assert_eq!(fs::fcntl([fd as u64, 4, 0, 0, 0, 0]), 0);
+        let timeout = [0i64, 200_000];
+        assert_eq!(
+            crate::sys::net::setsockopt([fd as u64, 1, 21, timeout.as_ptr() as u64, 16, 0]),
+            0
+        );
+        let started = std::time::Instant::now();
+        assert_eq!(crate::sys::net::sendto([fd as u64, byte, 1, 0, 0, 0]), -11);
+        let waited = started.elapsed();
+        assert!(
+            waited >= std::time::Duration::from_millis(190)
+                && waited < std::time::Duration::from_secs(5),
+            "{waited:?}"
+        );
+        close(&[fd]);
+    }
+
     /// `POLLEX_SET` is EPOLLPRI alone: select sleeps for its timeout on an
     /// unconnected TCP socket asked only for exceptions, which `tcp_poll`
     /// reports hung up and writable.
