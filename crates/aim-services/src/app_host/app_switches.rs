@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use aim_binder_host::local::{Call, Reply};
 use aim_binder_host::parcel::{BAD_VALUE, Exception, Parcel};
 
-use super::{AppHost, PER_USER_RANGE};
+use super::AppHost;
 
 #[derive(Default)]
 pub(super) struct Policy {
@@ -52,25 +52,6 @@ impl Policy {
 }
 
 impl AppHost {
-    pub(super) fn background_activity_start_allowed(&self, uid: i32) -> Result<bool, Exception> {
-        let foreground = self.uid_runs(uid);
-        if self
-            .tasks
-            .app_switches
-            .lock()
-            .unwrap()
-            .allows(uid, foreground, false, Instant::now())
-        {
-            return Ok(true);
-        }
-        Ok(uid == 0
-            || matches!(uid % PER_USER_RANGE as i32, 1000 | 1027)
-            || self.check_permission(
-                Some("android.permission.START_ACTIVITIES_FROM_BACKGROUND"),
-                uid,
-            )? == 0)
-    }
-
     pub(super) fn app_switches_reply(
         &self,
         descriptor: &str,

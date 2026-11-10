@@ -228,6 +228,15 @@ fn as_caller_background_modes_preserve_both_opt_outs_and_real_caller_exemptions(
             |host, _, _, _| {
                 activity_start_tests::permissions(host);
                 query_owners(host);
+                let as_caller = |host: &AppHost, uid, real, options: Option<&RawBundle>| {
+                    let real = super::super::background_start::RealCaller {
+                        uid: real,
+                        pending_intent: false,
+                        bal_allowed: true,
+                    };
+                    host.background_start_verdict(uid, None, Some(real), false, options)
+                        .map(|v| v.allows())
+                };
                 let options =
                     |creator, sender| {
                         RawBundle::empty().with_ints(&[
@@ -245,16 +254,12 @@ fn as_caller_background_modes_preserve_both_opt_outs_and_real_caller_exemptions(
                     (0, 4, false),
                 ] {
                     assert_eq!(
-                        host.as_caller_background_allowed(
-                            10101,
-                            1000,
-                            Some(&options(creator, sender))
-                        ),
+                        as_caller(host, 10101, 1000, Some(&options(creator, sender))),
                         Ok(allowed)
                     );
                 }
                 assert_eq!(
-                    host.as_caller_background_allowed(10101, 1027, Some(&options(0, 3))),
+                    as_caller(host, 10101, 1027, Some(&options(0, 3))),
                     Ok(false)
                 );
                 let f = super::super::tests::host_with_start(2, Arc::new(|| {}));
@@ -265,33 +270,174 @@ fn as_caller_background_modes_preserve_both_opt_outs_and_real_caller_exemptions(
                 host.tasks.app_switches.lock().unwrap().switches(true);
                 for sender in [-1, 0, 1, 3, 4] {
                     assert_eq!(
-                        host.as_caller_background_allowed(10101, 1000, Some(&options(2, sender))),
+                        as_caller(host, 10101, 1000, Some(&options(2, sender))),
                         Ok(sender != 4 || !additional)
                     );
                 }
+                // startNextMatchingActivity's real caller has neither the
+                // default ALLOWED mode nor the persistent-system exemption.
+                let next_matching = |sender| {
+                    let real = super::super::background_start::RealCaller {
+                        uid: 1000,
+                        pending_intent: false,
+                        bal_allowed: false,
+                    };
+                    host.background_start_verdict(
+                        10101,
+                        None,
+                        Some(real),
+                        false,
+                        Some(&options(0, sender)),
+                    )
+                    .map(|v| v.allows())
+                };
+                assert_eq!(as_caller(host, 10101, 1000, Some(&options(0, 0))), Ok(true));
+                assert_eq!(next_matching(0), Ok(false));
+                assert_eq!(next_matching(3), Ok(true));
                 assert_eq!(
-                    host.as_caller_background_allowed(10101, 1000, Some(&options(0, 2))),
+                    as_caller(host, 10101, 1000, Some(&options(0, 2))),
+                    Ok(false)
+                );
+                assert_eq!(as_caller(host, 1000, 10101, Some(&options(0, 2))), Ok(true));
+                assert_eq!(
+                    as_caller(host, 1000, 10101, Some(&options(2, 2))),
                     Ok(false)
                 );
                 assert_eq!(
-                    host.as_caller_background_allowed(1000, 10101, Some(&options(0, 2))),
-                    Ok(true)
-                );
-                assert_eq!(
-                    host.as_caller_background_allowed(1000, 10101, Some(&options(2, 2))),
-                    Ok(false)
-                );
-                assert_eq!(
-                    host.as_caller_background_allowed(1000, 10101, Some(&options(4, 2))),
+                    as_caller(host, 1000, 10101, Some(&options(4, 2))),
                     Ok(!additional)
                 );
                 // Same-uid launches reuse the original allowed verdict in the pinned controller.
-                assert_eq!(
-                    host.as_caller_background_allowed(1000, 1000, Some(&options(2, 1))),
-                    Ok(true)
-                );
+                assert_eq!(as_caller(host, 1000, 1000, Some(&options(2, 1))), Ok(true));
             },
         );
+    }
+}
+
+/// `checkBackgroundActivityStart` of a PendingIntent: a start its
+/// visible creator allows and its sender does not is allowed by the
+/// creator, only the creator allowing it; a visible sender, or the
+/// creator's own uid sending, allows it too.
+#[test]
+fn a_pending_intent_start_only_its_creator_allows_says_so() {
+    use super::super::background_start::{BAL_ALLOW_VISIBLE_WINDOW, BalVerdict, RealCaller};
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        activity_start_tests::permissions(host);
+        query_owners(host);
+        let run = |seq, uid| {
+            let f = super::super::tests::host_with_start(seq, Arc::new(|| {}));
+            let mut app = f.apps.lock().unwrap().remove(&seq).unwrap();
+            app.uid = uid;
+            host.apps.lock().unwrap().insert(seq, app);
+        };
+        run(2, 10100);
+        let options = RawBundle::empty()
+            .with_ints(&[(
+                "android.activity.pendingIntentCreatorBackgroundActivityStartMode",
+                1,
+            )])
+            .unwrap();
+        let sent_by = |sender| {
+            host.background_start_verdict(
+                10100,
+                Some("p"),
+                Some(RealCaller::pending_intent(sender)),
+                false,
+                Some(&options),
+            )
+        };
+        let by_creator = |only_creator_allows| {
+            Ok(BalVerdict {
+                code: BAL_ALLOW_VISIBLE_WINDOW,
+                only_creator_allows,
+            })
+        };
+        assert_eq!(sent_by(10101), by_creator(true));
+        assert_eq!(sent_by(10100), by_creator(false));
+        run(3, 10101);
+        assert_eq!(sent_by(10101), by_creator(false));
+    });
+}
+
+/// The image's declarations of the background-start changes
+/// (`@EnabledAfter`), as an undeclared change is enabled.
+fn declare_background_start_changes(host: &AppHost) {
+    let dir = host.root().unwrap().join("system/etc/compatconfig");
+    std::fs::create_dir_all(&dir).unwrap();
+    let changes: String = [(296478951, 34), (244637991, 33), (320664730, 34)]
+        .map(|(id, after)| format!(r#"<compat-change id="{id}" enableAfterTargetSdk="{after}"/>"#))
+        .concat();
+    std::fs::write(dir.join("bal.xml"), format!("<config>{changes}</config>")).unwrap();
+}
+
+/// A PendingIntent's creator and sender without a mode have their
+/// privileges by default up to the target SDK rescinding them (the
+/// creator's above 34, the sender's above 33), root and system never: a
+/// system sender of no mode, as alarms send, does not allow a start. A
+/// mode set by the other party is reset, and refused above target SDK 34
+/// (`PENDING_INTENT_OPTIONS_CHECK`), when made and when sent.
+#[test]
+fn pending_intent_privileges_by_default_follow_the_target_sdk() {
+    use super::super::background_start::{KEY_CREATOR_MODE, KEY_SENDER_MODE, RealCaller};
+    for target in [33, 34, 35] {
+        crate::system::with_discovery_binders_flags(&[], true, |host, publish, _, _| {
+            declare_background_start_changes(host);
+            activity_start_tests::permissions(host);
+            query_owners(host);
+            publish(&mut |p| p.target_sdk_version = target);
+            for (seq, uid) in [(2, 10100), (3, 1000)] {
+                let f = super::super::tests::host_with_start(seq, Arc::new(|| {}));
+                let mut app = f.apps.lock().unwrap().remove(&seq).unwrap();
+                app.uid = uid;
+                host.apps.lock().unwrap().insert(seq, app);
+            }
+            let allows = |uid, package, sender| {
+                let real = Some(RealCaller::pending_intent(sender));
+                host.background_start_verdict(uid, package, real, false, None)
+                    .unwrap()
+                    .allows()
+            };
+            // A visible creator, a background sender.
+            assert_eq!(allows(10100, Some("p"), 10101), target <= 34);
+            assert!(!allows(1000, Some("android"), 10101));
+            // A background creator, a visible sender.
+            assert_eq!(allows(10102, None, 10100), target <= 33);
+            assert!(!allows(10102, None, 1000));
+            let mode = |key| RawBundle::empty().with_ints(&[(key, 1)]).unwrap();
+            let reset = host.without_others_mode(mode(KEY_CREATOR_MODE), KEY_CREATOR_MODE, 10100);
+            match reset {
+                Ok(o) if target <= 34 => assert_eq!(o.contains(KEY_CREATOR_MODE), Ok(false)),
+                Err(e) if target > 34 => assert_eq!(e.code, EX_ILLEGAL_ARGUMENT),
+                other => panic!("{:?}", other.err()),
+            }
+            let request = |options| pending_intents::Request {
+                kind: pending_intents::INTENT_SENDER_ACTIVITY,
+                package: Some("p".into()),
+                feature: None,
+                token: None,
+                result_who: None,
+                request_code: 0,
+                intents: Some(vec![Some(
+                    RawIntent::of(None, 0, &[]).with_component("p", "p.Main"),
+                )]),
+                resolved_types: None,
+                flags: 0x0400_0000, // FLAG_IMMUTABLE
+                options,
+                user: 0,
+            };
+            let made = host.get_intent_sender(10100, request(Some(mode(KEY_SENDER_MODE))));
+            assert_eq!(made.is_ok(), target <= 34);
+            let target_pi = host
+                .get_intent_sender(10100, request(None))
+                .unwrap()
+                .unwrap();
+            let sent = pending_intents::Sent {
+                options: Some(mode(KEY_CREATOR_MODE)),
+                ..Default::default()
+            };
+            let send = host.send_record(10100, None, target_pi, 0, None, None, None, None, sent);
+            assert_eq!(send.is_ok(), target <= 34);
+        });
     }
 }
 

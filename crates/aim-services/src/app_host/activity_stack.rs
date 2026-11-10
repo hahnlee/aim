@@ -352,6 +352,11 @@ pub struct Start<'a> {
     /// (`BAL_BLOCK`); nor is its task resumed as the focused one
     /// (`mDoResume`).
     pub avoid_move_to_front: bool,
+    /// A PendingIntent's start only its creator allows (`BalVerdict
+    /// .onlyCreatorAllows`, `balDontBringExistingBackgroundTaskStackToFg`):
+    /// into an existing task, it moves no task to the front
+    /// (`MOVE_TO_FRONT_AVOID_PI_ONLY_CREATOR_ALLOWS`).
+    pub only_creator_allows: bool,
     /// For a blocked background start (`BAL_BLOCK`), the tasks holding an
     /// activity of its caller's uid (`Task.isUidPresent`): the only ones
     /// it may go into (`isAllowedToStart`).
@@ -804,6 +809,10 @@ impl Stack {
         });
         d.outcome = Outcome::New(target);
         d.target = target;
+        // `startActivityInner`: a target task of `computeTargetTask`, not a
+        // new one (the root home task a home start takes is its root task).
+        let existing = reused.is_some() || target.is_some_and(|t| self.home != Some(t));
+        d.avoid_move_to_front |= s.only_creator_allows && existing;
         // `isAllowedToStart`, before the target task is recycled.
         if s.blocked_into
             .is_some_and(|tasks| target.is_none_or(|t| !tasks.contains(&t)))
@@ -815,7 +824,7 @@ impl Stack {
             return Err("an adjacent launch");
         }
         d.home_front = s.activity_type == super::activity::ACTIVITY_TYPE_HOME
-            && !s.avoid_move_to_front
+            && !d.avoid_move_to_front
             && d.result_to.is_none()
             && flags & FLAG_ACTIVITY_NEW_TASK != 0
             && target.is_none_or(|t| self.home == Some(t) && self.top(t).is_none());
@@ -841,7 +850,7 @@ impl Stack {
             });
             let mut moved_to_front = false;
             if (current.is_none_or(|a| a.task != task) || self.focused() != Some(task))
-                && !s.avoid_move_to_front
+                && !d.avoid_move_to_front
             {
                 flags |= FLAG_ACTIVITY_BROUGHT_TO_FRONT;
                 d.front = Some(task);
@@ -853,7 +862,7 @@ impl Stack {
             // recycleTask returns before complyActivityFlags, including the source's own task.
             if only {
                 // `mDoResume`: brought to the front unless the start avoids it.
-                if !s.avoid_move_to_front {
+                if !d.avoid_move_to_front {
                     d.front = Some(task);
                 }
                 d.flags = flags;
@@ -2057,6 +2066,7 @@ mod tests {
             activity_type: crate::app_host::activity::ACTIVITY_TYPE_STANDARD,
             clear_task_on_launch: false,
             avoid_move_to_front: false,
+            only_creator_allows: false,
             blocked_into: None,
         }
     }
@@ -2565,6 +2575,35 @@ mod tests {
             s.decide(&start("com.example/Main", 0, &intent, None))
                 .is_err()
         );
+    }
+
+    // startActivityInner: a PendingIntent's start only its creator allows
+    // goes into an existing task without bringing it to the front
+    // (MOVE_TO_FRONT_AVOID_PI_ONLY_CREATOR_ALLOWS); a new task's comes to
+    // the front.
+    #[test]
+    fn a_start_only_the_creator_allows_leaves_an_existing_task_behind() {
+        let new_task = Intent {
+            flags: FLAG_ACTIVITY_NEW_TASK,
+            ..Default::default()
+        };
+        let only_creator = |component, affinity| super::Start {
+            only_creator_allows: true,
+            affinity: Some(affinity),
+            ..start(component, 0, &new_task, None)
+        };
+        let mut s = behind_launcher(vec![]);
+        let d = s.decide(&only_creator("com.example/Main", APP)).unwrap();
+        assert_eq!((d.front, d.target), (None, Some(7)));
+        assert!(d.avoid_move_to_front);
+        assert_eq!(d.flags & FLAG_ACTIVITY_BROUGHT_TO_FRONT, 0);
+        s.apply(&d, Then::Nothing, None, true);
+        assert_eq!(s.focused(), Some(9));
+        let d = s
+            .decide(&only_creator("com.other/Main", "com.other"))
+            .unwrap();
+        assert_eq!((&d.outcome, d.target), (&Outcome::New(None), None));
+        assert!(!d.avoid_move_to_front);
     }
 
     // ActivityStarter.setTargetRootTaskIfNeeded, setNewTask and

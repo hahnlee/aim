@@ -250,6 +250,10 @@ that avoids the front (`ActivityOptions.setAvoidMoveToFront`, or a blocked
 background start, which goes only into a task holding its caller's activity
 and is otherwise aborted, its asked-for or forwarded result cancelled)
 leaves its task where it is and a new task at the back (#2795; host tests
+only). A PendingIntent's start is checked as its creator's and its sender's
+(`BalVerdict`, with the creator's activity options under the sender's); one
+only its creator allows goes into an existing task without bringing it to
+the front (`balDontBringExistingBackgroundTaskStackToFg`, #2907; host tests
 only). A pinned
 launch on a device with freeform or picture-in-picture takes its launch bounds,
 kept below the minimal size as a pinned task's are, and only a freeform or

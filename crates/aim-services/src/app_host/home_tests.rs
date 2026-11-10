@@ -98,6 +98,7 @@ fn start_home_intent(s: &mut Stack) -> Vec<Command> {
             activity_type: ACTIVITY_TYPE_HOME,
             clear_task_on_launch: false,
             avoid_move_to_front: false,
+            only_creator_allows: false,
             blocked_into: None,
         })
         .unwrap();
@@ -219,6 +220,7 @@ fn a_home_intent_without_a_root_home_task_brings_a_new_one_to_the_front() {
                 activity_type: ACTIVITY_TYPE_HOME,
                 clear_task_on_launch: false,
                 avoid_move_to_front: false,
+                only_creator_allows: false,
                 blocked_into: None,
             })
             .unwrap();
@@ -272,6 +274,7 @@ fn a_home_intent_into_an_emptied_root_home_task_brings_it_to_the_front() {
             activity_type: ACTIVITY_TYPE_HOME,
             clear_task_on_launch: false,
             avoid_move_to_front: false,
+            only_creator_allows: false,
             blocked_into: None,
         })
         .unwrap();
@@ -379,6 +382,7 @@ fn a_standard_start_never_lands_in_the_root_home_task() {
         activity_type,
         clear_task_on_launch: false,
         avoid_move_to_front: false,
+        only_creator_allows: false,
         blocked_into: None,
     };
     // `FindTaskResult` skips a task of another activity type, by component

@@ -44,6 +44,9 @@ pub(super) const START_CANCELED: i32 = -96;
 /// `EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN`.
 const FLAG_ACTIVITY_FORWARD_RESULT: i32 = 0x0200_0000;
 const EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN: i32 = 1 << 2;
+/// `Flags.balDontBringExistingBackgroundTaskStackToFg`.
+const DONT_BRING_BACKGROUND_TASK_TO_FRONT: &str =
+    "com.android.window.flags.bal_dont_bring_existing_background_task_stack_to_fg";
 /// `ActivityInfo.FLAG_FINISH_ON_TASK_LAUNCH`, `FLAG_CLEAR_TASK_ON_LAUNCH`,
 /// `FLAG_STATE_NOT_NEEDED`, `FLAG_EXCLUDE_FROM_RECENTS`,
 /// `FLAG_ALLOW_TASK_REPARENTING`, `FLAG_NO_HISTORY`.
@@ -945,7 +948,7 @@ impl AppHost {
     }
 
     /// `ActivityStarter`'s start of `args` by `uid` of `caller_package`
-    /// (a PendingIntent's creator for one it sends,
+    /// (a PendingIntent's creator for one `sender` sends,
     /// `startActivityInPackage`): the start's result code.
     pub(super) fn start_activity_in_package(
         self: &Arc<Self>,
@@ -954,8 +957,9 @@ impl AppHost {
         caller_pid: i32,
         user: i32,
         args: StartArgs,
+        sender: Option<i32>,
     ) -> Result<i32, Exception> {
-        let prepared = self.prepare_activity_start(
+        let mut prepared = self.prepare_activity_start(
             uid,
             caller_pid,
             user,
@@ -964,6 +968,7 @@ impl AppHost {
                 .ok_or_else(|| Exception::illegal_argument("intent"))?,
             args.resolved_type.as_deref(),
         )?;
+        prepared.real_caller = sender.map(super::background_start::RealCaller::pending_intent);
         let _serial = self.activities.starts.lock().unwrap();
         self.execute_activity_start(uid, caller_package, caller_pid, args, prepared)
             .map(|r| r.0)
@@ -1030,7 +1035,7 @@ impl AppHost {
             info,
             grants,
             ignore_security: false,
-            real_caller_uid: None,
+            real_caller: None,
         })
     }
 
@@ -1123,7 +1128,7 @@ impl AppHost {
             info,
             grants,
             ignore_security,
-            real_caller_uid,
+            real_caller,
         } = prepared;
         let Some(info) = info else {
             return Ok((
@@ -1184,14 +1189,6 @@ impl AppHost {
                 format!("{what} not exported from uid {target_uid}")
             }));
         }
-        // `BAL_BLOCK`, with background starts disabled
-        // (`isBackgroundActivityStartsEnabled`).
-        let blocked = !match real_caller_uid {
-            Some(real_uid) => {
-                self.as_caller_background_allowed(uid, real_uid, args.options.as_ref())?
-            }
-            None => self.background_activity_start_allowed(uid)?,
-        };
         // `sourceRecord`, the caller's activity, and `resultRecord`, the
         // source when it asks for a result.
         let (source, source_task, mut result_to) = {
@@ -1238,6 +1235,16 @@ impl AppHost {
                 args.request_code = *request_code;
             }
         }
+        // `BAL_BLOCK`, with background starts disabled
+        // (`isBackgroundActivityStartsEnabled`).
+        let verdict = self.background_start_verdict(
+            uid,
+            caller_package.as_deref(),
+            real_caller,
+            result_to.is_some(),
+            args.options.as_ref(),
+        )?;
+        let blocked = !verdict.allows();
         intent = intent.with_component(&package, &class);
         let real = real_component(&info);
         let target_uid = target_uid as u32;
@@ -1258,6 +1265,8 @@ impl AppHost {
             },
             clear_task_on_launch: info.flags & FLAG_CLEAR_TASK_ON_LAUNCH != 0,
             avoid_move_to_front: launch_options.avoid_move_to_front || blocked,
+            only_creator_allows: verdict.only_creator_allows
+                && self.flag(DONT_BRING_BACKGROUND_TASK_TO_FRONT)?,
             blocked_into: caller_tasks.as_deref(),
         };
         let d = self
@@ -1763,7 +1772,7 @@ pub(super) struct PreparedStart {
     pub info: Option<ActivityInfo>,
     pub grants: Option<NeededUriGrants>,
     pub ignore_security: bool,
-    pub real_caller_uid: Option<i32>,
+    pub real_caller: Option<super::background_start::RealCaller>,
 }
 
 /// `startActivity`'s arguments the app host reads.
