@@ -158,6 +158,11 @@ pub struct Sock {
     /// Listening (`TCP_LISTEN`): what SO_ACCEPTCONN reports, which Darwin
     /// does not answer for AF_UNIX.
     listening: AtomicBool,
+    /// A TCP socket that may still be unconnected: `TCP_CLOSE` with no
+    /// shutdown, which `tcp_poll` reports as EPOLLOUT | EPOLLHUP and
+    /// Darwin as nothing. Cleared once its host socket is in another
+    /// state, which it never returns to: a closed connection stays shut.
+    unconnected: AtomicBool,
     /// Linux sockaddr of the local and peer names, when known.
     local: Mutex<Option<Vec<u8>>>,
     peer: Mutex<Option<Vec<u8>>>,
@@ -169,6 +174,7 @@ impl Sock {
     }
 
     fn of(ty: SockType, family: Family) -> Arc<Sock> {
+        let tcp = matches!((&ty, &family), (SockType::Stream, Family::Inet(_)));
         Arc::new(Sock {
             ty,
             family,
@@ -178,6 +184,7 @@ impl Sock {
             stamp: std::sync::atomic::AtomicU8::new(0),
             recv: Mutex::new(()),
             listening: AtomicBool::new(false),
+            unconnected: AtomicBool::new(tcp),
             local: Mutex::new(None),
             peer: Mutex::new(None),
         })
@@ -3895,6 +3902,20 @@ pub(super) fn shut_directions(fd: i32) -> Option<super::tcp_shutdown::Shutdown> 
         receive: state & SS_CANTRCVMORE != 0,
         send: state & SS_CANTSENDMORE != 0,
     })
+}
+
+/// Whether `s`, on host socket `fd`, is a TCP socket never connected,
+/// which `tcp_poll` reports as EPOLLOUT | EPOLLHUP (`TCP_CLOSE`), and no
+/// host knote or poll as anything.
+pub(super) fn unconnected(s: &Sock, fd: i32) -> bool {
+    if !s.unconnected.load(Ordering::Relaxed) {
+        return false;
+    }
+    let unconnected = super::tcp_shutdown::unconnected(fd);
+    if !unconnected {
+        s.unconnected.store(false, Ordering::Relaxed);
+    }
+    unconnected
 }
 
 pub fn getsockopt(a: [u64; 6]) -> i64 {

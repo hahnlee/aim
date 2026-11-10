@@ -141,7 +141,10 @@ knote, so closing its fd still removes it (#2700). A socket's pending error
 (an ICMP-refused UDP send, a refused connect) is EPOLLERR/POLLERR, without
 EPOLLIN for an empty queue, until a receive, send or SO_ERROR returns it once,
 read from the socket's `soi_error` without clearing it; a closed TCP connection
-polls IN|OUT|HUP as `tcp_done` shuts it both ways (#2713). A poll with no event
+polls IN|OUT|HUP as `tcp_done` shuts it both ways (#2713), never Darwin's
+POLLPRI|POLLRDBAND at EOF, to select as well. A TCP socket never connected
+(`TCP_CLOSE`, bound or not) is OUT|HUP to poll, select and epoll at once, which
+Darwin reports as nothing; edge-triggered once per change (#2781). A poll with no event
 on a socket or pipe reports its hangup and error too, waking for one that
 arrives during the wait without spinning on a full buffer or a TCP half-close
 (#2779). A pipe or named FIFO is never POLLPRI, POLLRDBAND, POLLWRBAND or

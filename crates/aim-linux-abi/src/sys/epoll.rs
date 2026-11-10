@@ -127,6 +127,10 @@ struct Interest {
     /// it was last reported at, as `ep_poll_callback` queues it again only
     /// on a newer wakeup.
     seen: u64,
+    /// An edge-triggered interest in an unconnected TCP socket, reported
+    /// since its last change: no wakeup queues it again until the socket
+    /// leaves `TCP_CLOSE`.
+    reported: bool,
 }
 
 impl Interest {
@@ -182,6 +186,7 @@ fn pty_ctl(
             data: u64::from_le_bytes(bytes[8..].try_into().unwrap()),
             disabled: false,
             seen: 0,
+            reported: false,
         })
     };
     let mut retired = None;
@@ -518,6 +523,7 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
             data: raw[1],
             disabled: false,
             seen: 0,
+            reported: false,
         })
     } else {
         None
@@ -737,6 +743,25 @@ fn signal_interests(ep: &Epoll) -> Vec<(i32, Arc<super::signalfd::SignalFd>, u64
         .collect()
 }
 
+/// The armed interests of `ep` in an unconnected TCP socket that are to
+/// be reported, which `tcp_poll` reports hung up and writable and no knote
+/// fires for.
+fn unconnected_interests(ep: &Epoll) -> Vec<i32> {
+    let fds: Vec<i32> = ep
+        .interest
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, i)| !i.disabled && !(i.events & EPOLLET != 0 && i.reported))
+        .map(|(fd, _)| *fd)
+        .collect();
+    fds.into_iter()
+        .filter(
+            |&fd| matches!(fdtab::get(fd), Some(Kind::Sock(s)) if super::net::unconnected(&s, fd)),
+        )
+        .collect()
+}
+
 /// Milliseconds for poll(2), rounded up, -1 for none.
 fn poll_ms(timeout: Option<libc::timespec>) -> i32 {
     timeout.map_or(-1, |t| {
@@ -782,6 +807,12 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
         // The signalfd interests as of now, as another thread may have
         // changed them, or reported or disabled one, since the last wait.
         let signals = signal_interests(&ep);
+        let unconnected = unconnected_interests(&ep);
+        let left = if unconnected.is_empty() {
+            left
+        } else {
+            Some(zero)
+        };
         let polling = if signals.is_empty() {
             None
         } else {
@@ -841,7 +872,7 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
         }
         // SAFETY: the kernel filled n entries.
         unsafe { kevs.set_len(n as usize) };
-        let (found, rearm) = ready(&ep, &kevs, maxevents as usize, &signals);
+        let (found, rearm) = ready(&ep, &kevs, maxevents as usize, &signals, &unconnected);
         apply(epfd, &rearm);
         // An inotify fd that woke the wait with nothing to read: wait on.
         if !found.is_empty() || !woke || left.is_some_and(|t| t.tv_sec == 0 && t.tv_nsec == 0) {
@@ -867,12 +898,14 @@ fn now_ns() -> i64 {
 /// next wait as on Linux (a retrieved edge-triggered or dispatched knote
 /// would otherwise not fire again), and the one-shot ones whose readiness
 /// was stale, which `ep_item_poll` leaves armed. The `signals` interests
-/// are read as the waiter reads them, whether their socket fired or not.
+/// are read as the waiter reads them, whether their socket fired or not,
+/// and the `unconnected` ones as `tcp_poll` reports them.
 fn ready(
     ep: &Epoll,
     kevs: &[libc::kevent],
     limit: usize,
     signals: &[(i32, Arc<super::signalfd::SignalFd>, u64)],
+    unconnected: &[i32],
 ) -> (Vec<(i32, u32, u64)>, Vec<libc::kevent>) {
     let mut out: Vec<(i32, u32, u64)> = Vec::with_capacity(kevs.len().min(limit));
     let mut rearm = Vec::new();
@@ -999,6 +1032,25 @@ fn ready(
             rearm.push(kev(*fd, libc::EVFILT_READ, libc::EV_DISABLE));
         }
         out.push((*fd, EPOLLIN, i.data));
+    }
+    for &fd in unconnected {
+        let Some(i) = interest.get_mut(&fd) else {
+            continue;
+        };
+        let b = EPOLLHUP | i.events & (EPOLLOUT | EPOLLWRNORM);
+        if let Some(e) = out.iter_mut().find(|e| e.0 == fd) {
+            e.1 |= b;
+            continue;
+        }
+        if i.disabled || out.len() == limit {
+            continue;
+        }
+        i.reported = true;
+        if i.events & EPOLLONESHOT != 0 {
+            i.disabled = true;
+            rearm.extend(changes(fd, None, None, Some(&*i)));
+        }
+        out.push((fd, b, i.data));
     }
     drop(interest);
     use std::os::fd::AsRawFd;
@@ -1127,6 +1179,7 @@ pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Epoll> {
                 data: r.u64(),
                 disabled: r.bool(),
                 seen: 0,
+                reported: false,
             },
         )
     });
@@ -1139,6 +1192,7 @@ pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Epoll> {
             data: r.u64(),
             disabled: r.bool(),
             seen: 0,
+            reported: false,
         };
         let watch = super::pty_owner::Watch::restore(r);
         let valid = match (identity, watch) {
