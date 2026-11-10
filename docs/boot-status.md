@@ -229,8 +229,16 @@ the device's and the (top-most leaf) task's or activity's multi-window,
 freeform and picture-in-picture support (a leaf task in an organizer root
 takes its mode unvalidated): a mode it cannot take is undefined and inherits the parent's (the
 display area's freeform in window mode, else fullscreen; a reused task keeps
-its own), a fullscreen display area's launch takes its source task's mode, and
-a valid multi-window launch on the display area is an explicit failure. A start
+its own), and a fullscreen display area's launch takes its source task's mode.
+A valid multi-window launch or `setWindowingMode` makes a multi-window root
+task of the display area (#2791; host tests only): it requests its launch
+bounds, else keeps its requested ones, else fills the display area, and its
+configuration and root task info are of that mode. A reused task's launch
+mode (the options', else a fullscreen display area's fullscreen or freeform
+source task's, else its own) changes a root task's mode as
+`shouldUpdateExistingTaskWindowingMode` allows (never a pinned one's to the
+display area's), and the launch bounds of that mode lay the task out
+(`LaunchParamsController.layoutTask`). A start
 that avoids the front (`ActivityOptions.setAvoidMoveToFront`, or a blocked
 background start, which goes only into a task holding its caller's activity
 and is otherwise aborted, its asked-for or forwarded result cancelled)
@@ -280,8 +288,7 @@ minimal size makes it): the user's resize of one
 moves the shared edge of the roots, as the split divider does, a drag moves
 both, and the other window follows; clearing adjacency makes them independent.
 `setLaunchRoot`, a launch with `FLAG_ACTIVITY_LAUNCH_ADJACENT` into the flag
-root, other root windowing modes, multi-window tasks of the display area and
-nested roots remain explicit failures. Host regressions cover the wire, modes,
+root, other root windowing modes and nested roots remain explicit failures. Host regressions cover the wire, modes,
 listing, reparenting, adjacency, tiling, deletion and organizer removal; no
 guest boot or live Mac window was checked (2026-11-04).
 

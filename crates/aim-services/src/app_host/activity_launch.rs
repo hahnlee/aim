@@ -237,6 +237,7 @@ mod tests {
             7,
             StartRequest::launcher("p.Main"),
         );
+        host.tasks.animation_test_task(7, Default::default());
         let mut stack = host.activities.stack.lock().unwrap();
         stack.tasks.push(Task {
             id: 7,

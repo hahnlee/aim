@@ -1224,23 +1224,25 @@ impl AppHost {
     }
 
     /// `TaskLaunchParamsModifier`'s initial bounds of a launch in windowing
-    /// mode `mode` from its options' launch `bounds`: those of a freeform or
+    /// mode `mode` from its `options`' launch bounds: those of a freeform or
     /// fullscreen launch if the device manages freeform windows, of a pinned
-    /// one if it also supports picture-in-picture
-    /// (`canUseActivityOptionsLaunchBounds`), and of a multi-window one.
+    /// one if it supports picture-in-picture and either manages freeform
+    /// windows or the options ask for pinned
+    /// (`canUseActivityOptionsLaunchBounds`, `canApplyPipWindowPolicy`), and
+    /// of a multi-window one.
     pub(super) fn initial_launch_bounds(
         &self,
         mode: i32,
-        bounds: Option<Rect>,
+        options: &super::activity_options::LaunchOptions,
     ) -> Result<Option<Rect>, Exception> {
         let multi_window = self.multi_window()?;
         let applies = match mode {
             1 | 5 => multi_window.freeform,
-            2 => multi_window.freeform || multi_window.pip,
+            2 => multi_window.pip && (multi_window.freeform || options.mode == 2),
             6 => true,
             _ => false,
         };
-        Ok(bounds.filter(|_| applies))
+        Ok(options.bounds.filter(|_| applies))
     }
 
     /// The task of the `WindowContainerToken` `token` (`fromBinder`).

@@ -351,10 +351,6 @@ impl super::AppHost {
                 }
                 continue;
             }
-            // Multi-window tasks of the display area (#2616).
-            if c.mode == Some(6) && self.tasks.parent(id).is_none() {
-                return Err(unsupported());
-            }
             self.task_change(id, c.mode, c.bounds)
                 .map_err(Exception::illegal_argument)?;
             changes.push((id, c.mode, c.bounds));

@@ -1311,7 +1311,7 @@ impl AppHost {
                 .map(|a| a.task),
         };
         if let Some(task) = reused {
-            self.apply_task_launch_options(task, launch_options, &info)?;
+            self.apply_task_launch_options(task, launch_options, &info, source_task)?;
         }
         if matches!(d.outcome, Outcome::Front(1) | Outcome::Deliver(_, 1)) {
             let mut stack = self.activities.stack.lock().unwrap();
