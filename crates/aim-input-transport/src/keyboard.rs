@@ -75,6 +75,7 @@ pub const ACTION_UP: i32 = 1;
 /// `AKEY_EVENT_FLAG_*`.
 const FLAG_KEEP_TOUCH_MODE: i32 = 0x4;
 pub const FLAG_FROM_SYSTEM: i32 = 0x8;
+const FLAG_CANCELED: i32 = 0x20;
 const FLAG_VIRTUAL_HARD_KEY: i32 = 0x40;
 const FLAG_LONG_PRESS: i32 = 0x80;
 /// `KeyboardType` (`InputDevice.KEYBOARD_TYPE_*`).
@@ -189,6 +190,18 @@ impl KeyEvent {
         m.extend_from_slice(&[0; 4]); // empty2
         m.extend_from_slice(&self.down_time.to_ne_bytes());
         m
+    }
+
+    /// The up at `time` that cancels this down, as
+    /// `InputState::synthesizeCancelationEvents` makes it from its memento.
+    pub fn canceled(&self, time: i64) -> KeyEvent {
+        KeyEvent {
+            action: ACTION_UP,
+            flags: self.flags | FLAG_CANCELED,
+            repeat_count: 0,
+            event_time: time,
+            ..self.clone()
+        }
     }
 }
 

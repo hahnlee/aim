@@ -104,6 +104,7 @@ impl Dispatcher {
                 );
             }
             w.gesture = Some(target.index);
+            w.gesture_motion = None;
         }
         for sample in 0..e.messages.len() {
             let seq = self.ids().0;
@@ -114,6 +115,7 @@ impl Dispatcher {
         }
         if e.pointer() && matches!(action, 1 | 3) {
             w.gesture = None;
+            w.gesture_motion = None;
         }
         if !matches!(action, 1 | 3 | 6) {
             w.interactions = vec![target.index];

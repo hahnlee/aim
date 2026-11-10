@@ -396,6 +396,14 @@ impl PowerManager {
         !self.state.lock().unwrap().asleep
     }
 
+    /// Tells input whether the device is interactive, as an agent
+    /// attaching hears it: under the transition lock, so a transition's
+    /// own `setInteractive` cannot come before it.
+    pub(super) fn tell_input_interactive(&self) -> Result<(), Exception> {
+        let _transition = self.transition.lock().unwrap();
+        self.host.set_input_interactive(self.interactive())
+    }
+
     /// PMS BinderService / PowerGroup timestamp guards and Notifier's
     /// single-display interactive transition (android-16.0.0_r1).
     #[allow(clippy::too_many_arguments)]

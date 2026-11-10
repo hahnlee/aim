@@ -1365,6 +1365,11 @@ impl Stack {
     /// the stopped activities now visible that are not to be resumed are
     /// started (`makeVisibleIfNeeded`, `shouldStartActivity`).
     fn settle(&mut self, out: &mut Vec<Command>) {
+        // Activities gone are forgotten (`removeFromHistory`,
+        // `cleanUpActivityReferences`).
+        let live = |t: &u64| self.activities.iter().any(|a| a.token == *t);
+        self.last_paused.retain(|_, t| live(t));
+        self.no_history.retain(live);
         // A home that finished is restarted behind the desktop.
         if self.home.is_none_or(|h| self.top(h).is_none()) {
             self.home_front = false;

@@ -98,8 +98,13 @@ impl Target {
 struct Windows {
     stack: Vec<Target>,
     display: (f32, f32),
-    /// The window of the gesture under way.
+    /// The window of the gesture under way, and the last motion it was
+    /// sent of a device's gesture (`InputState`'s motion memento).
     gesture: Option<i32>,
+    gesture_motion: Option<Motion>,
+    /// The keys down in each window, as it was sent them (`InputState`'s
+    /// key mementos).
+    keys: Vec<(i32, KeyEvent)>,
     /// The windows the last key or motion went to, but for its outside
     /// targets (`mInteractionConnectionTokens`).
     interactions: Vec<i32>,
@@ -196,8 +201,10 @@ impl Dispatcher {
         let previous = windows.stack.last().map(|t| t.index);
         windows.stack.retain(|t| live.contains(&t.index));
         windows.interactions.retain(|i| live.contains(i));
+        windows.keys.retain(|(i, _)| live.contains(i));
         if windows.gesture.is_some_and(|i| !live.contains(&i)) {
             windows.gesture = None;
+            windows.gesture_motion = None;
         }
         self.refocus(&mut windows, previous);
     }
@@ -269,6 +276,26 @@ impl Dispatcher {
         result & ACTION_PASS_TO_USER != 0
     }
 
+    /// A device's key of `policy_flags`: dispatched, unless the policy
+    /// consumes it.
+    fn key_from_device(&self, key: KeyEvent, policy_flags: u32) {
+        if self.intercept_key(&key, policy_flags) {
+            self.dispatch_key(key);
+        } else {
+            self.drop_key(&key);
+        }
+    }
+
+    /// A touchscreen motion, waking if `wake`: dispatched unless the
+    /// policy consumes it or the input filter takes it.
+    fn motion_from_device(&self, motion: &Motion, wake: bool) {
+        if !self.intercept_motion(motion, wake) {
+            self.drop_motion(motion);
+        } else if !self.filter_input(&motion.message(0, self.ids().1, (0., 0.))) {
+            self.dispatch(&mut self.windows.lock().unwrap(), motion);
+        }
+    }
+
     /// `interceptMotionBeforeQueueing` of a touchscreen motion, waking if
     /// `wake` (`POLICY_FLAG_WAKE`): whether it is dispatched.
     fn intercept_motion(&self, motion: &Motion, wake: bool) -> bool {
@@ -309,25 +336,82 @@ impl Dispatcher {
         self.dispatch_unfiltered_key(event);
     }
 
+    /// The repeat state is kept until the key is sent, so a repeat due
+    /// meanwhile cannot follow its up or cancellation.
     fn dispatch_unfiltered_key(&self, event: KeyEvent) {
-        let event = {
-            let mut repeat = self.repeat.lock().unwrap();
-            let config = repeat.1;
-            repeat.0.dispatch(config, event)
-        };
+        let mut repeat = self.repeat.lock().unwrap();
+        let config = repeat.1;
+        let event = repeat.0.dispatch(config, event);
         self.repeat_changed.notify_all();
         self.send_key(&event);
     }
 
-    /// Publishes `event` to the focused window, if any.
+    /// Publishes `event` to the focused window, if any, which holds a
+    /// key's down until its up (`InputState::trackKey`).
     fn send_key(&self, event: &KeyEvent) {
         let windows = &mut *self.windows.lock().unwrap();
-        if let Some(target) = windows.stack.last() {
-            if event.action != keyboard::ACTION_UP {
-                windows.interactions = vec![target.index];
+        let Some(target) = windows.stack.last() else {
+            return;
+        };
+        let index = target.index;
+        let (seq, id) = self.ids();
+        send(&target.channel, &event.message(seq, id));
+        windows.keys.retain(|(i, k)| {
+            !(*i == index
+                && (k.device, k.source, k.display, k.key_code, k.scan_code)
+                    == (
+                        event.device,
+                        event.source,
+                        event.display,
+                        event.key_code,
+                        event.scan_code,
+                    ))
+        });
+        if event.action != keyboard::ACTION_UP {
+            windows.keys.push((index, event.clone()));
+            windows.interactions = vec![index];
+        }
+    }
+
+    /// `dropInboundEventLocked` of a device's key the policy consumed: the
+    /// key repeat is reset, and the keys of its device and display down in
+    /// a window are canceled (`CANCEL_NON_POINTER_EVENTS`).
+    fn drop_key(&self, event: &KeyEvent) {
+        let mut repeat = self.repeat.lock().unwrap();
+        repeat.0.reset();
+        self.repeat_changed.notify_all();
+        let windows = &mut *self.windows.lock().unwrap();
+        let (canceled, kept) = std::mem::take(&mut windows.keys)
+            .into_iter()
+            .partition(|(_, k)| (k.device, k.display) == (event.device, event.display));
+        windows.keys = kept;
+        let now = monotonic_ns();
+        for (index, key) in canceled {
+            if let Some(target) = windows.stack.iter().find(|t| t.index == index) {
+                let (seq, id) = self.ids();
+                send(&target.channel, &key.canceled(now).message(seq, id));
             }
+        }
+    }
+
+    /// `dropInboundEventLocked` of a touchscreen motion the policy
+    /// consumed: the gesture of its device under way is canceled
+    /// (`CANCEL_POINTER_EVENTS`).
+    fn drop_motion(&self, motion: &Motion) {
+        let windows = &mut *self.windows.lock().unwrap();
+        if windows
+            .gesture_motion
+            .as_ref()
+            .is_none_or(|m| m.device() != motion.device())
+        {
+            return;
+        }
+        let last = windows.gesture_motion.take().unwrap();
+        let gesture = windows.gesture.take();
+        if let Some(target) = windows.stack.iter().find(|t| Some(t.index) == gesture) {
             let (seq, id) = self.ids();
-            send(&target.channel, &event.message(seq, id));
+            let cancel = last.canceled(monotonic_ns());
+            send(&target.channel, &cancel.message(seq, id, target.origin()));
         }
     }
 
@@ -339,9 +423,7 @@ impl Dispatcher {
             let now = monotonic_ns();
             let config = repeat.1;
             if let Some(event) = repeat.0.synthesize(config, now) {
-                drop(repeat);
                 self.send_key(&event);
-                repeat = self.repeat.lock().unwrap();
                 continue;
             }
             repeat = match repeat.0.next() {
@@ -393,9 +475,7 @@ impl Dispatcher {
                         {
                             flags |= POLICY_FLAG_WAKE;
                         }
-                        if self.intercept_key(&key, flags) {
-                            self.dispatch_key(key);
-                        }
+                        self.key_from_device(key, flags);
                     }
                 }
                 _ => {}
@@ -467,8 +547,10 @@ impl Dispatcher {
         let previous = windows.stack.last().map(|t| t.index);
         windows.stack.retain(|t| t.index != index);
         windows.interactions.retain(|&i| i != index);
+        windows.keys.retain(|&(i, _)| i != index);
         if windows.gesture == Some(index) {
             windows.gesture = None;
+            windows.gesture_motion = None;
         }
         if previous == Some(index) {
             self.refocus(&mut windows, None);
@@ -528,8 +610,10 @@ impl Dispatcher {
                 windows.interactions = vec![target.index];
             }
         }
+        windows.gesture_motion = windows.gesture.map(|_| motion.clone());
         if motion.ends_gesture() {
             windows.gesture = None;
+            windows.gesture_motion = None;
         }
     }
 
@@ -603,12 +687,7 @@ impl Dispatcher {
                             // `TouchInputMapper`: an initial down wakes. The
                             // policy is asked without the windows' lock, as
                             // waking changes them.
-                            let wake = wake && motion.initial_down();
-                            if self.intercept_motion(&motion, wake)
-                                && !self.filter_input(&motion.message(0, self.ids().1, (0., 0.)))
-                            {
-                                self.dispatch(&mut self.windows.lock().unwrap(), &motion);
-                            }
+                            self.motion_from_device(&motion, wake && motion.initial_down());
                         }
                     }
                 }
@@ -908,4 +987,119 @@ pub(crate) fn isolated_test() -> bool {
     );
     assert!(stdout.contains(&format!("test {name} ... ok")), "{stdout}");
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aim_input_transport::{ABS_MT_SLOT, ABS_MT_TRACKING_ID};
+    use std::os::unix::net::UnixDatagram;
+
+    /// A dispatcher whose window policy consumes all input, and the client
+    /// end of its one window.
+    fn window() -> (Arc<Dispatcher>, UnixDatagram) {
+        let dispatcher = Dispatcher::new(|_| false);
+        dispatcher.set_policy(Box::new(|_, _, _, _, _| 0));
+        let (server, client) = UnixDatagram::pair().unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let frame = [0, 0, 100, 100];
+        let region = Region {
+            frame,
+            touchable: frame,
+            watch_outside: false,
+            owner: 10001,
+            owner_pid: 42,
+        };
+        dispatcher.add_window(0, server.into(), (100, 100), region);
+        recv(&client); // focus
+        (dispatcher, client)
+    }
+
+    fn recv(client: &UnixDatagram) -> Vec<u8> {
+        let mut bytes = [0; 512];
+        let n = client.recv(&mut bytes).unwrap();
+        bytes[..n].to_vec()
+    }
+
+    /// A message's sequence number, event id and event time.
+    fn header(m: &[u8]) -> (u32, i32, i64) {
+        (
+            u32::from_ne_bytes(m[4..8].try_into().unwrap()),
+            i32::from_ne_bytes(m[8..12].try_into().unwrap()),
+            i64::from_ne_bytes(m[16..24].try_into().unwrap()),
+        )
+    }
+
+    fn nothing(client: &UnixDatagram) {
+        client.set_nonblocking(true).unwrap();
+        let error = client.recv(&mut [0; 512]).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    /// A key held while the device goes to sleep: its dropped up cancels
+    /// it in the window that has it, and its repeat stops.
+    #[test]
+    fn a_dropped_key_cancels_the_keys_held_and_their_repeat() {
+        let (dispatcher, client) = window();
+        let key = |action, time| KeyEvent {
+            device: keyboard::BUILT_IN_KEYBOARD_ID,
+            source: keyboard::SOURCE_KEYBOARD,
+            display: keyboard::DISPLAY_INVALID,
+            action,
+            flags: keyboard::FLAG_FROM_SYSTEM,
+            key_code: 29,
+            scan_code: 30,
+            meta_state: 0,
+            repeat_count: 0,
+            down_time: 1,
+            event_time: time,
+        };
+        let down = key(keyboard::ACTION_DOWN, 1);
+        dispatcher.key_from_device(down.clone(), 0);
+        let (seq, id, _) = header(&recv(&client));
+        assert!(dispatcher.repeat.lock().unwrap().0.next().is_some());
+        dispatcher.set_interactive(false);
+        dispatcher.key_from_device(key(keyboard::ACTION_UP, 2), 0);
+        let canceled = recv(&client);
+        let (seq, id, time) = (seq + 1, id + 1, header(&canceled).2);
+        assert_eq!(canceled, down.canceled(time).message(seq, id));
+        assert!(dispatcher.repeat.lock().unwrap().0.next().is_none());
+        dispatcher.key_from_device(key(keyboard::ACTION_DOWN, 3), 0);
+        nothing(&client);
+    }
+
+    /// A touch under way while the device goes to sleep: its dropped move
+    /// cancels the gesture, and the rest of it is dropped.
+    #[test]
+    fn a_dropped_motion_cancels_the_gesture_under_way() {
+        let (dispatcher, client) = window();
+        let mut touch = Touch::default();
+        let mut report = |time, x| {
+            for (code, value) in [
+                (ABS_MT_SLOT, 0),
+                (ABS_MT_TRACKING_ID, 1),
+                (ABS_MT_POSITION_X, x),
+                (ABS_MT_POSITION_Y, 10),
+            ] {
+                touch.abs(code, value);
+            }
+            touch.report(time, 0, 0, (1., 1.)).remove(0)
+        };
+        let down = report(1, 10);
+        dispatcher.motion_from_device(&down, false);
+        let (seq, id, _) = header(&recv(&client));
+        dispatcher.set_interactive(false);
+        dispatcher.motion_from_device(&report(2, 20), false);
+        let canceled = recv(&client);
+        let (seq, id, time) = (seq + 1, id + 1, header(&canceled).2);
+        assert_eq!(canceled, down.canceled(time).message(seq, id, (0., 0.)));
+        assert!(dispatcher.windows.lock().unwrap().gesture.is_none());
+        touch.abs(ABS_MT_TRACKING_ID, -1);
+        for up in touch.report(3, 0, 0, (1., 1.)) {
+            dispatcher.motion_from_device(&up, false);
+        }
+        nothing(&client);
+    }
 }

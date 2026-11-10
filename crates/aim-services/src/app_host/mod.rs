@@ -6113,8 +6113,10 @@ impl Service for Control {
             // before initializing the user and admitting app starts.
             let host = self.0.clone();
             std::thread::spawn(move || {
-                let interactive = host.power_service.get().is_none_or(|p| p.interactive());
-                if let Err(e) = host.set_input_interactive(interactive) {
+                let power = host
+                    .power_service
+                    .get_or_init(|| Arc::new(power_service::PowerManager::new(host.clone())));
+                if let Err(e) = power.tell_input_interactive() {
                     eprintln!("app host: input interactive: {}", e.message);
                 }
                 let _ready = boot_ready::BootReady(&host);

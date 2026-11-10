@@ -294,3 +294,45 @@ fn input_wakes_the_device_as_the_window_policy_has_it() {
         assert_eq!(woke(), Some((6, Some("android.policy:KEY".into()))));
     });
 }
+
+/// The app host agent, taking what its dispatcher hears of interactivity.
+struct InputAgent(std::sync::mpsc::Sender<bool>);
+impl Service for InputAgent {
+    fn descriptor(&self) -> &str {
+        super::super::AGENT_DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        call.data.enforce_interface(self.descriptor())?;
+        assert_eq!(call.code, super::super::SET_INTERACTIVE);
+        self.0.send(call.data.read_bool()?).unwrap();
+        let mut reply = Parcel::new();
+        reply.write_no_exception();
+        Ok(reply)
+    }
+}
+
+/// An agent attaching hears whether the device is interactive after a
+/// transition under way, never the state it replaces.
+#[test]
+fn an_attaching_agent_hears_interactivity_after_a_transition() {
+    crate::system::with_discovery_binders(|host, _, _, export| {
+        let power = Arc::new(PowerManager::new(host.clone()));
+        let (heard, hearing) = std::sync::mpsc::channel();
+        host.attach_agent(export(Arc::new(InputAgent(heard))));
+        let transition = power.transition.lock().unwrap();
+        let attaching = power.clone();
+        let attach = std::thread::spawn(move || attaching.tell_input_interactive().unwrap());
+        assert!(
+            hearing
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err()
+        );
+        power.state.lock().unwrap().asleep = true;
+        host.set_input_interactive(false).unwrap();
+        drop(transition);
+        attach.join().unwrap();
+        let timeout = std::time::Duration::from_secs(2);
+        assert_eq!(hearing.recv_timeout(timeout), Ok(false));
+        assert_eq!(hearing.recv_timeout(timeout), Ok(false));
+    });
+}

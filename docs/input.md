@@ -51,10 +51,14 @@ device is not interactive (the app host tells the agent, as
 window policy about each key and touch (`interceptKeyBeforeQueueing`,
 `interceptMotionBeforeQueueingNonInteractive`, `app_host/input_policy.rs`):
 a touch's first down wakes the device, the touchscreen's `.idc` setting
-`touch.wake` as a Mac's input wakes the Mac, and goes on to the window; a
-wake key's down (`KeyEvent.isWakeKey`, the layout's `WAKE`, an external
-keyboard's keys) wakes it and is consumed with its up; anything else is
-consumed while the display is off. The built-in keyboard's ordinary keys do
+`touch.wake` as a Mac's input wakes the Mac, and goes on to the window
+(whose app drops it while its `ViewRootImpl` is still stopped, as on
+Android); a wake key's down (`KeyEvent.isWakeKey`, the layout's `WAKE`, an
+external keyboard's keys) wakes it and is consumed with its up; anything
+else is consumed while the display is off. A key or touch consumed cancels
+what its device holds down in a window, as InputDispatcher's
+`dropInboundEventLocked` does: the keys get a canceled up and their repeat
+stops, a gesture under way gets `ACTION_CANCEL`. The built-in keyboard's ordinary keys do
 not wake it, as an internal keyboard's do not. The sleep and wake keys the
 agent applies itself as PhoneWindowManager does
 (`daemons/app-host-agent/src/power.rs`). The rest of the window manager
