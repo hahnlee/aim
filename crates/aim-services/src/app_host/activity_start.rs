@@ -1320,7 +1320,8 @@ impl AppHost {
                 .map(|a| a.task),
         };
         if let Some(task) = reused {
-            self.apply_task_launch_options(task, launch_options, &info, source_task)?;
+            let front = d.front == Some(task);
+            self.apply_task_launch_options(task, launch_options, &info, source_task, front)?;
         }
         if matches!(d.outcome, Outcome::Front(1) | Outcome::Deliver(_, 1)) {
             let mut stack = self.activities.stack.lock().unwrap();

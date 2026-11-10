@@ -13,6 +13,9 @@ pub(super) struct LaunchOptions {
     pub activity_type: i32,
     /// `getAvoidMoveToFront`: the start brings no task to the front.
     pub avoid_move_to_front: bool,
+    /// `getLaunchRootTask`: the organizer root task the start goes into,
+    /// none if its token names no task (`Task.fromWindowContainerToken`).
+    pub launch_root: Option<i32>,
 }
 
 impl AppHost {
@@ -84,6 +87,18 @@ impl AppHost {
                 ));
             }
         }
+        let launch_root = o
+            .window_container_token("android.activity.launchRootTaskToken")
+            .map_err(bad)?
+            .and_then(|token| self.task_of_token(token))
+            .filter(|&id| self.tasks.bounds(id).is_some());
+        // Into an app task, a task nested in another (#2616).
+        if launch_root.is_some_and(|id| self.tasks.root(id).is_none()) {
+            return Err(self.unimplemented_named(
+                "activity_task",
+                "a launch root task not created by an organizer (#2616)",
+            ));
+        }
         Ok(LaunchOptions {
             mode: o.int("android.activity.windowingMode", 0).map_err(bad)?,
             bounds: o
@@ -93,6 +108,7 @@ impl AppHost {
             avoid_move_to_front: o
                 .boolean("android.activity.avoidMoveToFront", false)
                 .map_err(bad)?,
+            launch_root,
             ..Default::default()
         })
     }

@@ -45,9 +45,11 @@ pub(super) fn unsupported_start(flags: i32, profiler: bool) -> Option<&'static s
 /// is reported.
 const PROCESS_STATE_UNKNOWN: i32 = -1;
 const PROCESS_STATE_CACHED_EMPTY: i32 = 19;
-/// `WindowConfiguration.ACTIVITY_TYPE_STANDARD`, `ACTIVITY_TYPE_HOME`.
+/// `WindowConfiguration.ACTIVITY_TYPE_STANDARD`, `ACTIVITY_TYPE_HOME`,
+/// `ACTIVITY_TYPE_RECENTS`.
 pub(super) const ACTIVITY_TYPE_STANDARD: i32 = 1;
 pub(super) const ACTIVITY_TYPE_HOME: i32 = 2;
+pub(super) const ACTIVITY_TYPE_RECENTS: i32 = 3;
 /// `Display.DEFAULT_DISPLAY`, `Display.INVALID_DISPLAY`.
 pub(super) const DEFAULT_DISPLAY: i32 = 0;
 pub(super) const INVALID_DISPLAY: i32 = -1;

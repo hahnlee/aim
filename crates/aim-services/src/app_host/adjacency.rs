@@ -1,6 +1,7 @@
 //! Organizer root tasks adjacent to each other (split screen), as
 //! `TaskFragment.AdjacentSet` and `TaskDisplayArea.mLaunchAdjacentFlagRootTask`
-//! keep them at android-16.0.0_r1. In window mode each of their tasks keeps
+//! keep them at android-16.0.0_r1, and the display area's launch root tasks
+//! (`mLaunchRootTasks`). In window mode each of their tasks keeps
 //! its own Mac window, at its root task's bounds, so adjacent roots' windows
 //! are tiled side by side (docs/windows.md).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
@@ -14,6 +15,17 @@ pub(super) struct Adjacency {
     sets: Vec<Vec<i32>>,
     /// `mLaunchAdjacentFlagRootTask`.
     pub launch_root: Option<i32>,
+    /// `mLaunchRootTasks`, the latest last.
+    launch_roots: Vec<LaunchRoot>,
+}
+
+/// `LaunchRootTaskDef`: a root task new tasks of its windowing modes and
+/// activity types go into.
+#[derive(Clone, Debug, PartialEq)]
+struct LaunchRoot {
+    task: i32,
+    modes: Vec<i32>,
+    types: Vec<i32>,
 }
 
 impl Adjacency {
@@ -44,12 +56,37 @@ impl Adjacency {
         self.sets.retain(|s| s.len() >= 2);
     }
 
-    /// Root task `id` is gone (`TaskDisplayArea.onRootTaskRemoved`).
+    /// `TaskDisplayArea.setLaunchRootTask`: root task `id` becomes the
+    /// latest launch root task of `modes` and `types`, or none of either.
+    pub fn set_launch_root(&mut self, id: i32, modes: Vec<i32>, types: Vec<i32>) {
+        self.launch_roots.retain(|r| r.task != id);
+        if !modes.is_empty() || !types.is_empty() {
+            self.launch_roots.push(LaunchRoot {
+                task: id,
+                modes,
+                types,
+            });
+        }
+    }
+
+    /// The latest launch root task of windowing `mode` and activity type
+    /// `kind` (`LaunchRootTaskDef.contains`).
+    pub fn launch_root_of(&self, mode: i32, kind: i32) -> Option<i32> {
+        self.launch_roots
+            .iter()
+            .rev()
+            .find(|r| r.modes.contains(&mode) && r.types.contains(&kind))
+            .map(|r| r.task)
+    }
+
+    /// Root task `id` is gone (`TaskDisplayArea.onRootTaskRemoved`; with
+    /// its organizer, `removeLaunchRootTask`).
     pub fn remove(&mut self, id: i32) {
         self.leave(id);
         if self.launch_root == Some(id) {
             self.launch_root = None;
         }
+        self.launch_roots.retain(|r| r.task != id);
     }
 }
 
