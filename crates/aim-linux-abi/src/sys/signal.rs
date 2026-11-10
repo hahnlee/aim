@@ -601,9 +601,10 @@ fn record_external(sig: i32, si: &libc::siginfo_t) {
         0x10003 => -2,               // SI_TIMER
         c @ 1..=6 if sig == 17 => c, // CLD_*
         // An O_ASYNC file's (`pgsigio`), which Darwin sends as a kill from
-        // the process that made it ready: a guest's kill of SIGIO never
-        // goes through Darwin ([`signal_process`]), so a host SIGIO is the
-        // kernel's, with no sender (`send_sigio`'s SI_KERNEL).
+        // the process that made it ready: a guest's kill of SIGIO goes
+        // through Darwin only where no agent can carry it
+        // ([`signal_process`]), so a host SIGIO is taken for the kernel's,
+        // with no sender (`send_sigio`'s SI_KERNEL).
         _ if sig == SIGIO => SI_KERNEL,
         _ => sigframe::SI_USER,
     };
@@ -1704,8 +1705,13 @@ pub(super) fn signal_process(p: i32, sig: i32, h: i32) -> i64 {
     if matches!(sig, SIGKILL | SIGSTOP) && super::pidns::is_private_init(p) {
         return 0;
     }
-    // A SIGIO too, as a host SIGIO is the kernel's (`record_external`).
-    if sig != 0 && (h == 0 || SYNCHRONOUS & bit(sig) != 0 || sig == SIGIO) {
+    // A SIGIO too, where the agent runs, so that a host SIGIO is the
+    // kernel's (`record_external`). Without one (no pid table here, or the
+    // native namespace init) Darwin's kill delivers it, read as the
+    // kernel's.
+    let agent =
+        || super::cred::by_pid_dir().is_some() && super::pidns::is_namespace_init(p) == Ok(false);
+    if sig != 0 && (h == 0 || SYNCHRONOUS & bit(sig) != 0 || sig == SIGIO && agent()) {
         return super::ptrace::remote_signal(p, 0, &sender(sig, sigframe::SI_USER));
     }
     // SAFETY: plain kill of a process of the namespace.

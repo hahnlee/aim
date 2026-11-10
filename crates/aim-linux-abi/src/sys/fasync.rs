@@ -689,6 +689,24 @@ mod tests {
         close(&[b]);
     }
 
+    /// Without a pid table, so with no agent to carry it, a kill of SIGIO
+    /// to another process is Darwin's, and is delivered.
+    #[test]
+    fn a_sigio_kill_without_an_agent_is_delivered() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("10")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        assert!(super::super::cred::by_pid_dir().is_none());
+        assert_eq!(
+            super::super::signal::signal_process(pid, SIGIO, libc::SIGIO),
+            0
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     /// A pipe's FIOASYNC is O_ASYNC: the reader's owner hears each write,
     /// as `send_sigio` signals it without F_SETSIG: SI_KERNEL, from no
     /// process.

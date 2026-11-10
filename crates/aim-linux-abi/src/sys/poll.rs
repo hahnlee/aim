@@ -2243,7 +2243,7 @@ mod reportable_tests {
         // host poll fails with EINTR.
         unsafe {
             let mut action: libc::sigaction = std::mem::zeroed();
-            action.sa_sigaction = ignore as usize;
+            action.sa_sigaction = ignore as extern "C" fn(i32) as usize;
             libc::sigaction(libc::SIGUSR2, &action, std::ptr::null_mut());
         }
         let fd = crate::sys::net::socket([2, 1 | O_NONBLOCK, 0, 0, 0, 0]);

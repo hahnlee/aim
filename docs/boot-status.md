@@ -115,7 +115,10 @@ F_SETFL and FIOASYNC set O_ASYNC on every fd's host file (FIOASYNC is ENOTTY on
 a file without Linux fasync), and F_GETFL reports it. A host socket or pipe
 keeps its process or group owner in Darwin, whose SIGIO reaches it as
 `send_sigio`'s, SI_KERNEL from no process (a guest's kill of SIGIO to another
-process goes through the agent, so a host SIGIO is the kernel's; #2875); with
+process goes through the agent, so a host SIGIO is the kernel's; where there is
+no agent, no pid table here or the native namespace init as target, and for a
+group kill without a member list, Darwin's kill delivers it, read as the
+kernel's; #2875, #2941); with
 F_SETSIG or a thread owner, Darwin's owner is cleared and an EV_CLEAR read
 knote on a private reference to the file wakes the same watcher thread, which
 sends the signal with POLL_IN and the si_fd that set O_ASYNC until the file's
