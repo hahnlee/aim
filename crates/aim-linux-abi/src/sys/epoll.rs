@@ -812,7 +812,7 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
         // changed them, or reported or disabled one, since the last wait.
         let signals = signal_interests(&ep);
         let unconnected = unconnected_interests(&ep);
-        let left = if unconnected.is_empty() {
+        let wait = if unconnected.is_empty() {
             left
         } else {
             Some(zero)
@@ -845,7 +845,7 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
         // the kqueue is read without waiting.
         let (n, woke) = match &polling {
             None => {
-                let n = fetch_events(left.as_ref());
+                let n = fetch_events(wait.as_ref());
                 (n, n != 0)
             }
             Some(polling) => {
@@ -863,7 +863,7 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
                     },
                 ];
                 // SAFETY: a pollfd array we own.
-                match unsafe { libc::poll(fds.as_mut_ptr(), 2, poll_ms(left)) } {
+                match unsafe { libc::poll(fds.as_mut_ptr(), 2, poll_ms(wait)) } {
                     woke if woke <= 0 => (woke, woke != 0),
                     _ => (fetch_events(Some(&zero)), true),
                 }
@@ -878,8 +878,13 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
         unsafe { kevs.set_len(n as usize) };
         let (found, rearm) = ready(&ep, &kevs, maxevents as usize, &signals, &unconnected);
         apply(epfd, &rearm);
-        // An inotify fd that woke the wait with nothing to read: wait on.
-        if !found.is_empty() || !woke || left.is_some_and(|t| t.tv_sec == 0 && t.tv_nsec == 0) {
+        // An inotify fd that woke the wait with nothing to read, or an
+        // unconnected socket another waiter reported or a change removed
+        // since it was found: wait on.
+        if !found.is_empty()
+            || !woke && unconnected.is_empty()
+            || left.is_some_and(|t| t.tv_sec == 0 && t.tv_nsec == 0)
+        {
             break found;
         }
     };
@@ -1046,7 +1051,8 @@ fn ready(
             e.1 |= b;
             continue;
         }
-        if i.disabled || out.len() == limit {
+        // Read again under the lock: another waiter may have reported it.
+        if i.disabled || i.events & EPOLLET != 0 && i.reported || out.len() == limit {
             continue;
         }
         i.reported = true;

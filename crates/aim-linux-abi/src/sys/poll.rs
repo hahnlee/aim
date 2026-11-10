@@ -1891,6 +1891,39 @@ mod reportable_tests {
         close(&[fd]);
     }
 
+    /// Two threads waiting on one epoll: an edge-triggered interest in an
+    /// unconnected TCP socket is delivered to one (`ep_poll`), and the
+    /// other waits out its timeout.
+    #[test]
+    fn an_unconnected_tcp_socket_edge_reaches_one_waiter() {
+        let _view = crate::vfs::test_view();
+        for _ in 0..20 {
+            let fd = crate::sys::net::socket([2, 1 | O_NONBLOCK, 0, 0, 0, 0]);
+            assert!(fd >= 0, "socket {fd}");
+            let edge = watching(fd, 0x4 | 1 << 31);
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let waiters: Vec<_> = (0..2)
+                .map(|_| {
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        let started = std::time::Instant::now();
+                        (waited(edge, 50).0, started.elapsed())
+                    })
+                })
+                .collect();
+            let results: Vec<_> = waiters.into_iter().map(|w| w.join().unwrap()).collect();
+            assert_eq!(results.iter().map(|r| r.0).sum::<i64>(), 1, "{results:?}");
+            for (n, elapsed) in &results {
+                assert!(
+                    *n == 1 || *elapsed >= std::time::Duration::from_millis(45),
+                    "{results:?}"
+                );
+            }
+            close(&[fd, edge]);
+        }
+    }
+
     /// `inet_csk_listen_poll`: a listening socket is only readable, once a
     /// connection is queued; the connected socket is writable, no longer
     /// hung up.
