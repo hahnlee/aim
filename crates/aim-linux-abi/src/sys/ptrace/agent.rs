@@ -389,8 +389,14 @@ fn connection(fd: i32) {
         }
         let sent = if op != SIGNAL {
             send(fd, &handle(op, &mut r, peer))
-        } else if let Some(_answering) = SIGNALS.begin() {
-            send(fd, &handle(op, &mut r, peer))
+        } else if let Some(answering) = SIGNALS.begin() {
+            let (answer, raise) = signal(&mut r);
+            let sent = send(fd, &answer);
+            drop(answering);
+            if let Some(sig) = raise {
+                crate::sys::signal::raise(sig);
+            }
+            sent
         } else {
             // The group is exiting: the signal is dropped, as Linux drops
             // it then, and kill succeeds.
@@ -402,6 +408,18 @@ fn connection(fd: i32) {
     }
     close(fd);
     tracee::tracer_gone(peer);
+}
+
+/// A SIGNAL request: the reply, and the signal this process raises once
+/// the reply is sent.
+fn signal(r: &mut Reader) -> (Vec<u8>, Option<i32>) {
+    let tid = r.i32();
+    let mut info = crate::sys::sigframe::Siginfo::new(r.i32(), r.i32());
+    for f in &mut info.fields {
+        *f = r.u64();
+    }
+    let (result, raise) = crate::sys::signal::from_peer(tid, info);
+    (reply(result, |_| {}), raise)
 }
 
 /// Requests taken and not yet answered, until this process ends.
@@ -617,14 +635,6 @@ fn handle(op: u32, r: &mut Reader, peer: i32) -> Vec<u8> {
             reply(n, |w| w.bytes(&bytes))
         }
         VM => vm(r),
-        SIGNAL => {
-            let tid = r.i32();
-            let mut info = crate::sys::sigframe::Siginfo::new(r.i32(), r.i32());
-            for f in &mut info.fields {
-                *f = r.u64();
-            }
-            reply(crate::sys::signal::from_peer(tid, info), |_| {})
-        }
         MAPS => reply(0, |w| w.str(&procfs::maps())),
         SMAPS => reply(0, |w| w.str(&smaps::smaps(r.bool()))),
         CPU_TIMES => {

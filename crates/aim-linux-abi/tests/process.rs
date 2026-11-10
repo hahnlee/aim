@@ -420,6 +420,13 @@ fn a_signal_to_an_unreaped_zombie_succeeds() {
     check("peer_zombie_signal");
 }
 
+/// tgkill of SIGSTOP or SIGKILL to a peer's thread returns 0, though
+/// Darwin stops or ends the peer's agent with it.
+#[test]
+fn a_peers_thread_stop_and_kill_succeed() {
+    check("peer_thread_stop_kill");
+}
+
 /// SIGCHLD, waitid and waitpid report a child killed by a signal, one
 /// Darwin cannot carry too, and an exit of 128 + a signal as an exit
 /// (#2773).
