@@ -897,15 +897,29 @@ impl AppHost {
         }
         let now = elapsed_realtime();
         for (package, uid, _) in self.installed(MATCH_DISABLED_COMPONENTS, 0)? {
-            self.update_package_idle_state(&package, 0, uid, now)?;
+            self.check_and_update_standby(&package, 0, uid, now)?;
         }
-        Ok(())
+        // The listeners hear the check's buckets once it is done, as
+        // `maybeInformListeners`' messages reach them after it.
+        self.restrictions_changed(None)
+    }
+
+    /// One package's `checkAndUpdateStandbyState`, then its listeners.
+    fn update_package_idle_state(
+        self: &Arc<Self>,
+        package: &str,
+        user: i32,
+        uid: i32,
+        now: i64,
+    ) -> Result<(), Exception> {
+        self.check_and_update_standby(package, user, uid, now)?;
+        self.restrictions_changed(None)
     }
 
     /// `checkAndUpdateStandbyState`: external permission/app-op owners are
     /// queried before taking `mAppIdleLock`, then the current history is
     /// updated, including any usage reported while those queries ran.
-    fn update_package_idle_state(
+    fn check_and_update_standby(
         self: &Arc<Self>,
         package: &str,
         user: i32,
@@ -918,8 +932,7 @@ impl AppHost {
         self.with_standby(|_, c| {
             Self::check_and_update(c, package, user, min_bucket, now);
             Ok(())
-        })?;
-        self.restrictions_changed(None)
+        })
     }
 
     fn check_and_update(c: &mut Controller, package: &str, user: i32, min_bucket: i32, now: i64) {

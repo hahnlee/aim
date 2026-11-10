@@ -1144,6 +1144,23 @@ impl SigningScan {
         all_users: Option<&[super::User]>,
         disabled: Option<&Record>,
     ) -> Result<NewPackageOutcome, SigningError> {
+        let mut staged = self.clone();
+        let outcome =
+            staged.apply_staged_existing(code, update, saved_users, all_users, disabled)?;
+        *self = staged;
+        Ok(outcome)
+    }
+
+    /// [`Self::apply_existing`] to an owner the caller has staged and drops
+    /// on an error, which may leave it partly updated.
+    pub(super) fn apply_staged_existing(
+        &mut self,
+        code: &Code,
+        update: super::SettingUpdate,
+        saved_users: &BTreeMap<String, BTreeMap<i32, UserState>>,
+        all_users: Option<&[super::User]>,
+        disabled: Option<&Record>,
+    ) -> Result<NewPackageOutcome, SigningError> {
         let flags = physical_parse_flags(&code.location.path).map_err(|message| {
             SigningError::Rejected(Error {
                 package: code.parsed.package_name.clone(),
@@ -1240,12 +1257,10 @@ impl SigningScan {
                 ScanOrigin::Data
             },
         };
-        let mut next = self.clone();
-        next.settings.packages[at] = record.settings.clone();
-        let signing = next.apply_candidate(&record, disabled, false)?;
-        record.settings = next.settings.packages[at].clone();
-        next.update_disabled_user_aliases(&record.settings.name, &setting.users);
-        *self = next;
+        self.settings.packages[at] = record.settings.clone();
+        let signing = self.apply_candidate(&record, disabled, false)?;
+        record.settings = self.settings.packages[at].clone();
+        self.update_disabled_user_aliases(&record.settings.name, &setting.users);
         Ok(NewPackageOutcome {
             record,
             users: setting.users,

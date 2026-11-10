@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 
 use aim_android_image::system_server::{NATIVE_SERVICES, parse_native_services};
 use aim_android_init::engine::{ActionManager, COLD_BOOT_DONE_PROP, ExecutedCommand, Step};
-use aim_android_init::props::areas::read_from_dir;
 use aim_android_init::props::load::{
     KernelBootProperties, PropertyInitOptions, create_serialized_property_info, property_init,
     start_property_service,
@@ -34,7 +33,9 @@ use crate::launch::{
 };
 use crate::mount::DataMount;
 use crate::paths::{Layout, Sweep};
-use crate::props::{Properties, heap_properties, mapped_properties, share_areas, wait_property};
+use crate::props::{
+    AreaReader, Properties, heap_properties, mapped_properties, share_areas, wait_property,
+};
 use crate::propsvc::{PropertyEvent, PropertySockets, SetRequest};
 use crate::supervisor::{DEFAULT_PATH, Planner};
 
@@ -630,8 +631,8 @@ pub fn watch_namespace(
 
 /// A property lookup of the in-process services, whose contract has no
 /// error: an unreadable area is reported and reads as unset.
-fn lookup_property(dir: &std::path::Path, name: &str) -> Option<String> {
-    read_from_dir(dir, name).unwrap_or_else(|error| {
+fn lookup_property(areas: &AreaReader, dir: &std::path::Path, name: &str) -> Option<String> {
+    areas.get(name).unwrap_or_else(|error| {
         eprintln!("guest-init: reading {name}: {}: {error}", dir.display());
         None
     })
@@ -1061,6 +1062,7 @@ impl Boot {
             )?;
             if let Some(services) = &native_services {
                 let properties_dir = layout.properties_dir();
+                let areas = AreaReader::new(&properties_dir);
                 let wait_dir = properties_dir.clone();
                 let socket_dir = layout.socket_dir();
                 let sets = std::sync::Mutex::new(event_sender.clone());
@@ -1070,7 +1072,7 @@ impl Boot {
                         &layout.data.join("data"),
                         &layout.bpf_dir(),
                         &layout.net_dir(),
-                        Box::new(move |name| lookup_property(&properties_dir, name)),
+                        Box::new(move |name| lookup_property(&areas, &properties_dir, name)),
                         Box::new(move |name, value, deadline| {
                             wait_property(&wait_dir, name, value, deadline)
                                 .map_err(|e| e.to_string())
@@ -1092,6 +1094,7 @@ impl Boot {
             }
             if let Some((names, log)) = &options.binder_shadow {
                 let properties_dir = layout.properties_dir();
+                let areas = AreaReader::new(&properties_dir);
                 let files = map.clone();
                 native_services
                     .as_ref()
@@ -1101,7 +1104,7 @@ impl Boot {
                         names,
                         log,
                         image.root(),
-                        Box::new(move |name| lookup_property(&properties_dir, name)),
+                        Box::new(move |name| lookup_property(&areas, &properties_dir, name)),
                         Box::new(move |guest: &str| files.readable_by_others(guest)),
                     )?;
             }

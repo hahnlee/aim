@@ -9,7 +9,7 @@ pub mod load;
 pub mod protocol;
 pub mod service;
 
-pub use area::{PA_SIZE, PROP_VALUE_MAX, PropArea, PropAreaReader, ReadProperty};
+pub use area::{PA_SIZE, PROP_VALUE_MAX, PropArea, PropAreaReader, ReadProperty, SharedAreaReader};
 pub use areas::{FutexWaker, NoWake, PropertyAreas, WakeTarget};
 pub use info::{PropertyInfoArea, PropertyInfoEntry, build_trie, parse_property_info_file};
 pub use service::{PropertyPolicy, PropertyService, SetEffect, SetOutcome, Ucred};

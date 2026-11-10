@@ -16,7 +16,8 @@ use std::time::Instant;
 use aim_android_init::props::area::{AreaMemory, HeapMemory};
 use aim_android_init::props::areas::{PROPERTIES_SERIAL, PROPERTY_INFO, read_from_dir};
 use aim_android_init::props::{
-    FutexWaker, PA_SIZE, PropertyAreas, PropertyInfoArea, PropertyService, WakeTarget,
+    FutexWaker, PA_SIZE, PropertyAreas, PropertyInfoArea, PropertyService, SharedAreaReader,
+    WakeTarget,
 };
 use aim_binder_host::mach;
 use aim_binder_host::server::Server;
@@ -191,6 +192,118 @@ pub fn mapped_properties(dir: &Path, property_info: Vec<u8>) -> Result<Propertie
     let mut service = PropertyService::with_areas(areas);
     service.set_waker(Box::new(SharedAreaWaker::new(bases, UlockShared)));
     Ok(service)
+}
+
+/// The in-process services' reader of the areas in `dir`, as bionic's
+/// readers are: `property_info`, which init writes once before they start,
+/// read at the first lookup, and each context's area mapped read-only and
+/// shared at its first lookup and kept, then read as the writer updates it
+/// ([`SharedAreaReader`]). What is missing or does not parse is not kept,
+/// and its lookup fails as [`read_from_dir`]'s does.
+pub struct AreaReader {
+    dir: std::path::PathBuf,
+    info: std::sync::Mutex<Option<std::sync::Arc<Vec<u8>>>>,
+    maps: std::sync::Mutex<HashMap<String, std::sync::Arc<ReadMapping>>>,
+}
+
+struct ReadMapping {
+    base: *const u8,
+    len: usize,
+}
+
+// SAFETY: a read-only mapping owned by the value, read only through
+// SharedAreaReader's atomic loads.
+unsafe impl Send for ReadMapping {}
+unsafe impl Sync for ReadMapping {}
+
+impl ReadMapping {
+    fn open(path: &Path) -> io::Result<Self> {
+        let file = fs::File::open(path)?;
+        let len = file.metadata()?.len() as usize;
+        if len == 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "empty"));
+        }
+        // SAFETY: maps the open file read-only; the fd may close after.
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if base == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            base: base.cast(),
+            len,
+        })
+    }
+}
+
+impl Drop for ReadMapping {
+    fn drop(&mut self) {
+        // SAFETY: mapped in open with this length.
+        unsafe { libc::munmap(self.base.cast_mut().cast(), self.len) };
+    }
+}
+
+impl AreaReader {
+    pub fn new(dir: &Path) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+            info: Default::default(),
+            maps: Default::default(),
+        }
+    }
+
+    fn property_info(&self) -> io::Result<std::sync::Arc<Vec<u8>>> {
+        let mut info = self.info.lock().unwrap();
+        if let Some(info) = info.as_ref() {
+            return Ok(info.clone());
+        }
+        let read = std::sync::Arc::new(fs::read(self.dir.join(PROPERTY_INFO))?);
+        *info = Some(read.clone());
+        Ok(read)
+    }
+
+    fn mapping(&self, file: &str) -> io::Result<std::sync::Arc<ReadMapping>> {
+        let mut maps = self.maps.lock().unwrap();
+        if let Some(mapping) = maps.get(file) {
+            return Ok(mapping.clone());
+        }
+        let mapping = std::sync::Arc::new(ReadMapping::open(&self.dir.join(file))?);
+        maps.insert(file.to_string(), mapping.clone());
+        Ok(mapping)
+    }
+
+    /// [`read_from_dir`] of `name`.
+    pub fn get(&self, name: &str) -> io::Result<Option<String>> {
+        let invalid = |file: &str, error: String| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("{file}: {error}"))
+        };
+        let bytes = self.property_info()?;
+        let info = PropertyInfoArea::new(&bytes).map_err(|e| {
+            *self.info.lock().unwrap() = None;
+            invalid(PROPERTY_INFO, e)
+        })?;
+        let (index, _) = info.property_info_indexes(name);
+        let context = *info
+            .contexts()
+            .get(index as usize)
+            .ok_or_else(|| invalid(PROPERTY_INFO, format!("no context for {name}")))?;
+        let area = self.mapping(context)?;
+        // SAFETY: the mapping is page aligned and lives as long as `area`;
+        // init writes the file only through its PropArea.
+        let reader = unsafe { SharedAreaReader::new(area.base, area.len) }.map_err(|e| {
+            self.maps.lock().unwrap().remove(context);
+            invalid(context, e)
+        })?;
+        Ok(reader.get(name).map(|p| p.value))
+    }
 }
 
 /// Waits for a property's value through bionic's global area serial
@@ -475,6 +588,28 @@ mod tests {
         );
         assert!(started.elapsed() >= Duration::from_millis(30));
         assert!(started.elapsed() < Duration::from_secs(1));
+        drop(service);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn area_reader_follows_the_shared_areas_and_retries_what_is_missing() {
+        use aim_android_init::props::build_trie;
+
+        let dir = std::env::temp_dir().join(format!("aim-area-reader-{}", std::process::id()));
+        let reader = AreaReader::new(&dir);
+        assert!(reader.get("debug.value").is_err());
+        let info = build_trie(&[], "u:object_r:default_prop:s0", "string").unwrap();
+        let mut service = mapped_properties(&dir, info).unwrap();
+        assert_eq!(reader.get("debug.value").unwrap(), None);
+        for value in ["added", "updated", "a longer value than the first two"] {
+            assert!(service.init_set("debug.value", value).is_success());
+            assert_eq!(reader.get("debug.value").unwrap().as_deref(), Some(value));
+            assert_eq!(
+                reader.get("debug.value").unwrap(),
+                read_from_dir(&dir, "debug.value").unwrap()
+            );
+        }
         drop(service);
         fs::remove_dir_all(dir).unwrap();
     }

@@ -182,7 +182,9 @@ impl System {
             let mut usage = base.usage().clone();
             if let Some((_, uid)) = public {
                 let source = capture.state();
-                let filter = AppsFilter::new(
+                // The filter the queries keep, rebuilt only when the
+                // packages change, as the original's AppsFilter is.
+                let filter = AppsFilter::latest(
                     source,
                     &Config {
                         force_system_packages_queryable: source
@@ -195,7 +197,7 @@ impl System {
                 crate::package::diagnostics::notify_package_use(
                     &Query {
                         state: source,
-                        filter: &filter,
+                        filter: filter.as_ref(),
                         calling_uid: uid,
                     },
                     &mut usage,

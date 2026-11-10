@@ -1090,7 +1090,19 @@ boot was run (2026-10-31). AudioPolicy's load time fell from 3.3â€“3.8 s to 2.6â
 Package boot now shares immutable image inputs across scanning, initial projection
 and construction (#2421): three matched warm second boots reduce median raw scan
 from 2.028 to 1.214 s; median `boot_completed` is 6.216 s
-against 6.978 s before (2026-10-30). Package boot now starts from configured
+against 6.978 s before (2026-10-30). The image scan parses every scan
+directory's packages in one parallel batch and takes the results in scan
+order, and a boot-scanned package's owner is staged once (it was cloned three
+times per package); the system image scan takes 1.4-1.7 s fresh and
+0.42-0.47 s warm. The in-process services read properties from the areas
+mapped once (a boot makes about 11,000 lookups, about 0.3-0.5 s from files
+before); `notifyPackageUse` checks visibility with the queries' retained
+AppsFilter, and app standby's idle check informs the restriction owner once
+per check. Branch perf/boot on main `926b2486a` (2026-11-11), timed from
+`aimctl start` on throwaway data directories at 1-minute load 6-15 (a
+build that also logs its stage times): `sys.boot_completed` at 6.10, 6.43
+and 6.87 s fresh and 4.98, 5.40 and 5.49 s warm, aimctl's readiness at
+6.9-7.8 s and 5.6-6.3 s. Package boot now starts from configured
 inputs (#2431): initial resource size comes from the display server's observer
 hello and density from `ro.sf.lcd_density`; the first full SurfaceFlinger query
 must agree. Persistent properties, the applied initial locale, APEX, user-0 DE

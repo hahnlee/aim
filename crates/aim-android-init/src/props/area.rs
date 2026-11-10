@@ -145,12 +145,15 @@ impl<M: AreaMemory> PropArea<M> {
         unsafe { self.memory.base().add(PROP_AREA_HEADER_SIZE + data_offset) }
     }
 
+    /// Byte-wise atomic stores, as readers may load the bytes concurrently
+    /// (`SharedAreaReader`); the serial's release orders them.
     fn write_bytes(&self, data_offset: usize, bytes: &[u8]) {
         assert!(data_offset + bytes.len() <= self.data_size);
-        // SAFETY: bounds checked above.
-        unsafe {
-            ptr::copy_nonoverlapping(bytes.as_ptr(), self.data_ptr(data_offset), bytes.len())
-        };
+        for (i, byte) in bytes.iter().enumerate() {
+            // SAFETY: bounds checked above.
+            unsafe { std::sync::atomic::AtomicU8::from_ptr(self.data_ptr(data_offset + i)) }
+                .store(*byte, Ordering::Relaxed);
+        }
     }
 
     fn read_bytes(&self, data_offset: usize, len: usize) -> Vec<u8> {
@@ -604,5 +607,204 @@ impl<'a> PropAreaReader<'a> {
         {
             self.walk(right, out, depth + 1);
         }
+    }
+}
+
+/// A reader of an area another thread or process writes, through shared
+/// memory, as bionic's readers read their `MAP_SHARED` mapping: the trie
+/// links are acquire loads, every byte an atomic load, and a mutable value
+/// is copied as `SystemProperties::ReadMutablePropertyValue` copies it,
+/// again while its serial changed during the copy.
+pub struct SharedAreaReader {
+    base: *const u8,
+    len: usize,
+}
+
+impl SharedAreaReader {
+    /// `map_fd_ro`'s checks on `len` bytes at `base`.
+    ///
+    /// # Safety
+    /// `base` is 4-byte aligned and `len` bytes from it stay mapped and
+    /// readable for the reader's lifetime; others write them only as
+    /// [`PropArea`] does.
+    pub unsafe fn new(base: *const u8, len: usize) -> Result<Self, String> {
+        if base as usize % 4 != 0 {
+            return Err("prop_area mapping is not 4-byte aligned".to_string());
+        }
+        if len < PROP_AREA_HEADER_SIZE {
+            return Err("prop_area smaller than its header".to_string());
+        }
+        let reader = Self { base, len };
+        if reader.word_at(8) != Some(PROP_AREA_MAGIC)
+            || reader.word_at(12) != Some(PROP_AREA_VERSION)
+        {
+            return Err("bad prop_area magic or version".to_string());
+        }
+        Ok(reader)
+    }
+
+    /// The word at `offset` from the area's start, acquire-loaded.
+    fn word_at(&self, offset: usize) -> Option<u32> {
+        if offset % 4 != 0 || offset.checked_add(4)? > self.len {
+            return None;
+        }
+        // SAFETY: in bounds and aligned (see `new`).
+        Some(
+            unsafe { AtomicU32::from_ptr(self.base.add(offset) as *mut u32) }
+                .load(Ordering::Acquire),
+        )
+    }
+
+    fn byte_at(&self, offset: usize) -> Option<u8> {
+        if offset >= self.len {
+            return None;
+        }
+        // SAFETY: in bounds (see `new`).
+        Some(
+            unsafe { std::sync::atomic::AtomicU8::from_ptr(self.base.add(offset) as *mut u8) }
+                .load(Ordering::Relaxed),
+        )
+    }
+
+    fn data_word(&self, offset: usize) -> Option<u32> {
+        self.word_at(PROP_AREA_HEADER_SIZE.checked_add(offset)?)
+    }
+
+    /// Up to `max` bytes of the C string at data `offset`.
+    fn c_string(&self, offset: usize, max: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        while out.len() < max {
+            match self.byte_at(PROP_AREA_HEADER_SIZE + offset + out.len()) {
+                Some(0) | None => break,
+                Some(byte) => out.push(byte),
+            }
+        }
+        out
+    }
+
+    /// `to_prop_obj`: offsets beyond the data are null.
+    fn obj(&self, offset: u32) -> Option<usize> {
+        let offset = offset as usize;
+        (offset <= self.len - PROP_AREA_HEADER_SIZE).then_some(offset)
+    }
+
+    /// `prop_area::find`: the prop_info data offset for `name`.
+    pub fn find(&self, name: &str) -> Option<usize> {
+        let mut remaining = name.as_bytes();
+        let mut current = 0usize;
+        loop {
+            let separator = remaining.iter().position(|b| *b == b'.');
+            let segment = &remaining[..separator.unwrap_or(remaining.len())];
+            if segment.is_empty() {
+                return None;
+            }
+            let children = self.data_word(current + 16)?;
+            if children == 0 {
+                return None;
+            }
+            let mut node = self.obj(children)?;
+            loop {
+                let len = self.data_word(node)? as usize;
+                let name = self.c_string(node + TRIE_NODE_SIZE, len);
+                let ordering = cmp_prop_name(segment, &name);
+                if ordering == 0 {
+                    break;
+                }
+                let link = self.data_word(if ordering < 0 { node + 8 } else { node + 12 })?;
+                if link == 0 {
+                    return None;
+                }
+                node = self.obj(link)?;
+            }
+            current = node;
+            match separator {
+                Some(sep) => remaining = &remaining[sep + 1..],
+                None => break,
+            }
+        }
+        let prop = self.data_word(current + 4)?;
+        if prop == 0 {
+            return None;
+        }
+        self.obj(prop)
+    }
+
+    /// `SystemProperties::ReadCallback` for one prop_info: a read-only name's
+    /// value is written once, a mutable one's is copied from the dirty
+    /// backup area while its serial is dirty, until the serial before the
+    /// copy is the serial after it.
+    pub fn read(&self, info: usize) -> Option<ReadProperty> {
+        let name =
+            String::from_utf8_lossy(&self.c_string(info + PROP_INFO_SIZE, usize::MAX)).into_owned();
+        let mut serial = self.data_word(info)?;
+        let value = if name.starts_with("ro.") {
+            if serial & LONG_FLAG != 0 {
+                let relative = self.data_word(info + LONG_OFFSET_FIELD)? as usize;
+                self.c_string(info + relative, usize::MAX)
+            } else {
+                self.c_string(info + 4, PROP_VALUE_MAX)
+            }
+        } else {
+            loop {
+                let len = ((serial >> 24) as usize).min(PROP_VALUE_MAX - 1);
+                let source = if serial & 1 != 0 {
+                    DIRTY_BACKUP_AREA
+                } else {
+                    info + 4
+                };
+                let value = self.c_string(source, len + 1);
+                fence(Ordering::Acquire);
+                let after = self.data_word(info)?;
+                if after == serial {
+                    break value;
+                }
+                serial = after;
+            }
+        };
+        Some(ReadProperty {
+            name,
+            value: String::from_utf8_lossy(&value).into_owned(),
+            serial,
+        })
+    }
+
+    /// `__system_property_get`-style lookup.
+    pub fn get(&self, name: &str) -> Option<ReadProperty> {
+        self.find(name).and_then(|info| self.read(info))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_shared_reader_sees_only_whole_values_while_they_change() {
+        let area = PropArea::create(HeapMemory::new(PA_SIZE));
+        let values: Vec<Vec<u8>> = (0..6u8)
+            .map(|i| vec![b'a' + i; 5 + 13 * i as usize])
+            .collect();
+        assert!(area.add("debug.torn", &values[0]));
+        let info = area.find("debug.torn").unwrap();
+        // SAFETY: the area outlives the reader; the writer is PropArea.
+        let reader =
+            unsafe { SharedAreaReader::new(area.memory().base(), area.memory().len()) }.unwrap();
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let torn = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut i = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    i = (i + 1) % values.len();
+                    area.update_value(info, &values[i]);
+                }
+            });
+            let torn = (0..50_000)
+                .map(|_| reader.get("debug.torn").map(|p| p.value.into_bytes()))
+                .find(|value| !value.as_ref().is_some_and(|value| values.contains(value)));
+            stop.store(true, Ordering::Relaxed);
+            torn
+        });
+        assert_eq!(torn, None);
+        assert_eq!(reader.get("debug.missing"), None);
     }
 }
