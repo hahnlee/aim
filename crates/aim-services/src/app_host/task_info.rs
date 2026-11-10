@@ -1336,6 +1336,7 @@ pub(super) mod tests {
                 uid,
                 user: 0,
                 last_active: id as i64 * 10,
+                root_was_reset: false,
             });
             s.activities
                 .push(Activity::new(token, id, 1, "p/A", 0, 0, None));
@@ -1860,6 +1861,7 @@ pub(super) mod tests {
             base: LaunchIntent::Component,
             uid: 10_100,
             user: 0,
+            root_was_reset: false,
             last_active: 0,
         };
         RunningTaskInfo {

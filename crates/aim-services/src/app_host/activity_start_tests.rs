@@ -268,6 +268,7 @@ fn system_thread_start_creates_activity_and_returns_start_success() {
                 uid: 10100,
                 user: 0,
                 last_active: 0,
+                root_was_reset: false,
             });
             stack.activities.push(activity_stack::Activity::new(
                 token, 7, 1, "p/p.Main", 0, 0, None,
@@ -459,6 +460,7 @@ fn activity_start_before_system_ready_waits_for_its_held_process() {
                     base: activity_start::LaunchIntent::Component,
                     uid: 10100,
                     user: 0,
+                    root_was_reset: false,
                     last_active: 0,
                 });
                 stack.activities.push(activity_stack::Activity::new(

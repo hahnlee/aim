@@ -248,6 +248,7 @@ mod tests {
             uid: 10100,
             user: 0,
             last_active: 0,
+            root_was_reset: false,
         });
         stack
             .activities

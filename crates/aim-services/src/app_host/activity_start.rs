@@ -44,10 +44,14 @@ pub(super) const START_CANCELED: i32 = -96;
 /// `EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN`.
 const FLAG_ACTIVITY_FORWARD_RESULT: i32 = 0x0200_0000;
 const EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN: i32 = 1 << 2;
-/// `ActivityInfo.FLAG_STATE_NOT_NEEDED`, `FLAG_EXCLUDE_FROM_RECENTS`,
-/// `FLAG_NO_HISTORY`.
+/// `ActivityInfo.FLAG_FINISH_ON_TASK_LAUNCH`, `FLAG_CLEAR_TASK_ON_LAUNCH`,
+/// `FLAG_STATE_NOT_NEEDED`, `FLAG_EXCLUDE_FROM_RECENTS`,
+/// `FLAG_ALLOW_TASK_REPARENTING`, `FLAG_NO_HISTORY`.
+const FLAG_FINISH_ON_TASK_LAUNCH: i32 = 0x2;
+const FLAG_CLEAR_TASK_ON_LAUNCH: i32 = 0x4;
 const FLAG_STATE_NOT_NEEDED: i32 = 0x10;
 pub const FLAG_EXCLUDE_FROM_RECENTS: i32 = 0x20;
+const FLAG_ALLOW_TASK_REPARENTING: i32 = 0x40;
 const FLAG_NO_HISTORY: i32 = 0x80;
 /// `ActivityInfo.RESIZE_MODE_UNRESIZEABLE`,
 /// `RESIZE_MODE_RESIZEABLE_VIA_SDK_VERSION`, `RESIZE_MODE_FORCE_RESIZEABLE`.
@@ -721,6 +725,7 @@ impl AppHost {
                     uid,
                     user,
                     last_active: 0,
+                    root_was_reset: intent.flags & stack::FLAG_ACTIVITY_RESET_TASK_IF_NEEDED != 0,
                 };
                 (id, Some(Box::new(task)))
             }
@@ -729,6 +734,11 @@ impl AppHost {
         let no_history = intent.flags & stack::FLAG_ACTIVITY_NO_HISTORY != 0
             || info.flags & FLAG_NO_HISTORY != 0;
         let state_not_needed = info.flags & FLAG_STATE_NOT_NEEDED != 0;
+        let reset_flags = (
+            info.flags & FLAG_FINISH_ON_TASK_LAUNCH != 0,
+            info.flags & FLAG_ALLOW_TASK_REPARENTING != 0,
+            intent.flags & stack::FLAG_ACTIVITY_CLEAR_WHEN_TASK_RESET != 0,
+        );
         let (launch_mode, result_to) = (info.launch_mode, request.result_to);
         // Its result, `RESULT_CANCELED` until it sets one.
         let result = result_to.map(|_| {
@@ -758,6 +768,11 @@ impl AppHost {
             state_not_needed,
         );
         activity.affinity = affinity.clone();
+        (
+            activity.finish_on_task_launch,
+            activity.allow_task_reparenting,
+            activity.clear_when_task_reset,
+        ) = reset_flags;
         activity.pending = start_seq == 0;
         let identity = stack::Identity {
             component: &real,
@@ -1248,6 +1263,7 @@ impl AppHost {
             } else {
                 ACTIVITY_TYPE_STANDARD
             },
+            clear_task_on_launch: info.flags & FLAG_CLEAR_TASK_ON_LAUNCH != 0,
         };
         let d = self
             .activities
