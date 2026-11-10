@@ -753,10 +753,10 @@ fn signal_interests(ep: &Epoll) -> Vec<(i32, Arc<super::signalfd::SignalFd>, u64
         .collect()
 }
 
-/// The armed interests of `ep` in an unconnected TCP socket that are to
-/// be reported, which `tcp_poll` reports hung up and writable and no knote
-/// fires for, with the socket's shutdowns.
-fn unconnected_interests(ep: &Epoll) -> Vec<(i32, u32)> {
+/// The armed interests of `ep` in a socket with events this layer keeps
+/// ([`super::net::kept`]), which no knote fires for, that are to be
+/// reported.
+fn kept_interests(ep: &Epoll) -> Vec<(i32, super::net::Kept)> {
     let interests: Vec<(i32, Interest)> = ep
         .interest
         .lock()
@@ -768,11 +768,13 @@ fn unconnected_interests(ep: &Epoll) -> Vec<(i32, u32)> {
     interests
         .into_iter()
         .filter_map(|(fd, i)| {
-            let shutdown = match fdtab::get(fd) {
-                Some(Kind::Sock(s)) => super::net::unconnected(&s, fd)?,
+            let kept = match fdtab::get(fd) {
+                Some(Kind::Sock(s)) => super::net::kept(&s, fd)?,
                 _ => return None,
             };
-            (!i.edge_reported(shutdown)).then_some((fd, shutdown))
+            (kept.events & (i.events | EPOLLHUP | EPOLLERR) != 0
+                && !i.edge_reported(kept.generation))
+            .then_some((fd, kept))
         })
         .collect()
 }
@@ -822,12 +824,8 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
         // The signalfd interests as of now, as another thread may have
         // changed them, or reported or disabled one, since the last wait.
         let signals = signal_interests(&ep);
-        let unconnected = unconnected_interests(&ep);
-        let wait = if unconnected.is_empty() {
-            left
-        } else {
-            Some(zero)
-        };
+        let kept = kept_interests(&ep);
+        let wait = if kept.is_empty() { left } else { Some(zero) };
         let polling = if signals.is_empty() {
             None
         } else {
@@ -887,13 +885,13 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
         }
         // SAFETY: the kernel filled n entries.
         unsafe { kevs.set_len(n as usize) };
-        let (found, rearm) = ready(&ep, &kevs, maxevents as usize, &signals, &unconnected);
+        let (found, rearm) = ready(&ep, &kevs, maxevents as usize, &signals, &kept);
         apply(epfd, &rearm);
         // An inotify fd that woke the wait with nothing to read, or an
         // unconnected socket another waiter reported or a change removed
         // since it was found: wait on.
         if !found.is_empty()
-            || !woke && unconnected.is_empty()
+            || !woke && kept.is_empty()
             || left.is_some_and(|t| t.tv_sec == 0 && t.tv_nsec == 0)
         {
             break found;
@@ -925,7 +923,7 @@ fn ready(
     kevs: &[libc::kevent],
     limit: usize,
     signals: &[(i32, Arc<super::signalfd::SignalFd>, u64)],
-    unconnected: &[(i32, u32)],
+    kept: &[(i32, super::net::Kept)],
 ) -> (Vec<(i32, u32, u64)>, Vec<libc::kevent>) {
     let mut out: Vec<(i32, u32, u64)> = Vec::with_capacity(kevs.len().min(limit));
     let mut rearm = Vec::new();
@@ -1053,25 +1051,21 @@ fn ready(
         }
         out.push((*fd, EPOLLIN, i.data));
     }
-    for &(fd, shutdown) in unconnected {
+    for (fd, kept) in kept {
+        let fd = *fd;
         let Some(i) = interest.get_mut(&fd) else {
             continue;
         };
-        let read = if shutdown & super::net::RCV_SHUTDOWN != 0 {
-            EPOLLIN | EPOLLRDNORM | EPOLLRDHUP
-        } else {
-            0
-        };
-        let b = EPOLLHUP | i.events & (EPOLLOUT | EPOLLWRNORM | read);
+        let b = kept.events & (i.events | EPOLLHUP | EPOLLERR);
         if let Some(e) = out.iter_mut().find(|e| e.0 == fd) {
             e.1 |= b;
             continue;
         }
         // Read again under the lock: another waiter may have reported it.
-        if i.disabled || i.edge_reported(shutdown) || out.len() == limit {
+        if b == 0 || i.disabled || i.edge_reported(kept.generation) || out.len() == limit {
             continue;
         }
-        i.reported = Some(shutdown);
+        i.reported = Some(kept.generation);
         if i.events & EPOLLONESHOT != 0 {
             i.disabled = true;
             rearm.extend(changes(fd, None, None, Some(&*i)));

@@ -1856,9 +1856,13 @@ pub fn shutdown(a: [u64; 6]) -> i64 {
     }
     // SAFETY: SHUT_RD/WR/RDWR agree.
     let r = errno::check(unsafe { libc::shutdown(input.fd(), a[1] as i32) } as i64);
+    // Darwin's fails with ENOTCONN where Linux records the shutdown and
+    // wakes the waiters: `unix_shutdown` in any state, and succeeds;
+    // `inet_shutdown` of a `TCP_CLOSE` socket, and fails.
     if r == -107
         && let Some(s) = any_sock(&input)
-        && unconnected(&s, input.fd()).is_some()
+        && let unix = matches!(s.family, Family::Unix)
+        && (unix || unconnected(&s, input.fd()).is_some())
     {
         let how = a[1] as u32 + 1;
         let _ = s
@@ -1866,8 +1870,7 @@ pub fn shutdown(a: [u64; 6]) -> i64 {
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |word| {
                 Some((word | how).wrapping_add(4))
             });
-        // `unix_shutdown` succeeds unconnected; `inet_shutdown` does not.
-        if matches!(s.family, Family::Unix) {
+        if unix {
             return 0;
         }
     }
@@ -4024,6 +4027,45 @@ pub(super) fn unconnected(s: &Sock, fd: i32) -> Option<u32> {
         return None;
     }
     Some(s.shutdown.load(Ordering::Relaxed))
+}
+
+/// What `tcp_poll`, `unix_poll` and `unix_dgram_poll` report for a socket
+/// from state this layer keeps, which no host poll or knote reports.
+pub(super) struct Kept {
+    /// Linux event bits, the same for poll and epoll.
+    pub events: u32,
+    /// Never connected: the host's readiness is none of the socket's.
+    pub unconnected: bool,
+    /// The shutdowns they follow from ([`unconnected`]'s word), which an
+    /// edge-triggered interest is reported once for.
+    pub generation: u32,
+}
+
+/// [`Kept`] of `s` on host socket `fd`, if any: an unconnected socket's
+/// readiness, and the shutdowns recorded where Darwin's failed with
+/// ENOTCONN (`RCV_SHUTDOWN` readable, both hung up).
+pub(super) fn kept(s: &Sock, fd: i32) -> Option<Kept> {
+    const IN: u32 = 0x1 | 0x40 | 0x2000;
+    const OUT: u32 = 0x4 | 0x100;
+    const WRBAND: u32 = 0x200;
+    const HUP: u32 = 0x10;
+    let unconnected = unconnected(s, fd);
+    let generation = unconnected.unwrap_or_else(|| s.shutdown.load(Ordering::Relaxed));
+    let mut events = 0;
+    if unconnected.is_some() {
+        events |= HUP | OUT | if s.tcp() { 0 } else { WRBAND };
+    }
+    if generation & RCV_SHUTDOWN != 0 {
+        events |= IN;
+    }
+    if generation & 3 == 3 {
+        events |= HUP;
+    }
+    (unconnected.is_some() || events != 0).then_some(Kept {
+        events,
+        unconnected: unconnected.is_some(),
+        generation,
+    })
 }
 
 pub fn getsockopt(a: [u64; 6]) -> i64 {

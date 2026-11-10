@@ -205,13 +205,11 @@ fn pipe_revents(end: PipeEnd, fd: i32, revents: i16) -> i16 {
     }
 }
 
-/// The connection-oriented socket `pin` holds, on host `fd`, and its
-/// shutdowns, if it was never connected ([`super::net::unconnected`]).
-fn unconnected(pin: Option<&super::fdtab::Pinned>, fd: i32) -> Option<(&super::net::Sock, u32)> {
+/// What the socket `pin` holds, on host `fd`, polls from state this layer
+/// keeps ([`super::net::kept`]).
+fn kept(pin: Option<&super::fdtab::Pinned>, fd: i32) -> Option<super::net::Kept> {
     match pin.and_then(|pin| pin.kind()) {
-        Some(super::fdtab::Kind::Sock(s)) => {
-            super::net::unconnected(s, fd).map(|shut| (&**s, shut))
-        }
+        Some(super::fdtab::Kind::Sock(s)) => super::net::kept(s, fd),
         _ => None,
     }
 }
@@ -220,16 +218,11 @@ fn unconnected(pin: Option<&super::fdtab::Pinned>, fd: i32) -> Option<(&super::n
 /// host descriptor's Darwin poll `h`: a socket's as `tcp_poll`,
 /// `unix_poll`, `datagram_poll` and `sock_poll` report it.
 fn guest_revents(fd: i32, pin: Option<&super::fdtab::Pinned>, h: &libc::pollfd, asked: i16) -> i16 {
-    // `TCP_CLOSE` is hung up and writable, an AF_UNIX socket also
-    // POLLWRBAND (`unix_writable`), and readable once shut for receiving.
-    if let Some((s, shutdown)) = unconnected(pin, h.fd) {
-        let band = if s.tcp() { 0 } else { POLLWRBAND };
-        let read = if shutdown & super::net::RCV_SHUTDOWN != 0 {
-            POLLIN | POLLRDNORM | POLLRDHUP
-        } else {
-            0
-        };
-        return POLLHUP | asked & (POLLOUT | POLLWRNORM | band | read);
+    let kept = kept(pin, h.fd);
+    let reported = |kept: &super::net::Kept| kept.events as i16 & (asked | POLLHUP | POLLERR);
+    // `TCP_CLOSE`: none of the host's readiness.
+    if let Some(kept) = kept.as_ref().filter(|kept| kept.unconnected) {
+        return reported(kept);
     }
     let mut revents = match (h.revents & POLLHUP != 0)
         .then(|| {
@@ -280,7 +273,7 @@ fn guest_revents(fd: i32, pin: Option<&super::fdtab::Pinned>, h: &libc::pollfd, 
     if matches!(pin.and_then(|pin| pin.kind()), Some(super::fdtab::Kind::Sock(s)) if s.tcp()) {
         revents &= !POLLWRBAND;
     }
-    revents
+    revents | kept.as_ref().map_or(0, reported)
 }
 
 /// The sockets and pipes polled for no event, as EVFILT_READ knotes of a
@@ -618,11 +611,12 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
         // unconnected TCP socket or an error a recvmmsg kept. Checked on
         // each pass, as another thread may take the error, or connect,
         // before it is reported.
-        let errored = host.iter().zip(&pins).any(|(h, pin)| {
+        let errored = host.iter().zip(&pins).zip(&guest).any(|((h, pin), g)| {
             (pin.is_some()
                 && h.events & (POLLIN | libc::POLLOUT) == 0
                 && super::net::pending_error(h.fd).is_some())
-                || unconnected(pin.as_ref(), h.fd).is_some()
+                || kept(pin.as_ref(), h.fd)
+                    .is_some_and(|kept| kept.events as i16 & (g.events | POLLHUP | POLLERR) != 0)
                 || super::net::kept_error(h.fd)
         });
         let n = host_poll(&mut host, if invalid || errored { 0 } else { left }, mask);
@@ -781,12 +775,18 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
         if let Some(polling) = &polling {
             polling.sync();
         }
-        // Darwin never reports an unconnected TCP socket ready, nor an
-        // error a recvmmsg kept, which POLLIN_SET and POLLOUT_SET hold (HUP,
-        // OUT, ERR), not POLLEX_SET.
+        // Darwin never reports what a socket polls from state this layer
+        // keeps, nor an error a recvmmsg kept, for the sets asked:
+        // POLLIN_SET (IN, HUP, ERR) and POLLOUT_SET (OUT, ERR), not
+        // POLLEX_SET.
         let unconnected = host.iter().zip(&pins).any(|(h, pin)| {
-            h.events & (libc::POLLIN | libc::POLLOUT) != 0
-                && (unconnected(pin.as_ref(), h.fd).is_some() || super::net::kept_error(h.fd))
+            let read = h.events & libc::POLLIN != 0;
+            let write = h.events & libc::POLLOUT != 0;
+            (read || write) && super::net::kept_error(h.fd)
+                || kept(pin.as_ref(), h.fd).is_some_and(|kept| {
+                    let events = kept.events as i16;
+                    read && events & (POLLIN | POLLHUP) != 0 || write && events & POLLOUT != 0
+                })
         });
         let n = host_poll(&mut host, if unconnected { 0 } else { left }, mask);
         if n < 0 {
@@ -2204,6 +2204,61 @@ mod reportable_tests {
             );
             close(&[client, hung, fd, both]);
         }
+    }
+
+    /// `unix_shutdown` succeeds in every state, records the shutdown and
+    /// wakes the waiters, where Darwin's fails with ENOTCONN for an
+    /// unconnected datagram socket, a listening one and a socketpair end
+    /// whose peer closed: shut for receiving it polls readable and RDHUP,
+    /// both ways also hung up (`unix_poll`, `unix_dgram_poll`).
+    #[test]
+    fn a_unix_shutdown_succeeds_in_every_state() {
+        let _view = crate::vfs::test_view();
+        const EPOLLET: u32 = 1 << 31;
+        let read = POLLIN | POLLRDNORM | POLLRDHUP;
+        let writable = POLLOUT | POLLWRNORM | POLLWRBAND;
+        let shutdown = |fd: i64, how: u64| crate::sys::net::shutdown([fd as u64, how, 0, 0, 0, 0]);
+        let dgram = crate::sys::net::socket([1, 2 | O_NONBLOCK, 0, 0, 0, 0]);
+        let edge = watching(dgram, 0x1 | 0x2000 | EPOLLET);
+        let level = watching(dgram, 0x1);
+        assert_eq!(waited(level, 0).0, 0);
+        assert_eq!(shutdown(dgram, 0), 0);
+        assert_eq!(polled(dgram, ALL | POLLRDHUP), (1, read | writable));
+        assert_eq!(selected(dgram), (2, true, true));
+        assert_eq!(waited(level, 0), (1, 0x1));
+        assert_eq!(waited(level, 0), (1, 0x1));
+        assert_eq!(waited(edge, 0), (1, 0x1 | 0x2000));
+        assert_eq!(waited(edge, 0).0, 0);
+        assert_eq!(shutdown(dgram, 1), 0);
+        assert_eq!(
+            polled(dgram, ALL | POLLRDHUP),
+            (1, read | writable | POLLHUP)
+        );
+        assert_eq!(waited(edge, 0), (1, 0x1 | 0x2000 | 0x10));
+        close(&[dgram, edge, level]);
+
+        let listener = crate::sys::net::socket([1, 1 | O_NONBLOCK, 0, 0, 0, 0]);
+        let (name, len) = abstract_name(&format!("aim-poll-shut-{}", std::process::id()));
+        assert_eq!(
+            crate::sys::net::bind([listener as u64, name.as_ptr() as u64, len, 0, 0, 0]),
+            0
+        );
+        assert_eq!(crate::sys::net::listen([listener as u64, 4, 0, 0, 0, 0]), 0);
+        assert_eq!(polled(listener, ALL), (0, 0));
+        assert_eq!(shutdown(listener, 2), 0);
+        assert_eq!(polled(listener, ALL | POLLRDHUP), (1, read | POLLHUP));
+        let both = watching(listener, 0x1 | 0x4);
+        assert_eq!(waited(both, 0), (1, 0x1 | 0x10));
+        close(&[listener, both]);
+
+        let mut pair = [0i32; 2];
+        assert_eq!(
+            crate::sys::net::socketpair([1, 1 | O_NONBLOCK, 0, pair.as_mut_ptr() as u64, 0, 0]),
+            0
+        );
+        close(&[pair[1] as i64]);
+        assert_eq!(shutdown(pair[0] as i64, 2), 0);
+        close(&[pair[0] as i64]);
     }
 
     /// `unix_dgram_poll`: an AF_UNIX datagram socket is never hung up for

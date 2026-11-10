@@ -152,7 +152,8 @@ AF_UNIX seqpacket socket never connected (`TCP_CLOSE`, bound or not, or after a
 refused connect) is OUT|HUP to poll, select and epoll at once (an AF_UNIX one
 with POLLWRBAND), which Darwin reports as nothing; edge-triggered once per
 change, a shutdown included: its shutdown is recorded, as `inet_shutdown` (with
-ENOTCONN) and `unix_shutdown` (with success) do, so SHUT_RD adds IN|RDHUP; a
+ENOTCONN) and `unix_shutdown` (with success, in any state Darwin's fails in:
+unconnected, listening, its peer closed) do, so SHUT_RD adds IN|RDHUP; a
 waiter already blocked is not woken by it, and a fork child does not inherit
 the record (#2781, #2919). A shut AF_UNIX or datagram socket that is writable is
 POLLWRBAND too. A stream or seqpacket peer's close with data unread is not
