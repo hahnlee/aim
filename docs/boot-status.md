@@ -609,7 +609,13 @@ guest-init --image <derived> --data <data> --run \
   package image by directory identity, not by path spelling (#2763).
 - `<data>` is a case-sensitive disk image, `<data>.asif`, that guest-init
   attaches at `<data>` for the boot and detaches when it stops
-  (docs/storage.md); `cargo aim storage` shows what it occupies.
+  (docs/storage.md); `cargo aim storage` shows what it occupies. The
+  attach (`diskutil image attach`, about 220 ms, all of it diskutil's
+  own) starts at guest-init's first step, beside the linux-run capability
+  query, whose first run of a new binary waits 120-330 ms for its code
+  signature check; the verity and native owners wait for it. They start
+  at 0.77 s after `aimctl start` on a new runtime (median of 5, was
+  0.94 s) and 0.28 s warm (was 0.31 s) (#3009, 2026-11-11).
 - The device has no boot animation (`debug.sf.nobootanimation`);
   `--exclude bootanim` still works but is no longer needed.
 - The device is `aim` (`androidboot.hardware=aim`):
