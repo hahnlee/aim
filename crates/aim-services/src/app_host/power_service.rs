@@ -462,9 +462,12 @@ impl PowerManager {
             display.power_changed();
         }
         // Notifier's early interactive change: the policy's
-        // `startedWakingUp`, which the keyguard hears.
+        // `startedWakingUp` or `startedGoingToSleep`, which the keyguard
+        // hears.
         if awake {
             self.host.keyguard_woke();
+        } else {
+            self.host.keyguard_slept();
         }
         // Notifier's interactive broadcast: nonsticky, registered receivers,
         // foreground and visible to instant apps, for every user.
@@ -477,6 +480,9 @@ impl PowerManager {
             &self.host,
             super::kept::RawIntent::new(action, 0x5000_0000 | 0x0020_0000, &[]),
         );
+        if awake {
+            self.host.keyguard_screen_on();
+        }
         Ok(())
     }
 
