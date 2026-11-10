@@ -251,6 +251,16 @@ impl Touch {
 }
 
 impl Motion {
+    /// Whether it is a gesture's first touch (`ACTION_DOWN`).
+    pub fn initial_down(&self) -> bool {
+        self.action == ACTION_DOWN
+    }
+
+    /// Its event time (ns, the input clock).
+    pub fn time(&self) -> i64 {
+        self.time
+    }
+
     /// A motion of the touchscreen, its pointers pressed.
     fn touched(action: i32, time: i64, down_time: i64, pointers: Vec<(u32, f32, f32)>) -> Motion {
         Motion {

@@ -222,7 +222,10 @@ that state. Asleep, SurfaceFlinger powers the display off (`setPowerMode`, as
 DisplayPowerController sets it) and the display-off sleep token pauses then
 stops every task's activities, in window mode every task window's, without
 Mac window changes; waking releases it before powering the display on, and
-the visible tasks' activities resume (#2954; host tests only). Host regression checks cover denial, no-op and stale wake ordering;
+the visible tasks' activities resume; while not interactive, a click in a
+window (the touchscreen's `touch.wake`) or a wake key wakes it through the
+window policy (`app_host/input_policy.rs`), other input being consumed
+(#2954; host tests only). Host regression checks cover denial, no-op and stale wake ordering;
 the Mac's display sleep and session lock reach it as the agent's sleep and wake
 keys (#670); no app-host check was run.
 The Mac's screens put Android to sleep and wake it from the device's side: when

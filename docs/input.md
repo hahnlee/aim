@@ -45,10 +45,20 @@ parser, meta state with the lock keys, the HID usage of `MSC_SCAN`), and
 publishes it to the focused window, repeating a held key as
 InputDispatcher synthesizes repeats with the input settings' timeout and
 delay. InputManager answers the keyboard's `InputDevice` with the device
-id the agent stamps on its keys and its key character map. The window
-manager policy's key interception and the mouse are not modelled
-(#1434), except the sleep and wake keys, which the agent applies as
-PhoneWindowManager does (`daemons/app-host-agent/src/power.rs`).
+id the agent stamps on its keys and its key character map. While the
+device is not interactive (the app host tells the agent, as
+`InputManagerInternal.setInteractive` does), the agent asks the app host's
+window policy about each key and touch (`interceptKeyBeforeQueueing`,
+`interceptMotionBeforeQueueingNonInteractive`, `app_host/input_policy.rs`):
+a touch's first down wakes the device, the touchscreen's `.idc` setting
+`touch.wake` as a Mac's input wakes the Mac, and goes on to the window; a
+wake key's down (`KeyEvent.isWakeKey`, the layout's `WAKE`, an external
+keyboard's keys) wakes it and is consumed with its up; anything else is
+consumed while the display is off. The built-in keyboard's ordinary keys do
+not wake it, as an internal keyboard's do not. The sleep and wake keys the
+agent applies itself as PhoneWindowManager does
+(`daemons/app-host-agent/src/power.rs`). The rest of the window manager
+policy's key interception and the mouse are not modelled (#1434).
 
 ### Decision: the primary button is a finger, the rest a mouse
 

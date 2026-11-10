@@ -29,6 +29,7 @@ use aim_input_transport::keyboard::{
     self, ConfigFile, ConfigFiles, Identifier, KeyEvent, KeyMap, Keyboard, Mapper, Repeat,
     RepeatConfiguration,
 };
+use aim_input_transport::keylayout::POLICY_FLAG_WAKE;
 use aim_input_transport::{
     ABS_MT_POSITION_X, ABS_MT_POSITION_Y, Motion, Touch, focus, touch_mode, touched,
 };
@@ -115,6 +116,8 @@ pub struct KeyboardInfo {
     pub sources: i32,
     pub keyboard_type: i32,
     pub is_external: bool,
+    /// Whether its downs wake the device by default.
+    pub wakes: bool,
     pub key_character_map: String,
     pub supported_keys: Option<Vec<i32>>,
 }
@@ -131,8 +134,25 @@ pub type InputFilter = Arc<dyn Fn(&[u8], i32) + Send + Sync>;
 /// it consumes a keyboard key instead of passing it to the user.
 pub type KeyPolicy = fn(&KeyEvent) -> bool;
 
+/// The window policy's interception of what the devices give while the
+/// device is not interactive (`interceptKeyBeforeQueueing`,
+/// `interceptMotionBeforeQueueingNonInteractive`): whether it is a motion,
+/// the key code, whether a down, its time and policy flags; its result.
+pub type InputPolicy = Box<dyn Fn(bool, i32, bool, i64, u32) -> i32 + Send + Sync>;
+
+/// `WindowManagerPolicy.ACTION_PASS_TO_USER`, and the app host's mark of a
+/// wake key's down (`mPendingWakeKey`).
+const ACTION_PASS_TO_USER: i32 = 1;
+const PENDING_WAKE_KEY: i32 = 2;
+
 pub struct Dispatcher {
     filter: Mutex<Option<InputFilter>>,
+    /// `NativeInputManager`'s `mInteractive`, and the window policy.
+    interactive: std::sync::atomic::AtomicBool,
+    policy: Mutex<Option<InputPolicy>>,
+    /// `PhoneWindowManager.mPendingWakeKey`: the key whose down woke the
+    /// device, its up not dispatched.
+    pending_wake_key: Mutex<Option<i32>>,
     windows: Mutex<Windows>,
     next_seq: Mutex<(u32, i32)>,
     keyboard: Option<KeyboardInfo>,
@@ -203,6 +223,9 @@ impl Dispatcher {
             repeat_changed: Condvar::new(),
             injections,
             filter: Mutex::new(None),
+            interactive: std::sync::atomic::AtomicBool::new(true),
+            policy: Mutex::new(None),
+            pending_wake_key: Mutex::new(None),
         });
         let injector = dispatcher.clone();
         std::thread::spawn(move || injector.inject_queue(jobs));
@@ -215,6 +238,48 @@ impl Dispatcher {
             std::thread::spawn(move || repeater.repeat_keys());
         }
         dispatcher
+    }
+
+    /// `setInteractive`.
+    pub fn set_interactive(&self, interactive: bool) {
+        self.interactive
+            .store(interactive, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The window policy, once the agent attached to the app host.
+    pub fn set_policy(&self, policy: InputPolicy) {
+        *self.policy.lock().unwrap() = Some(policy);
+    }
+
+    /// `interceptKeyBeforeQueueing` of a device's key of `policy_flags`:
+    /// whether it is dispatched. Interactive, all are but the up of the key
+    /// that woke the device; else the window policy decides.
+    fn intercept_key(&self, event: &KeyEvent, policy_flags: u32) -> bool {
+        let down = event.action != keyboard::ACTION_UP;
+        let mut pending = self.pending_wake_key.lock().unwrap();
+        if self.interactive.load(std::sync::atomic::Ordering::Relaxed) {
+            let woke = pending.take() == Some(event.key_code) && !down;
+            return !woke;
+        }
+        let Some(policy) = &*self.policy.lock().unwrap() else {
+            return true;
+        };
+        let result = policy(false, event.key_code, down, event.event_time, policy_flags);
+        *pending = (result & PENDING_WAKE_KEY != 0).then_some(event.key_code);
+        result & ACTION_PASS_TO_USER != 0
+    }
+
+    /// `interceptMotionBeforeQueueing` of a touchscreen motion, waking if
+    /// `wake` (`POLICY_FLAG_WAKE`): whether it is dispatched.
+    fn intercept_motion(&self, motion: &Motion, wake: bool) -> bool {
+        if self.interactive.load(std::sync::atomic::Ordering::Relaxed) {
+            return true;
+        }
+        let Some(policy) = &*self.policy.lock().unwrap() else {
+            return true;
+        };
+        let flags = if wake { POLICY_FLAG_WAKE } else { 0 };
+        policy(true, 0, motion.initial_down(), motion.time(), flags) & ACTION_PASS_TO_USER != 0
     }
 
     /// The built-in keyboard, if there is one.
@@ -314,11 +379,23 @@ impl Dispatcher {
                 EV_KEY if value != 2 && keyboard::supported_scan_code(code) => {
                     let time = sec * 1_000_000_000 + usec * 1_000;
                     let usage_code = std::mem::take(&mut usage);
-                    if let Some(key) =
+                    if let Some((key, layout_flags)) =
                         mapper.process_key(&map, time, value != 0, code.into(), usage_code)
                         && !policy(&key)
                     {
-                        self.dispatch_key(key);
+                        // `KeyboardInputMapper::processKey`'s `POLICY_FLAG_WAKE`.
+                        let down = value != 0;
+                        let mut flags = layout_flags & POLICY_FLAG_WAKE;
+                        if down
+                            && info.wakes
+                            && !(info.keyboard_type != keyboard::KEYBOARD_TYPE_ALPHABETIC
+                                && keyboard::is_media_key(key.key_code))
+                        {
+                            flags |= POLICY_FLAG_WAKE;
+                        }
+                        if self.intercept_key(&key, flags) {
+                            self.dispatch_key(key);
+                        }
                     }
                 }
                 _ => {}
@@ -496,7 +573,7 @@ impl Dispatcher {
 
     /// Reads the touchscreen, as long as the agent runs.
     fn read_touchscreen(&self) {
-        let (mut device, x_axis, y_axis) = match open_touchscreen() {
+        let (mut device, x_axis, y_axis, wake) = match open_touchscreen() {
             Ok(Some(found)) => found,
             Ok(None) => return log::info!("no touchscreen: no touch input"),
             Err(error) => return log::error!("touchscreen: {error}"),
@@ -520,14 +597,17 @@ impl Dispatcher {
                 (EV_SYN, SYN_REPORT) => {
                     if !std::mem::take(&mut dropped) {
                         let time = sec * 1_000_000_000 + usec * 1_000;
-                        let mut windows = self.windows.lock().unwrap();
-                        let scale = (
-                            windows.display.0 / x_axis.1 as f32,
-                            windows.display.1 / y_axis.1 as f32,
-                        );
+                        let display = self.windows.lock().unwrap().display;
+                        let scale = (display.0 / x_axis.1 as f32, display.1 / y_axis.1 as f32);
                         for motion in touch.report(time, x_axis.0, y_axis.0, scale) {
-                            if !self.filter_input(&motion.message(0, self.ids().1, (0., 0.))) {
-                                self.dispatch(&mut windows, &motion);
+                            // `TouchInputMapper`: an initial down wakes. The
+                            // policy is asked without the windows' lock, as
+                            // waking changes them.
+                            let wake = wake && motion.initial_down();
+                            if self.intercept_motion(&motion, wake)
+                                && !self.filter_input(&motion.message(0, self.ids().1, (0., 0.)))
+                            {
+                                self.dispatch(&mut self.windows.lock().unwrap(), &motion);
                             }
                         }
                     }
@@ -540,9 +620,10 @@ impl Dispatcher {
 }
 
 /// The first direct device with multitouch positions (as EventHub
-/// classifies a touchscreen), on the touchscreen's clock, and its x and y
-/// axes' minimum and extent.
-fn open_touchscreen() -> std::io::Result<Option<(File, (i32, i32), (i32, i32))>> {
+/// classifies a touchscreen), on the touchscreen's clock, its x and y
+/// axes' minimum and extent, and whether its initial downs wake the
+/// device (`TouchInputMapper`'s `touch.wake`, by default if external).
+fn open_touchscreen() -> std::io::Result<Option<(File, (i32, i32), (i32, i32), bool)>> {
     let mut paths: Vec<_> = std::fs::read_dir("/dev/input")?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
@@ -552,6 +633,8 @@ fn open_touchscreen() -> std::io::Result<Option<(File, (i32, i32), (i32, i32))>>
         })
         .collect();
     paths.sort();
+    let readable = |path: &str| std::fs::metadata(path).is_ok_and(|m| m.is_file());
+    let files = config_files(&readable);
     for path in paths {
         let device = File::open(&path)?;
         let fd = device.as_raw_fd();
@@ -577,11 +660,15 @@ fn open_touchscreen() -> std::io::Result<Option<(File, (i32, i32), (i32, i32))>>
         if unsafe { libc::ioctl(fd, EVIOCSCLOCKID as _, &clock) } < 0 {
             return Err(std::io::Error::last_os_error());
         }
+        let (identifier, config) = identify(fd, &files);
+        let wake = keyboard::property_bool(&config, "touch.wake")
+            .unwrap_or_else(|| is_external(&identifier, &config));
         log::info!("touchscreen {}", path.display());
         return Ok(Some((
             device,
             axis(ABS_MT_POSITION_X)?,
             axis(ABS_MT_POSITION_Y)?,
+            wake,
         )));
     }
     Ok(None)
@@ -621,6 +708,54 @@ fn property(name: &std::ffi::CStr) -> String {
     String::from_utf8_lossy(&value[..n.max(0) as usize]).into_owned()
 }
 
+/// The input device configuration files' places (`getInputDeviceConfigurationFilePath*`).
+fn config_files(readable: &dyn Fn(&str) -> bool) -> ConfigFiles<'_> {
+    let apex = property(c"input_device.config_file.apex");
+    let root = std::env::var("ANDROID_ROOT").ok();
+    let data = std::env::var("ANDROID_DATA").unwrap_or_default();
+    ConfigFiles {
+        prefixes: ConfigFiles::prefixes(Some(&apex), root.as_deref(), &data),
+        readable,
+    }
+}
+
+/// A device's identifier and its input device configuration (`.idc`),
+/// as EventHub reads them (`openDeviceLocked`, `loadConfigurationLocked`).
+fn identify(fd: libc::c_int, files: &ConfigFiles<'_>) -> (Identifier, Vec<(String, String)>) {
+    let mut ids = [0u16; 4];
+    // SAFETY: `struct input_id`, four shorts.
+    unsafe { libc::ioctl(fd, EVIOCGID as _, ids.as_mut_ptr()) };
+    let identifier = Identifier {
+        name: ioctl_string(fd, EVIOCGNAME),
+        bus: ids[0],
+        vendor: ids[1],
+        product: ids[2],
+        version: ids[3],
+        unique_id: ioctl_string(fd, EVIOCGUNIQ),
+    };
+    let config = match files.by_identifier(&identifier, ConfigFile::Configuration, "") {
+        Some(idc) => match std::fs::read(&idc).map(|c| keyboard::property_map(&c)) {
+            Ok(Ok(config)) => config,
+            Ok(Err(error)) => {
+                log::error!("{idc}: {error}");
+                Vec::new()
+            }
+            Err(_) => Vec::new(),
+        },
+        None => Vec::new(),
+    };
+    (identifier, config)
+}
+
+/// `isExternalDeviceLocked`: the configuration's `device.internal`, else
+/// a USB or Bluetooth bus.
+fn is_external(identifier: &Identifier, config: &[(String, String)]) -> bool {
+    match keyboard::property_bool(config, "device.internal") {
+        Some(internal) => !internal,
+        None => matches!(identifier.bus, BUS_USB | BUS_BLUETOOTH),
+    }
+}
+
 /// The built-in keyboard as EventHub opens it (`openDeviceLocked`): the
 /// first device of the `KEYBOARD` class, its identifier read, its
 /// configuration, key layout and key character map found by its name
@@ -637,14 +772,8 @@ fn open_keyboard() -> std::io::Result<Option<OpenKeyboard>> {
         })
         .collect();
     paths.sort();
-    let apex = property(c"input_device.config_file.apex");
-    let root = std::env::var("ANDROID_ROOT").ok();
-    let data = std::env::var("ANDROID_DATA").unwrap_or_default();
     let readable = |path: &str| std::fs::metadata(path).is_ok_and(|m| m.is_file());
-    let files = ConfigFiles {
-        prefixes: ConfigFiles::prefixes(Some(&apex), root.as_deref(), &data),
-        readable: &readable,
-    };
+    let files = config_files(&readable);
     let read = |path: &str| std::fs::read(path).ok();
     for path in paths {
         let device = File::open(&path)?;
@@ -658,28 +787,7 @@ fn open_keyboard() -> std::io::Result<Option<OpenKeyboard>> {
         unsafe { libc::ioctl(fd, EVIOCGBIT_MSC as _, msc.as_mut_ptr()) };
         let has_key = |code: u16| keys[code as usize / 8] & (1 << (code % 8)) != 0;
         let has_msc_scan = msc[0] & (1 << MSC_SCAN) != 0;
-        let mut ids = [0u16; 4];
-        // SAFETY: `struct input_id`, four shorts.
-        unsafe { libc::ioctl(fd, EVIOCGID as _, ids.as_mut_ptr()) };
-        let identifier = Identifier {
-            name: ioctl_string(fd, EVIOCGNAME),
-            bus: ids[0],
-            vendor: ids[1],
-            product: ids[2],
-            version: ids[3],
-            unique_id: ioctl_string(fd, EVIOCGUNIQ),
-        };
-        let config = match files.by_identifier(&identifier, ConfigFile::Configuration, "") {
-            Some(idc) => match read(&idc).map(|c| keyboard::property_map(&c)) {
-                Some(Ok(config)) => config,
-                Some(Err(error)) => {
-                    log::error!("{idc}: {error}");
-                    Vec::new()
-                }
-                None => Vec::new(),
-            },
-            None => Vec::new(),
-        };
+        let (identifier, config) = identify(fd, &files);
         if !keyboard::has_keys(&has_key) {
             continue;
         }
@@ -704,11 +812,11 @@ fn open_keyboard() -> std::io::Result<Option<OpenKeyboard>> {
             );
             continue;
         }
-        // `isExternalDeviceLocked`.
-        let is_external = match keyboard::property_bool(&config, "device.internal") {
-            Some(internal) => !internal,
-            None => matches!(identifier.bus, BUS_USB | BUS_BLUETOOTH),
-        };
+        let is_external = is_external(&identifier, &config);
+        // `KeyboardInputMapper`: an external keyboard's downs wake the
+        // device unless it says not to (`keyboard.doNotWakeByDefault`).
+        let wakes = is_external
+            && !keyboard::property_bool(&config, "keyboard.doNotWakeByDefault").unwrap_or(false);
         let clock = libc::CLOCK_MONOTONIC as libc::c_int;
         // SAFETY: an int argument.
         if unsafe { libc::ioctl(fd, EVIOCSCLOCKID as _, &clock) } < 0 {
@@ -732,6 +840,7 @@ fn open_keyboard() -> std::io::Result<Option<OpenKeyboard>> {
                 sources: classes.sources(),
                 keyboard_type: classes.keyboard_type(),
                 is_external,
+                wakes,
                 key_character_map,
                 supported_keys,
             },

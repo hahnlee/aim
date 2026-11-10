@@ -250,3 +250,47 @@ fn work_chains_keep_identity_and_only_first_nodes_are_charged() {
         );
     }
 }
+
+/// `PhoneWindowManager`'s policy of input while not interactive: a motion
+/// of `POLICY_FLAG_WAKE` wakes the device (`WAKE_REASON_WAKE_MOTION`) and
+/// goes on; a wake key's down wakes it (`WAKE_REASON_WAKE_KEY`) and is
+/// kept, its up to be dropped; other input is consumed.
+#[test]
+fn input_wakes_the_device_as_the_window_policy_has_it() {
+    use super::super::input_policy::{ACTION_PASS_TO_USER, PENDING_WAKE_KEY};
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        super::super::activity_start_tests::permissions(host);
+        let power = Arc::new(PowerManager::new(host.clone()));
+        assert!(host.power_service.set(power.clone()).is_ok());
+        let sleep = || power.state.lock().unwrap().asleep = true;
+        let woke = || {
+            let state = power.state.lock().unwrap();
+            (!state.asleep)
+                .then(|| {
+                    state
+                        .last_wake
+                        .as_ref()
+                        .map(|w| (w.reason, w.details.clone()))
+                })
+                .flatten()
+        };
+        sleep();
+        let intercept = |motion, key, down, flags| {
+            host.intercept_non_interactive(motion, key, down, 5_000_000, flags)
+                .unwrap()
+        };
+        assert_eq!(intercept(true, 0, true, 0), 0);
+        assert_eq!(woke(), None);
+        assert_eq!(intercept(true, 0, true, 1), ACTION_PASS_TO_USER);
+        assert_eq!(woke(), Some((7, Some("android.policy:MOTION".into()))));
+        // Interactive again, all input goes on.
+        assert_eq!(intercept(false, 29, true, 0), ACTION_PASS_TO_USER);
+        sleep();
+        // `A`, of no wake flag; `WAKEUP`'s up, then its down.
+        assert_eq!(intercept(false, 29, true, 0), 0);
+        assert_eq!(intercept(false, 224, false, 0), 0);
+        assert_eq!(woke(), None);
+        assert_eq!(intercept(false, 224, true, 0), PENDING_WAKE_KEY);
+        assert_eq!(woke(), Some((6, Some("android.policy:KEY".into()))));
+    });
+}
