@@ -7,7 +7,7 @@ use std::path::Path;
 use std::io::Read;
 
 use android_image_extract::source::{FileSource, ReadAt};
-use android_image_extract::zip::{self, Archive, DEFLATE};
+use android_image_extract::zip::{self, Archive, DEFLATE, STORED};
 
 use crate::res::{self, Element, Result, Value, bad};
 use crate::table::{Config, Entry, Table};
@@ -50,9 +50,17 @@ impl Files {
     /// (android-16.0.0_r1). An entry libziparchive's FindEntry rejects is
     /// absent, as ApkAssets treats a missing resources.arsc; a stored entry is
     /// mapped and a deflated one inflated to its declared size, neither
-    /// checked against its CRC-32.
+    /// checked against its CRC-32. The archive opens as the general ZIP
+    /// reader opens it and, as OpenArchive, fails on a name given twice;
+    /// OpenArchive's other entry checks (name validity, local header
+    /// offsets past the directory) are not applied.
     pub fn asset(&self, name: &str) -> Result<Option<Vec<u8>>> {
         let archive = Archive::open(self.source.as_ref()).map_err(|e| bad(e.to_string()))?;
+        // OpenArchive's AddToMap: a name twice fails the whole archive.
+        let mut names = std::collections::HashSet::new();
+        if !archive.entries.iter().all(|e| names.insert(&e.name)) {
+            return Err(bad("duplicate ZIP entry name"));
+        }
         let Some(entry) = archive.find(name.as_bytes()) else {
             return Ok(None);
         };
@@ -87,6 +95,46 @@ impl Files {
         }
         Ok(Some(out))
     }
+
+    /// [`Files::asset`] that must be there, as AssetManager2 opens a file a
+    /// resource names.
+    pub fn asset_file(&self, name: &str) -> Result<Vec<u8>> {
+        self.asset(name)?.ok_or_else(|| bad(format!("no {name}")))
+    }
+}
+
+/// ParseZip64ExtendedInfoInExtraField for a local header whose sizes are
+/// both `UINT32_MAX`: the extended information's uncompressed and
+/// compressed sizes, `None` where the original fails. Its data holds those
+/// two, or all three fields with the header offset (and a disk number the
+/// original ignores), nothing else.
+fn zip64_local_sizes(extra: &[u8]) -> Option<(u64, u64)> {
+    if extra.len() <= 4 {
+        return None;
+    }
+    let mut at = 0;
+    while at < extra.len() - 4 {
+        let id = u16::from_le_bytes([extra[at], extra[at + 1]]);
+        let mut len = usize::from(u16::from_le_bytes([extra[at + 2], extra[at + 3]]));
+        at += 4;
+        if len > extra.len() - at {
+            return None;
+        }
+        if id != 1 {
+            at += len;
+            continue;
+        }
+        if len == 28 {
+            len = 24;
+        }
+        let read = if len == 24 { 24 } else { 16 };
+        if len != read || at + read > extra.len() {
+            return None;
+        }
+        let field = |i: usize| u64::from_le_bytes(extra[i..i + 8].try_into().unwrap());
+        return Some((field(at), field(at + 8)));
+    }
+    None
 }
 
 /// libziparchive FindEntry's local-header checks for `entry`: its data
@@ -131,20 +179,7 @@ fn find_entry(archive: &Archive<'_>, entry: &zip::Entry) -> Result<Option<u64>> 
         if size != compressed {
             return Ok(None);
         }
-        // Zip64 extended information (header 1): both sizes, in order.
-        let extra = read(extra_at, extra_len)?;
-        let mut at = 0;
-        let mut found = None;
-        while at + 4 <= extra.len() {
-            let len = usize::from(le16(&extra, at + 2));
-            if le16(&extra, at) == 1 && len >= 16 && at + 4 + 16 <= extra.len() {
-                let field = |i: usize| u64::from_le_bytes(extra[i..i + 8].try_into().unwrap());
-                found = Some((field(at + 4), field(at + 12)));
-                break;
-            }
-            at += 4 + len;
-        }
-        let Some(sizes) = found else {
+        let Some(sizes) = zip64_local_sizes(&read(extra_at, extra_len)?) else {
             return Ok(None);
         };
         (size, compressed) = sizes;
@@ -160,7 +195,7 @@ fn find_entry(archive: &Archive<'_>, entry: &zip::Entry) -> Result<Option<u64>> 
     let data = extra_at + extra_len;
     if data > cd
         || entry.compressed_size > cd - data
-        || (entry.method != DEFLATE && entry.size > cd - data)
+        || (entry.method == STORED && entry.size > cd - data)
     {
         return Ok(None);
     }
@@ -203,12 +238,13 @@ impl Apk {
         self.files.asset(name)
     }
 
+    /// [`Files::asset_file`].
+    pub fn asset_file(&self, name: &str) -> Result<Vec<u8>> {
+        self.files.asset_file(name)
+    }
+
     pub fn manifest(&self) -> Result<Element> {
-        res::xml(
-            &self
-                .asset("AndroidManifest.xml")?
-                .ok_or_else(|| bad("no AndroidManifest.xml"))?,
-        )
+        res::xml(&self.asset_file("AndroidManifest.xml")?)
     }
 
     pub fn table(&self) -> Option<&Table> {
@@ -442,6 +478,63 @@ mod tests {
         bytes[6] |= 8;
         bytes[14] ^= 1;
         assert_eq!(files(bytes).asset("a").unwrap().unwrap(), payload);
+    }
+
+    #[test]
+    fn assets_bound_only_stored_sizes_and_fail_on_duplicate_names() {
+        // An unknown method is found and mapped at its declared size; only
+        // a stored entry's size is bounded by the central directory.
+        let unknown = files(archive(&[("u", 12, 40, 0, b"ab")]));
+        assert_eq!(unknown.asset("u").unwrap().unwrap().len(), 40);
+        assert!(
+            files(archive(&[("u", 0, 40, 0, b"ab")]))
+                .asset("u")
+                .unwrap()
+                .is_none()
+        );
+        // Past the file it cannot be mapped: a load error, not absence.
+        assert!(
+            files(archive(&[("u", 12, 4096, 0, b"ab")]))
+                .asset("u")
+                .is_err()
+        );
+        // OpenArchive fails the whole archive on a name given twice.
+        let twice = files(archive(&[
+            ("a", 0, 1, crc32(b"x"), b"x"),
+            ("a", 0, 1, crc32(b"y"), b"y"),
+        ]));
+        assert!(twice.asset("other").is_err());
+        // A file a resource names must be there.
+        let one = files(archive(&[("res/a.xml", 0, 1, 0, b"x")]));
+        assert_eq!(one.asset_file("res/a.xml").unwrap(), b"x");
+        assert!(one.asset_file("res/b.xml").is_err());
+    }
+
+    #[test]
+    fn zip64_local_extra_holds_exactly_the_sizes_or_all_three_fields() {
+        let field = |id: u16, data: &[u8]| {
+            let mut out = id.to_le_bytes().to_vec();
+            out.extend((data.len() as u16).to_le_bytes());
+            out.extend(data);
+            out
+        };
+        let sizes: Vec<u8> = [7u64, 5, 99]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .chain([0; 4])
+            .collect();
+        for len in [16, 24, 28] {
+            let extra = [field(0xcafe, b"pad"), field(1, &sizes[..len])].concat();
+            assert_eq!(zip64_local_sizes(&extra), Some((7, 5)), "{len}");
+        }
+        for len in [8, 20, 26] {
+            assert_eq!(zip64_local_sizes(&field(1, &sizes[..len])), None, "{len}");
+        }
+        let mut overrun = field(1, &sizes[..16]);
+        overrun[2] = 17;
+        assert_eq!(zip64_local_sizes(&overrun), None);
+        assert_eq!(zip64_local_sizes(&field(0xcafe, &sizes[..16])), None);
+        assert_eq!(zip64_local_sizes(&[1, 0, 0, 0]), None);
     }
 
     /// CRC-32 (IEEE), for building fixtures.

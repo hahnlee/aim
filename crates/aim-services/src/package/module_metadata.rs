@@ -259,7 +259,7 @@ impl Owner {
             .get(table)
             .and_then(|i| *i)
             .ok_or("module XML resolved outside its accepted APK assets")?;
-        let document = res::xml(&apks[apk].file(path).map_err(|e| e.to_string())?)
+        let document = res::xml(&apks[apk].asset_file(path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         let provide_apks = platform
             .flags
