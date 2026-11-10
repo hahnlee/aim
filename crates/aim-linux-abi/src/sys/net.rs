@@ -173,6 +173,11 @@ pub struct Sock {
     /// already: `do_recvmmsg` writes it back to `sk_err`, for the next
     /// receive, send, SO_ERROR or poll to report.
     kept_error: std::sync::atomic::AtomicI32,
+    /// An AF_UNIX datagram socket whose connected peer closed, which
+    /// Darwin reports as an ECONNRESET socket error and Linux as no error
+    /// at all: the next send without an address fails with ECONNREFUSED
+    /// and disconnects it (`unix_dgram_sendmsg`).
+    peer_gone: AtomicBool,
     /// Linux sockaddr of the local and peer names, when known.
     local: Mutex<Option<Vec<u8>>>,
     peer: Mutex<Option<Vec<u8>>>,
@@ -183,6 +188,11 @@ impl Sock {
     /// `sock_poll` reports, and a receive returns, whatever is queued.
     pub(super) fn datagram(&self) -> bool {
         self.ty != SockType::Stream && matches!(self.family, Family::Inet(_))
+    }
+
+    /// An AF_UNIX datagram socket.
+    fn unix_datagram(&self) -> bool {
+        self.ty == SockType::Dgram && matches!(self.family, Family::Unix)
     }
 
     /// An AF_INET or AF_INET6 stream socket: TCP.
@@ -212,6 +222,7 @@ impl Sock {
             unconnected: AtomicBool::new(connection),
             shutdown: std::sync::atomic::AtomicU32::new(0),
             kept_error: std::sync::atomic::AtomicI32::new(0),
+            peer_gone: AtomicBool::new(false),
             local: Mutex::new(None),
             peer: Mutex::new(None),
         })
@@ -240,6 +251,7 @@ pub(super) fn save_sock(s: &Sock, w: &mut super::fork_state::Writer) {
     w.bool(s.listening.load(Ordering::Relaxed));
     w.u32(s.shutdown.load(Ordering::Relaxed));
     w.i32(s.kept_error.load(Ordering::Relaxed));
+    w.bool(s.peer_gone.load(Ordering::Relaxed));
     w.opt(s.local.lock().unwrap().as_deref(), |w, a| w.bytes(a));
     w.opt(s.peer.lock().unwrap().as_deref(), |w, a| w.bytes(a));
     match &s.family {
@@ -297,6 +309,7 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
     let listening = r.bool();
     let shutdown = r.u32();
     let kept_error = r.i32();
+    let peer_gone = r.bool();
     let local = r.opt(|r| r.bytes());
     let peer = r.opt(|r| r.bytes());
     let family = match r.u32() {
@@ -335,6 +348,7 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
     s.listening.store(listening, Ordering::Relaxed);
     s.shutdown.store(shutdown, Ordering::Relaxed);
     s.kept_error.store(kept_error, Ordering::Relaxed);
+    s.peer_gone.store(peer_gone, Ordering::Relaxed);
     *s.local.lock().unwrap() = local;
     *s.peer.lock().unwrap() = peer;
     s
@@ -1396,6 +1410,20 @@ pub fn connect(a: [u64; 6]) -> i64 {
             if let Some(result) = connect_to_router(&input, name) {
                 return result;
             }
+            // `unix_dgram_connect` of AF_UNSPEC disconnects; Darwin's
+            // connect does, then fails with EINVAL.
+            if let Some(s) = any_sock(&input).filter(|s| s.unix_datagram()) {
+                let unspec = libc::sockaddr {
+                    sa_len: 2,
+                    sa_family: libc::AF_UNSPEC as u8,
+                    sa_data: [0; 14],
+                };
+                // SAFETY: a sockaddr of ours, of its length.
+                unsafe { libc::connect(fd, &unspec, 2) };
+                s.peer_gone.store(false, Ordering::Relaxed);
+                *s.peer.lock().unwrap() = None;
+                return 0;
+            }
         }
     }
     let (mut t, name) = match target_of(a[1], a[2] as u32, false) {
@@ -1420,6 +1448,12 @@ pub fn connect(a: [u64; 6]) -> i64 {
         if r == 0 {
             clamp_mss(fd, o);
         }
+    }
+    // A new peer; the one that closed is forgotten.
+    if r == 0
+        && let Some(s) = any_sock(&input)
+    {
+        s.peer_gone.store(false, Ordering::Relaxed);
     }
     if r == -(libc::ENOENT as i64) && is_abstract(&name) {
         // An abstract name nobody bound: refused, not missing.
@@ -1864,11 +1898,12 @@ pub fn shutdown(a: [u64; 6]) -> i64 {
     let r = errno::check(unsafe { libc::shutdown(input.fd(), a[1] as i32) } as i64);
     // Darwin's fails with ENOTCONN where Linux records the shutdown and
     // wakes the waiters: `unix_shutdown` in any state, and succeeds;
-    // `inet_shutdown` of a `TCP_CLOSE` socket, and fails.
+    // `inet_shutdown` of a `TCP_CLOSE` socket, an unconnected TCP or
+    // datagram one, and fails.
     if r == -107
         && let Some(s) = any_sock(&input)
         && let unix = matches!(s.family, Family::Unix)
-        && (unix || unconnected(&s, input.fd()).is_some())
+        && (unix || s.datagram() || unconnected(&s, input.fd()).is_some())
     {
         let how = a[1] as u32 + 1;
         let _ = s
@@ -2362,7 +2397,36 @@ fn send(
     {
         return -(kept as i64);
     }
-    let r = transmit(input, iov, name, ctrl, flags);
+    // An AF_UNIX datagram socket without an address sends to its peer:
+    // once the peer closed, ECONNREFUSED, which disconnects it and drops
+    // what it had queued (`unix_dgram_disconnected`); unconnected,
+    // ENOTCONN, where Darwin's fails with EDESTADDRREQ. Darwin reports the
+    // peer's close as an ECONNRESET socket error, which a send returns.
+    let unix_dgram = any_sock(input).filter(|s| s.unix_datagram());
+    let addressed = name.is_some_and(|n| n.0 != 0);
+    let refused = |s: &Sock| {
+        s.peer_gone.store(false, Ordering::Relaxed);
+        while receive(input, &[], false, 0, L_MSG_DONTWAIT).is_ok() {}
+        -111
+    };
+    if let Some(s) = unix_dgram
+        .as_ref()
+        .filter(|s| !addressed && s.peer_gone.load(Ordering::Relaxed))
+    {
+        return refused(s);
+    }
+    let mut r = transmit(input, iov, name, ctrl, flags);
+    if let Some(s) = unix_dgram.as_ref().filter(|_| r == -104) {
+        s.peer_gone.store(true, Ordering::Relaxed);
+        r = if addressed {
+            transmit(input, iov, name, ctrl, flags)
+        } else {
+            refused(s)
+        };
+    }
+    if unix_dgram.is_some() && !addressed && r == -89 {
+        return -107;
+    }
     if r > 0
         && let Some(s) = any_sock(input)
     {
@@ -2893,9 +2957,15 @@ fn recv(
         name: None,
     };
     let shut = socket.as_ref().is_some_and(|s| received_shut(s));
-    // `__skb_recv_datagram`: a datagram socket shut for receiving is at
-    // end of file once its queue is empty, where Darwin's receive waits.
+    // A datagram socket shut for receiving is at end of file once its
+    // queue is empty, where Darwin's receive waits; a non-blocking one
+    // fails with EAGAIN as Darwin's does (`__skb_wait_for_more_packets`,
+    // `__unix_dgram_recvmsg`).
+    let waits = flags & L_MSG_DONTWAIT == 0
+        // SAFETY: F_GETFL on the socket.
+        && unsafe { libc::fcntl(input.fd(), libc::F_GETFL) } & libc::O_NONBLOCK == 0;
     if shut
+        && waits
         && socket.as_ref().is_some_and(|s| s.ty == SockType::Dgram)
         && socket_info(input.fd()).is_some_and(|info| {
             u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap()) == 0
@@ -2903,7 +2973,14 @@ fn recv(
     {
         return Ok(end());
     }
-    let r = match receive(input, iov, want_name, ctrl_cap, flags) {
+    let mut r = receive(input, iov, want_name, ctrl_cap, flags);
+    // An AF_UNIX datagram peer's close, which Darwin's receive returns as
+    // its ECONNRESET socket error, is none: the receive goes on.
+    if let (Err(-104), Some(s)) = (&r, socket.as_ref().filter(|s| s.unix_datagram())) {
+        s.peer_gone.store(true, Ordering::Relaxed);
+        r = receive(input, iov, want_name, ctrl_cap, flags);
+    }
+    let r = match r {
         Err(-107) if shut && socket.as_ref().is_some_and(|s| s.tcp()) => Ok(end()),
         Err(-107)
             if socket
@@ -4026,16 +4103,39 @@ fn socket_info(fd: i32) -> Option<[u8; SOCKET_FDINFO]> {
     (n as usize == SOCKET_FDINFO).then_some(info)
 }
 
-/// The bytes queued to receive on host socket `fd` when it has a pending
-/// error (`soi_error` and `soi_rcv.sbi_cc` of its PROC_PIDFDSOCKETINFO),
-/// read without clearing it as SO_ERROR does: Linux `sock_poll` reports
-/// EPOLLERR while `sk_err` is set, which the next receive, send or
-/// SO_ERROR returns once. None without one, or for any other fd.
-pub(super) fn pending_error(fd: i32) -> Option<u32> {
+/// A socket's pending error as Linux sees it.
+pub(super) enum Pending {
+    /// `sk_err`, which `sock_poll` reports as EPOLLERR and the next
+    /// receive, send or SO_ERROR returns once, with the bytes queued to
+    /// receive.
+    Error(u32),
+    /// An AF_UNIX datagram socket's peer closed, which Darwin reports as
+    /// an ECONNRESET socket error and Linux as no error: taken now and
+    /// recorded for the next send ([`Sock`]'s `peer_gone`). Darwin's poll
+    /// reports the error readable, here with the bytes queued.
+    PeerClosed(u32),
+}
+
+/// The pending error of host socket `fd` (`soi_error` and
+/// `soi_rcv.sbi_cc` of its PROC_PIDFDSOCKETINFO), read without clearing
+/// it as SO_ERROR does, or the error a recvmmsg kept. None without one, or
+/// for any other fd.
+pub(super) fn pending_error(fd: i32) -> Option<Pending> {
+    let Some(Kind::Sock(s)) = fdtab::get(fd) else {
+        return None;
+    };
     let info = socket_info(fd)?;
-    (u16::from_ne_bytes(info[SOI_ERROR..SOI_ERROR + 2].try_into().unwrap()) != 0
-        || matches!(fdtab::get(fd), Some(Kind::Sock(s)) if s.kept_error.load(Ordering::Relaxed) != 0))
-        .then(|| u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap()))
+    let queued = u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap());
+    let host = u16::from_ne_bytes(info[SOI_ERROR..SOI_ERROR + 2].try_into().unwrap()) != 0;
+    let kept = s.kept_error.load(Ordering::Relaxed) != 0;
+    if host && s.ty == SockType::Dgram && matches!(s.family, Family::Unix) {
+        get_int(fd, libc::SOL_SOCKET, libc::SO_ERROR);
+        s.peer_gone.store(true, Ordering::Relaxed);
+        if !kept {
+            return Some(Pending::PeerClosed(queued));
+        }
+    }
+    (host || kept).then_some(Pending::Error(queued))
 }
 
 /// The directions shut on guest socket `fd` (its `soi_state`'s
@@ -4239,6 +4339,8 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
             put_opt(&(t as i32).to_le_bytes(), val, len)
         }
         (1, L_SO_ERROR) => {
+            // An AF_UNIX datagram peer's close is no error.
+            pending_error(fd);
             let kept = any_sock(&input).map_or(0, |s| s.kept_error.swap(0, Ordering::Relaxed));
             let l = match kept {
                 0 => match get_int(fd, libc::SOL_SOCKET, libc::SO_ERROR).unwrap_or(0) {

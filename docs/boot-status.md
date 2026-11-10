@@ -152,13 +152,19 @@ AF_UNIX seqpacket socket never connected (`TCP_CLOSE`, bound or not, or after a
 refused connect) is OUT|HUP to poll, select and epoll at once (an AF_UNIX one
 with POLLWRBAND), which Darwin reports as nothing; edge-triggered once per
 change, a shutdown included: its shutdown is recorded, as `inet_shutdown` (with
-ENOTCONN) and `unix_shutdown` (with success, in any state Darwin's fails in:
+ENOTCONN, an unconnected UDP socket's too, #2921) and `unix_shutdown` (with success, in any state Darwin's fails in:
 unconnected, listening, its peer closed) do, so SHUT_RD adds IN|RDHUP; a
 waiter already blocked is not woken by it; a fork child copies the record and
 a recvmmsg's kept error, an exec or SCM_RIGHTS receiver does not (#2781,
 #2919). A shut AF_UNIX or datagram socket that is writable is
-POLLWRBAND too. A stream or seqpacket peer's close with data unread is not
-ECONNRESET/POLLERR, as Linux's `unix_release_sock` makes it. A poll with no event
+POLLWRBAND too, and epoll reports EPOLLWRBAND, alone or with EPOLLOUT, for a
+writable datagram or AF_UNIX socket only (#2925). A stream or seqpacket peer's close with data unread is not
+ECONNRESET/POLLERR, as Linux's `unix_release_sock` makes it. An AF_UNIX datagram
+socket whose peer closed has no error, though Darwin's has ECONNRESET: it polls
+writable, receives what is queued, and its next send without an address fails
+with ECONNREFUSED, which drops what it had queued, then ENOTCONN, as an
+unconnected one's does; a connect to a new peer, or of AF_UNSPEC (a disconnect),
+forgets the closed one (#2924). A poll with no event
 on a socket or pipe reports its hangup and error too, waking for one that
 arrives during the wait without spinning on a full buffer or a TCP half-close
 (#2779). A pipe or named FIFO is never POLLPRI, POLLRDBAND, POLLWRBAND or

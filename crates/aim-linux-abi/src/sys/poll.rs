@@ -255,13 +255,19 @@ fn guest_revents(fd: i32, pin: Option<&super::fdtab::Pinned>, h: &libc::pollfd, 
     // POLLERR for a pending socket error, which Darwin reports as
     // readable, writable or not at all; readable only with data queued or
     // at EOF. Darwin's queued count includes each datagram's address, so a
-    // zero-length one counts.
+    // zero-length one counts. An AF_UNIX datagram peer's close, which
+    // Darwin reports as an error, readable with nothing queued, is no
+    // event.
     if pin.is_some() && (h.revents != 0 || h.events & (POLLIN | libc::POLLOUT) == 0) {
-        if let Some(queued) = super::net::pending_error(h.fd) {
-            revents |= POLLERR;
-            if queued == 0 && h.revents & POLLHUP == 0 {
-                revents &= !(POLLIN | POLLRDNORM);
+        match super::net::pending_error(h.fd) {
+            Some(super::net::Pending::Error(queued)) => {
+                revents |= POLLERR;
+                if queued == 0 && h.revents & POLLHUP == 0 {
+                    revents &= !(POLLIN | POLLRDNORM);
+                }
             }
+            Some(super::net::Pending::PeerClosed(0)) => revents &= !(POLLIN | POLLRDNORM),
+            Some(super::net::Pending::PeerClosed(_)) | None => {}
         }
     }
     // `tcp_poll` reports a writable socket as POLLOUT | POLLWRNORM, where
@@ -610,7 +616,10 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
         let errored = host.iter().zip(&pins).zip(&guest).any(|((h, pin), g)| {
             (pin.is_some()
                 && h.events & (POLLIN | libc::POLLOUT) == 0
-                && super::net::pending_error(h.fd).is_some())
+                && matches!(
+                    super::net::pending_error(h.fd),
+                    Some(super::net::Pending::Error(_))
+                ))
                 || kept(pin.as_ref(), h.fd)
                     .is_some_and(|kept| kept.events as i16 & (g.events | POLLHUP | POLLERR) != 0)
         });
@@ -2050,6 +2059,50 @@ mod reportable_tests {
         }
     }
 
+    /// `inet_shutdown` of an unconnected UDP socket fails with ENOTCONN
+    /// but records the shutdown and wakes its waiters, which
+    /// `datagram_poll` reports: shut for receiving readable and RDHUP,
+    /// both ways also hung up; a receive that would wait reads end of file
+    /// (`__skb_wait_for_more_packets`), a non-blocking one EAGAIN.
+    #[test]
+    fn an_unconnected_udp_socket_shutdown_is_recorded() {
+        let _view = crate::vfs::test_view();
+        const EPOLLET: u32 = 1 << 31;
+        let writable = POLLOUT | POLLWRNORM | POLLWRBAND;
+        let read = POLLIN | POLLRDNORM | POLLRDHUP;
+        let shutdown = |fd: i64, how: u64| crate::sys::net::shutdown([fd as u64, how, 0, 0, 0, 0]);
+        let fd = crate::sys::net::socket([2, 2 | O_NONBLOCK, 0, 0, 0, 0]);
+        assert!(fd >= 0, "socket {fd}");
+        let level = watching(fd, 0x1);
+        let edge = watching(fd, 0x1 | 0x2000 | EPOLLET);
+        assert_eq!(polled(fd, ALL | POLLRDHUP), (1, writable));
+        assert_eq!(waited(level, 0).0, 0);
+        assert_eq!(shutdown(fd, 0), -107);
+        assert_eq!(polled(fd, ALL | POLLRDHUP), (1, read | writable));
+        assert_eq!(selected(fd), (2, true, true));
+        assert_eq!(waited(level, 0), (1, 0x1));
+        assert_eq!(waited(level, 0), (1, 0x1));
+        assert_eq!(waited(edge, 0), (1, 0x1 | 0x2000));
+        assert_eq!(waited(edge, 0).0, 0);
+        let mut buffer = [0u8; 4];
+        assert_eq!(received(fd, &mut buffer), -11);
+        assert_eq!(shutdown(fd, 1), -107);
+        assert_eq!(polled(fd, ALL | POLLRDHUP), (1, read | writable | POLLHUP));
+        assert_eq!(waited(edge, 0), (1, 0x1 | 0x2000 | 0x10));
+        close(&[fd, level, edge]);
+
+        let blocking = crate::sys::net::socket([2, 2, 0, 0, 0, 0]);
+        // A receive that waited would time out rather than hang.
+        let timeout = [1i64, 0];
+        assert_eq!(
+            crate::sys::net::setsockopt([blocking as u64, 1, 20, timeout.as_ptr() as u64, 16, 0]),
+            0
+        );
+        assert_eq!(shutdown(blocking, 0), -107);
+        assert_eq!(received(blocking, &mut buffer), 0);
+        close(&[blocking]);
+    }
+
     /// `POLLEX_SET` is EPOLLPRI alone: select sleeps for its timeout on an
     /// unconnected TCP socket asked only for exceptions, which `tcp_poll`
     /// reports hung up and writable.
@@ -2305,9 +2358,20 @@ mod reportable_tests {
         assert_eq!(waited(level, 0), (1, 0x1));
         assert_eq!(waited(edge, 0), (1, 0x1 | 0x2000));
         assert_eq!(waited(edge, 0).0, 0);
-        // End of file once shut for receiving (`__skb_recv_datagram`).
+        // Shut for receiving, a receive that would wait reads end of
+        // file, a non-blocking one fails with EAGAIN
+        // (`__unix_dgram_recvmsg`).
         let mut buffer = [0u8; 4];
-        assert_eq!(received(dgram, &mut buffer), 0);
+        assert_eq!(received(dgram, &mut buffer), -11);
+        let blocking = crate::sys::net::socket([1, 2 | O_CLOEXEC, 0, 0, 0, 0]);
+        let timeout = [1i64, 0];
+        assert_eq!(
+            crate::sys::net::setsockopt([blocking as u64, 1, 20, timeout.as_ptr() as u64, 16, 0]),
+            0
+        );
+        assert_eq!(shutdown(blocking, 0), 0);
+        assert_eq!(received(blocking, &mut buffer), 0);
+        close(&[blocking]);
         assert_eq!(shutdown(dgram, 1), 0);
         assert_eq!(
             polled(dgram, ALL | POLLRDHUP),
@@ -2355,6 +2419,229 @@ mod reportable_tests {
         let both = watching(fd, 0x1 | 0x4);
         assert_eq!(waited(both, 0), (1, 0x4));
         close(&[fd, both]);
+    }
+
+    /// EPOLLWRBAND is a writable datagram or AF_UNIX socket's
+    /// (`sock_writeable`, `unix_writable`), asked alone or with EPOLLOUT;
+    /// never a TCP socket's or a pipe's (`tcp_poll`, `pipe_poll`).
+    #[test]
+    fn epoll_reports_wrband_as_linux_poll_does() {
+        let _view = crate::vfs::test_view();
+        const EPOLLOUT: u32 = 0x4;
+        const EPOLLWRBAND: u32 = 0x200;
+        let udp = crate::sys::net::socket([2, 2 | O_NONBLOCK, 0, 0, 0, 0]);
+        let mut pair = [0i32; 2];
+        assert_eq!(
+            crate::sys::net::socketpair([1, 1 | O_NONBLOCK, 0, pair.as_mut_ptr() as u64, 0, 0]),
+            0
+        );
+        for fd in [udp, pair[0] as i64] {
+            for events in [EPOLLOUT | EPOLLWRBAND, EPOLLWRBAND] {
+                let ep = watching(fd, events);
+                assert_eq!(waited(ep, 0), (1, events as u64), "fd {fd}: {events:#x}");
+                close(&[ep]);
+            }
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (tcp, connected) = connected_to(1, listener.local_addr().unwrap().port());
+        assert_eq!(connected, -115);
+        let (_peer, _) = listener.accept().unwrap();
+        let ep = watching(tcp, EPOLLOUT | EPOLLWRBAND);
+        assert_eq!(waited(ep, 2_000), (1, EPOLLOUT as u64));
+        let band = watching(tcp, EPOLLWRBAND);
+        assert_eq!(waited(band, 0).0, 0);
+        let mut pipe = [0i32; 2];
+        assert_eq!(
+            fs::pipe2([pipe.as_mut_ptr() as u64, O_CLOEXEC, 0, 0, 0, 0]),
+            0
+        );
+        let pipe_band = watching(pipe[1] as i64, EPOLLWRBAND);
+        assert_eq!(waited(pipe_band, 0).0, 0);
+        close(&[
+            udp,
+            pair[0] as i64,
+            pair[1] as i64,
+            tcp,
+            ep,
+            band,
+            pipe[0] as i64,
+            pipe[1] as i64,
+            pipe_band,
+        ]);
+    }
+
+    /// An AF_UNIX datagram socketpair half whose peer closed has no error
+    /// on Linux: it polls writable, and readable only for what is queued;
+    /// a receive returns that, and then EAGAIN; and its next send fails
+    /// with ECONNREFUSED, which disconnects it, the one after with ENOTCONN
+    /// (`unix_dgram_sendmsg`).
+    #[test]
+    fn a_unix_datagram_survivor_of_its_peer_is_not_pollerr() {
+        // A child a test running in parallel forks holds the closed peer.
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_unix_datagram_survivor_of_its_peer_is_not_pollerr",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        let writable = POLLOUT | POLLWRNORM | POLLWRBAND;
+        let send = |fd: i64| crate::sys::net::sendto([fd as u64, b"x".as_ptr() as u64, 1, 0, 0, 0]);
+        for queued in [true, false] {
+            let mut pair = [0i32; 2];
+            assert_eq!(
+                crate::sys::net::socketpair([
+                    1,
+                    2 | O_NONBLOCK | O_CLOEXEC,
+                    0,
+                    pair.as_mut_ptr() as u64,
+                    0,
+                    0
+                ]),
+                0
+            );
+            let (fd, peer) = (pair[0] as i64, pair[1] as i64);
+            if queued {
+                assert_eq!(send(peer), 1);
+            }
+            let readable = watching(fd, 0x1);
+            let both = watching(fd, 0x1 | 0x4);
+            close(&[peer]);
+            let (revents, events) = if queued {
+                (POLLIN | POLLRDNORM | writable, 0x1 | 0x4)
+            } else {
+                (writable, 0x4)
+            };
+            assert_eq!(polled(fd, ALL), (1, revents), "queued {queued}");
+            assert_eq!(waited(both, 0), (1, events), "queued {queued}");
+            assert_eq!(waited(readable, 0).0, queued as i64, "queued {queued}");
+            let mut error = [0i32; 2];
+            let mut len = 4u32;
+            assert_eq!(
+                crate::sys::net::getsockopt([
+                    fd as u64,
+                    1,
+                    4,
+                    error.as_mut_ptr() as u64,
+                    &mut len as *mut u32 as u64,
+                    0,
+                ]),
+                0
+            );
+            assert_eq!(error[0], 0, "queued {queued}");
+            let mut buffer = [0u8; 4];
+            if queued {
+                assert_eq!(received(fd, &mut buffer), 1);
+            }
+            assert_eq!(received(fd, &mut buffer), -11, "queued {queued}");
+            assert_eq!(send(fd), -111, "queued {queued}");
+            assert_eq!(send(fd), -107, "queued {queued}");
+            close(&[fd, readable, both]);
+        }
+        let fresh = crate::sys::net::socket([1, 2 | O_NONBLOCK, 0, 0, 0, 0]);
+        assert_eq!(send(fresh), -107);
+        close(&[fresh]);
+    }
+
+    /// An AF_UNIX datagram socketpair end, close-on-exec, as (end, peer).
+    fn unix_datagram_pair(nonblocking: bool) -> (i64, i64) {
+        let mut pair = [0i32; 2];
+        let flags = O_CLOEXEC | if nonblocking { O_NONBLOCK } else { 0 };
+        assert_eq!(
+            crate::sys::net::socketpair([1, 2 | flags, 0, pair.as_mut_ptr() as u64, 0, 0]),
+            0
+        );
+        (pair[0] as i64, pair[1] as i64)
+    }
+
+    /// The peer of an AF_UNIX datagram socket closing while its receive
+    /// waits is no error: the receive waits on, to its timeout
+    /// (`__unix_dgram_recvmsg`), and the next send fails with ECONNREFUSED,
+    /// as one sent first does.
+    #[test]
+    fn a_unix_datagram_receive_waits_past_its_peers_close() {
+        // A child a test running in parallel forks holds the closed peer.
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_unix_datagram_receive_waits_past_its_peers_close",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        let send = |fd: i64| crate::sys::net::sendto([fd as u64, b"x".as_ptr() as u64, 1, 0, 0, 0]);
+        let (fd, peer) = unix_datagram_pair(false);
+        let timeout = [0i64, 500_000];
+        assert_eq!(
+            crate::sys::net::setsockopt([fd as u64, 1, 20, timeout.as_ptr() as u64, 16, 0]),
+            0
+        );
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            close(&[peer]);
+        });
+        let started = std::time::Instant::now();
+        let mut buffer = [0u8; 4];
+        assert_eq!(received(fd, &mut buffer), -11);
+        assert!(started.elapsed() >= std::time::Duration::from_millis(450));
+        closer.join().unwrap();
+        assert_eq!(send(fd), -111);
+        assert_eq!(send(fd), -107);
+        close(&[fd]);
+        // A send first, with nothing having looked at the socket.
+        let (fd, peer) = unix_datagram_pair(true);
+        close(&[peer]);
+        assert_eq!(send(fd), -111);
+        assert_eq!(send(fd), -107);
+        close(&[fd]);
+    }
+
+    /// The ECONNREFUSED send of an AF_UNIX datagram socket whose peer
+    /// closed disconnects it and drops what it had queued
+    /// (`unix_dgram_disconnected`); a connect to a new peer, or of
+    /// AF_UNSPEC, forgets the peer that closed.
+    #[test]
+    fn a_unix_datagram_disconnect_forgets_its_closed_peer() {
+        // A child a test running in parallel forks holds the closed peer.
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_unix_datagram_disconnect_forgets_its_closed_peer",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        let send = |fd: i64| crate::sys::net::sendto([fd as u64, b"x".as_ptr() as u64, 1, 0, 0, 0]);
+        let mut buffer = [0u8; 4];
+        let (fd, peer) = unix_datagram_pair(true);
+        assert_eq!(send(peer), 1);
+        close(&[peer]);
+        assert_eq!(send(fd), -111);
+        assert_eq!(received(fd, &mut buffer), -11);
+        close(&[fd]);
+
+        let (fd, peer) = unix_datagram_pair(true);
+        close(&[peer]);
+        assert_eq!(polled(fd, POLLOUT), (1, POLLOUT));
+        let other = crate::sys::net::socket([1, 2 | O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0]);
+        let (name, len) = abstract_name(&format!("aim-poll-reconnect-{}", std::process::id()));
+        assert_eq!(
+            crate::sys::net::bind([other as u64, name.as_ptr() as u64, len, 0, 0, 0]),
+            0
+        );
+        assert_eq!(
+            crate::sys::net::connect([fd as u64, name.as_ptr() as u64, len, 0, 0, 0]),
+            0
+        );
+        assert_eq!(send(fd), 1);
+        assert_eq!(received(other, &mut buffer), 1);
+        close(&[fd, other]);
+
+        let (fd, peer) = unix_datagram_pair(true);
+        close(&[peer]);
+        assert_eq!(polled(fd, POLLOUT), (1, POLLOUT));
+        let unspec = [0u8; 16];
+        assert_eq!(
+            crate::sys::net::connect([fd as u64, unspec.as_ptr() as u64, 16, 0, 0, 0]),
+            0
+        );
+        assert_eq!(send(fd), -107);
+        close(&[fd]);
     }
 
     /// A refused non-blocking TCP connect: `tcp_done` shuts it both ways,
