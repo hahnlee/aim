@@ -139,8 +139,8 @@ fn resolve_as(
     id: &super::cred::Identity,
     kind: usize,
 ) -> Result<vfs::Resolved, errno::Errno> {
-    vfs::resolve_checked(dirfd, path, follow, |directory| {
-        attrs::search(directory, id, kind)
+    vfs::resolve_checked(dirfd, path, follow, |directory, known| {
+        attrs::search(directory, id, kind, known)
     })
 }
 
@@ -217,8 +217,8 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     }
     let follow = flags & O_NOFOLLOW == 0 && flags & (O_CREAT | O_EXCL) != (O_CREAT | O_EXCL);
     let r = if flags & O_CREAT != 0 {
-        vfs::resolve_checked_new(dirfd, path, follow, |directory| {
-            attrs::search(directory, id, attrs::FS)
+        vfs::resolve_checked_new(dirfd, path, follow, |directory, known| {
+            attrs::search(directory, id, attrs::FS, known)
         })
     } else {
         resolve_as(dirfd, path, follow, id, attrs::FS)
@@ -2270,7 +2270,7 @@ pub fn chdir(a: [u64; 6]) -> i64 {
     let p = p.as_slice();
     let id = super::cred::current();
     match resolve_as(vfs::LINUX_AT_FDCWD, p, true, &id, attrs::FS) {
-        Ok(r) => match attrs::search(&r.guest, &id, attrs::FS) {
+        Ok(r) => match attrs::search(&r.guest, &id, attrs::FS, None) {
             Ok(()) => set_cwd_checked(r),
             Err(error) => -(error as i64),
         },
@@ -2302,7 +2302,7 @@ pub fn fchdir(a: [u64; 6]) -> i64 {
         return -(ENOENT as i64);
     };
     let id = super::cred::current();
-    if let Err(error) = attrs::search(&guest, &id, attrs::FS) {
+    if let Err(error) = attrs::search(&guest, &id, attrs::FS, None) {
         return -(error as i64);
     }
     vfs::set_cwd(guest);

@@ -94,13 +94,13 @@ impl VerifiedSource {
                 .split_last()
                 .map_or(&[][..], |(_, parents)| parents)
             {
-                attrs::search(&at, &id, attrs::FS)?;
+                attrs::search(&at, &id, attrs::FS, None)?;
                 if at != "/" {
                     at.push('/');
                 }
                 at.push_str(component);
             }
-            attrs::search(&at, &id, attrs::FS)?;
+            attrs::search(&at, &id, attrs::FS, None)?;
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
             if unsafe { libc::fstat(data.as_raw_fd(), &mut stat) } < 0 {
                 return Err(errno::last());

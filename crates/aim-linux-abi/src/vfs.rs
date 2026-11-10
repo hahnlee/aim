@@ -2733,7 +2733,7 @@ pub(crate) fn visible(guest: String) -> Result<String, Errno> {
     let (mut host, mut shown) = (Vec::new(), Vec::new());
     let mut unlocked = None;
     for name in guest.split('/').filter(|name| !name.is_empty()) {
-        let (lock, _) = dir_lock(&join_guest(&host), &mut unlocked)?;
+        let (lock, _) = dir_lock(&join_guest(&host), &mut unlocked, None)?;
         shown.push(crate::sys::fscrypt::guest_name(&lock, name.as_bytes()));
         host.push(name.as_bytes().to_vec());
     }
@@ -2775,10 +2775,22 @@ impl Resolved {
 static IMAGE_LINKS: Mutex<Option<HashMap<PathBuf, Option<PathBuf>>>> = Mutex::new(None);
 const IMAGE_LINKS_MAX: usize = 1 << 14;
 
-/// The target of the symlink at `host`, if it is one.
-fn link_target(host: PathBuf, area: Area) -> Option<PathBuf> {
+/// The target of `host` if it is a symlink, else (where an lstat found it)
+/// its stat: a walk's check of the directory it is then needs no stat of
+/// its own.
+fn link_target(host: PathBuf, area: Area) -> (Option<PathBuf>, Option<libc::stat>) {
     if area != Area::Image || !vfs().mapped {
-        return std::fs::read_link(&host).ok();
+        let Ok(name) = host_cstring(host.clone()) else {
+            return (None, None);
+        };
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::lstat(name.as_ptr(), &mut stat) } < 0 {
+            return (None, None);
+        }
+        if stat.st_mode & libc::S_IFMT != libc::S_IFLNK {
+            return (None, Some(stat));
+        }
+        return (std::fs::read_link(&host).ok(), None);
     }
     if let Some(known) = IMAGE_LINKS
         .lock()
@@ -2786,7 +2798,7 @@ fn link_target(host: PathBuf, area: Area) -> Option<PathBuf> {
         .as_ref()
         .and_then(|m| m.get(&host))
     {
-        return known.clone();
+        return (known.clone(), None);
     }
     let target = std::fs::read_link(&host).ok();
     let mut links = IMAGE_LINKS.lock().unwrap();
@@ -2795,17 +2807,17 @@ fn link_target(host: PathBuf, area: Area) -> Option<PathBuf> {
         map.clear();
     }
     map.insert(host, target.clone());
-    target
+    (target, None)
 }
 
 /// Resolve a guest path relative to a Linux dirfd into a host path.
 pub fn resolve(dirfd: i32, path: &[u8], follow_last: bool) -> Result<Resolved, Errno> {
-    resolve_inner(dirfd, path, follow_last, false, false, |_| Ok(()))
+    resolve_inner(dirfd, path, follow_last, false, false, |_, _| Ok(()))
 }
 /// [`resolve`] of a path whose last component is to be created: in a
 /// locked directory (fscrypt) that is ENOKEY, unless it names an entry.
 pub fn resolve_new(dirfd: i32, path: &[u8]) -> Result<Resolved, Errno> {
-    resolve_inner(dirfd, path, false, false, true, |_| Ok(()))
+    resolve_inner(dirfd, path, false, false, true, |_, _| Ok(()))
 }
 /// Resolve from the actual cwd/dirfd and check each searched directory, including
 /// directories visited before a symlink or dot-dot changes the resolved path.
@@ -2815,7 +2827,7 @@ pub fn resolve_checked(
     dirfd: i32,
     path: &[u8],
     follow_last: bool,
-    check: impl FnMut(&str) -> Result<(), Errno>,
+    check: impl FnMut(&str, Option<&libc::stat>) -> Result<(), Errno>,
 ) -> Result<Resolved, Errno> {
     resolve_inner(dirfd, path, follow_last, true, false, check)
 }
@@ -2825,7 +2837,7 @@ pub fn resolve_checked_new(
     dirfd: i32,
     path: &[u8],
     follow_last: bool,
-    check: impl FnMut(&str) -> Result<(), Errno>,
+    check: impl FnMut(&str, Option<&libc::stat>) -> Result<(), Errno>,
 ) -> Result<Resolved, Errno> {
     resolve_inner(dirfd, path, follow_last, true, true, check)
 }
@@ -2836,8 +2848,13 @@ pub fn resolve_checked_new(
 /// directory whose key is present is locked: `unlocked` keeps the host
 /// path of the last such directory a walk passed, so that the directories
 /// below it are not asked.
-/// Returns the lock and the directory's host path.
-fn dir_lock(dir: &str, unlocked: &mut Option<PathBuf>) -> Result<(Lock, CString), Errno> {
+/// `stat` is the directory's host lstat where the walk took one. Returns
+/// the lock and the directory's host path.
+fn dir_lock(
+    dir: &str,
+    unlocked: &mut Option<PathBuf>,
+    stat: Option<&libc::stat>,
+) -> Result<(Lock, CString), Errno> {
     let (host, area) = lookup(dir);
     let path = host_cstring(host.clone())?;
     if unlocked.as_ref().is_some_and(|root| host.starts_with(root))
@@ -2845,7 +2862,7 @@ fn dir_lock(dir: &str, unlocked: &mut Option<PathBuf>) -> Result<(Lock, CString)
     {
         return Ok((Lock::Plain, path));
     }
-    let lock = crate::sys::fscrypt::path_lock(&path)?;
+    let lock = crate::sys::fscrypt::path_lock(&path, stat)?;
     if let Lock::Unlocked = lock {
         *unlocked = Some(host);
     }
@@ -2864,11 +2881,18 @@ struct Walk {
 }
 
 impl Walk {
-    /// Adds `name`, looked up in the directory walked so far; `new` when
-    /// it is to be created.
-    fn push(&mut self, name: Vec<u8>, locking: bool, new: bool) -> Result<(), Errno> {
+    /// Adds `name`, looked up in the directory walked so far (whose host
+    /// lstat `directory` is, where the walk took one); `new` when it is to
+    /// be created.
+    fn push(
+        &mut self,
+        name: Vec<u8>,
+        locking: bool,
+        new: bool,
+        directory: Option<&libc::stat>,
+    ) -> Result<(), Errno> {
         let host = if locking {
-            let (lock, dir) = dir_lock(&self.host_path(), &mut self.unlocked)?;
+            let (lock, dir) = dir_lock(&self.host_path(), &mut self.unlocked, directory)?;
             crate::sys::fscrypt::host_name(&lock, &dir, &name, new)?
         } else {
             None
@@ -2908,7 +2932,7 @@ fn resolve_inner(
     follow_last: bool,
     relative_base: bool,
     new: bool,
-    mut check: impl FnMut(&str) -> Result<(), Errno>,
+    mut check: impl FnMut(&str, Option<&libc::stat>) -> Result<(), Errno>,
 ) -> Result<Resolved, Errno> {
     refresh_fuse_mounts()?;
     if path.is_empty() {
@@ -2938,7 +2962,7 @@ fn resolve_inner(
     };
     if relative_base && path[0] != b'/' {
         for part in base.split('/').filter(|part| !part.is_empty()) {
-            done.push(part.as_bytes().to_vec(), locking, false)?;
+            done.push(part.as_bytes().to_vec(), locking, false, None)?;
         }
         pending = path
             .split(|&byte| byte == b'/')
@@ -2949,20 +2973,24 @@ fn resolve_inner(
     }
     let mut links = 0;
     let mut fuse_walk = None;
+    // The host lstat of the walk's last component, where one was taken.
+    let mut known = None;
     while let Some(c) = pending.pop() {
         // The checks stat the directory by its host names.
-        check(&done.host_path())?;
+        check(&done.host_path(), known.as_ref())?;
         match c.as_slice() {
             b"." => continue,
             b".." => {
                 fuse_walk = None;
+                known = None;
                 done.pop();
                 continue;
             }
             _ => {}
         }
+        let directory = known.take();
         let is_last = pending.is_empty();
-        done.push(c, locking, new && is_last)?;
+        done.push(c, locking, new && is_last, directory.as_ref())?;
         if is_last && !follow_last {
             break;
         }
@@ -3016,7 +3044,9 @@ fn resolve_inner(
             && !crate::sys::fscrypt::off_data(&host, area)?)
         .then(|| host_cstring(host.clone()))
         .transpose()?;
-        let Some(mut target) = link_target(host, area) else {
+        let (target, stat) = link_target(host, area);
+        let Some(mut target) = target else {
+            known = stat;
             continue;
         };
         if let Some(link) = link {
@@ -3098,6 +3128,53 @@ pub(crate) fn test_view() -> (std::sync::MutexGuard<'static, ()>, &'static Path)
 
 #[cfg(test)]
 mod tests {
+    /// A walk hands each directory's check the lstat it took of that
+    /// directory as a component, and none after a symlink or `..`.
+    #[test]
+    fn checks_get_the_walks_lstat_of_each_component() {
+        use std::os::unix::fs::MetadataExt;
+        let (_view, root) = super::test_view();
+        let base = root.join("data/walk-known");
+        std::fs::create_dir_all(base.join("a/b")).unwrap();
+        let _ = std::fs::remove_file(base.join("link"));
+        std::os::unix::fs::symlink("a", base.join("link")).unwrap();
+        let mut seen = Vec::new();
+        super::resolve_checked(
+            super::LINUX_AT_FDCWD,
+            b"/data/walk-known/link/b/../b/file",
+            false,
+            |directory, known| {
+                if let Some(known) = known {
+                    let host = std::fs::metadata(root.join(&directory[1..])).unwrap();
+                    assert_eq!(
+                        (known.st_dev as u64, known.st_ino),
+                        (host.dev(), host.ino())
+                    );
+                }
+                seen.push((directory.to_owned(), known.is_some()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        let expected = [
+            ("/", false),
+            ("/data", true),
+            ("/data/walk-known", true),
+            ("/data/walk-known", false),
+            ("/data/walk-known/a", true),
+            ("/data/walk-known/a/b", true),
+            ("/data/walk-known/a", false),
+            ("/data/walk-known/a/b", true),
+        ];
+        assert_eq!(
+            seen,
+            expected
+                .iter()
+                .map(|(directory, known)| (directory.to_string(), *known))
+                .collect::<Vec<_>>()
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
     #[test]
     fn relative_dirfd_requires_a_published_directory_and_absolute_path_ignores_it() {
         const MARKER: &str = "aim-dirfd-publication-owned-child";
