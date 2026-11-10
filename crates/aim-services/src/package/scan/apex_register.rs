@@ -451,7 +451,7 @@ impl SigningScan {
                 canonical_source: None,
             };
             let scan_as_instant_app = setting.users.get(&0).is_some_and(|user| user.instant_app);
-            let completed = staged.finish_scan_metadata(
+            let completed = staged.finish_staged_scan_metadata(
                 NewPackageOutcome {
                     record,
                     users: setting.users,

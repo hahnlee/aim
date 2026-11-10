@@ -121,9 +121,10 @@ impl SigningScan {
         }
         self.refresh_init_apex(code);
         let mut staged = self.clone();
-        let candidate = staged.apply_existing(code, update, saved_users, all_users, disabled)?;
+        let candidate =
+            staged.apply_staged_existing(code, update, saved_users, all_users, disabled)?;
         let candidate = staged.finish_init_apex(candidate, &code.location)?;
-        let completed = staged.finish_scan_metadata(candidate, apks, inputs)?;
+        let completed = staged.finish_staged_scan_metadata(candidate, apks, inputs)?;
         *self = staged;
         Ok(completed)
     }
@@ -149,7 +150,7 @@ impl SigningScan {
         let mut staged = self.clone();
         let candidate = staged.apply_original_system(code, metadata, saved_users)?;
         let candidate = staged.finish_init_apex(candidate, &code.location)?;
-        let completed = staged.finish_scan_metadata(candidate, apks, inputs)?;
+        let completed = staged.finish_staged_scan_metadata(candidate, apks, inputs)?;
         let setting = &completed.candidate.record.settings;
         // insertPackageSettingLPw updates a registered APK slot to the final
         // setting. APEX INVALID_UID admission leaves the prior slot in place.
@@ -200,7 +201,7 @@ impl SigningScan {
         };
         let name = candidate.record.settings.name.clone();
         let candidate = staged.finish_init_apex(candidate, &code.location)?;
-        let completed = match staged.finish_scan_metadata(candidate, apks, inputs) {
+        let completed = match staged.finish_staged_scan_metadata(candidate, apks, inputs) {
             Ok(completed) => completed,
             Err(error) => {
                 preparation
@@ -223,6 +224,20 @@ impl SigningScan {
         &mut self,
         candidate: NewPackageOutcome,
         apks: &Apks,
+        inputs: ScanMetadataCompletion<'_>,
+    ) -> Result<CompletedScanMetadata, SigningError> {
+        let mut staged = self.clone();
+        let completed = staged.finish_staged_scan_metadata(candidate, apks, inputs)?;
+        *self = staged;
+        Ok(completed)
+    }
+
+    /// [`Self::finish_scan_metadata`] of an owner the caller has staged and
+    /// drops on an error, which may leave it partly updated.
+    pub(super) fn finish_staged_scan_metadata(
+        &mut self,
+        candidate: NewPackageOutcome,
+        apks: &Apks,
         mut inputs: ScanMetadataCompletion<'_>,
     ) -> Result<CompletedScanMetadata, SigningError> {
         self.accepted_slot(&candidate.record, "scan-completion")?;
@@ -239,22 +254,20 @@ impl SigningScan {
             .loaded
             .get(&candidate.record.settings.name)
             .map(|code| code.runtime_package().clone());
-        let mut staged = self.clone();
         let first_shared_code = candidate.record.settings.shared_app_id().is_some_and(|id| {
             !self.settings.packages.iter().any(|setting| {
                 setting.shared_app_id() == Some(id) && self.loaded.contains_key(&setting.name)
             })
         });
         let first_shared_member = candidate.record.settings.shared_app_id().and_then(|id| {
-            staged
-                .identities
+            self.identities
                 .shared_users
                 .iter()
                 .find(|(_, group)| group.app_id == id && group.package_names().next().is_none())
                 .map(|(name, _)| name.clone())
         });
         let (candidate, multi_arch_mismatch, copies) = match inputs.destination {
-            Some(destination) => staged.finish_native_library_install(
+            Some(destination) => self.finish_native_library_install(
                 candidate,
                 apks,
                 inputs.abi_policy,
@@ -264,7 +277,7 @@ impl SigningScan {
                 destination,
             )?,
             None => {
-                let (candidate, mismatch) = staged.finish_native_library_metadata(
+                let (candidate, mismatch) = self.finish_native_library_metadata(
                     candidate,
                     apks,
                     inputs.abi_policy,
@@ -274,7 +287,7 @@ impl SigningScan {
                 (candidate, mismatch, Vec::new())
             }
         };
-        let (candidate, alignment_diagnostic) = staged.finish_page_size_metadata(
+        let (candidate, alignment_diagnostic) = self.finish_page_size_metadata(
             candidate,
             apks,
             &page_policy,
@@ -282,15 +295,15 @@ impl SigningScan {
             inputs.install,
             inputs.context,
         )?;
-        let candidate = staged.finish_code_metadata(candidate, apks, inputs.clock)?;
-        let candidate = staged.finish_application_metadata(
+        let candidate = self.finish_code_metadata(candidate, apks, inputs.clock)?;
+        let candidate = self.finish_application_metadata(
             candidate,
             inputs.factory_test,
             inputs.context.updated,
         )?;
-        let candidate = staged.finish_init_update_owner(candidate, inputs.context.mode)?;
-        let mut candidate = staged.finish_key_set_metadata(candidate)?;
-        staged.accepted_slot(&candidate.record, "package-finalization")?;
+        let candidate = self.finish_init_update_owner(candidate, inputs.context.mode)?;
+        let mut candidate = self.finish_key_set_metadata(candidate)?;
+        self.accepted_slot(&candidate.record, "package-finalization")?;
         // commitReconciledScanResultLocked sets the assigned appId only after
         // setting/UID creation. The object is retained before query publication.
         candidate.record.parsed.uid = candidate.record.settings.app_id;
@@ -306,8 +319,7 @@ impl SigningScan {
                 message,
             })
         })?;
-        staged
-            .update_ownership
+        self.update_ownership
             .queue(&candidate.record.settings, &candidate.record.parsed);
         let name = &candidate.record.settings.name;
         if self.loaded.contains_key(name) && !self.has_seinfo_assignment(name) {
@@ -318,13 +330,12 @@ impl SigningScan {
                 message: "retained loaded package has no seInfo assignment".into(),
             }));
         }
-        staged.loaded.insert(
+        self.loaded.insert(
             candidate.record.settings.name.clone(),
             std::sync::Arc::new(loaded),
         );
-        staged
-            .package_registry
-            .register(staged.loaded[name].clone())
+        self.package_registry
+            .register(self.loaded[name].clone())
             .map_err(|message| {
                 SigningError::Rejected(super::Error {
                     package: name.clone(),
@@ -333,9 +344,9 @@ impl SigningScan {
                     message,
                 })
             })?;
-        let view = staged
+        let view = self
             .package_registry
-            .package_view(name, &staged.loaded[name].package)
+            .package_view(name, &self.loaded[name].package)
             .map_err(|message| {
                 SigningError::Rejected(super::Error {
                     package: name.clone(),
@@ -344,12 +355,11 @@ impl SigningScan {
                     message,
                 })
             })?;
-        std::sync::Arc::make_mut(staged.loaded.get_mut(name).unwrap()).set_runtime_package(view);
-        staged
-            .package_registry
-            .rebind(name, staged.loaded[name].clone());
-        staged.pending_metadata.remove(name);
-        let setting = staged.seinfo_setting_for_scan(name).map_err(|message| {
+        std::sync::Arc::make_mut(self.loaded.get_mut(name).unwrap()).set_runtime_package(view);
+        self.package_registry
+            .rebind(name, self.loaded[name].clone());
+        self.pending_metadata.remove(name);
+        let setting = self.seinfo_setting_for_scan(name).map_err(|message| {
             SigningError::Rejected(super::Error {
                 package: name.clone(),
                 path: candidate.record.settings.code_path.clone(),
@@ -357,41 +367,40 @@ impl SigningScan {
                 message,
             })
         })?;
-        staged
-            .assign_seinfo_for_scan_with_shared_target(
-                name,
-                setting,
-                inputs.seinfo.policy,
-                &mut |package| inputs.seinfo.compatibility.target_sdk(package),
-                if first_shared_code {
-                    Some(
-                        inputs
-                            .seinfo
-                            .compatibility
-                            .target_sdk(&candidate.record.parsed)
-                            .map_err(|message| {
-                                SigningError::Rejected(super::Error {
-                                    package: name.clone(),
-                                    path: candidate.record.settings.code_path.clone(),
-                                    phase: "seinfo",
-                                    message,
-                                })
-                            })?,
-                    )
-                } else {
-                    None
-                },
-            )
-            .map_err(|message| {
-                SigningError::Rejected(super::Error {
-                    package: name.clone(),
-                    path: candidate.record.settings.code_path.clone(),
-                    phase: "seinfo",
-                    message,
-                })
-            })?;
+        self.assign_seinfo_for_scan_with_shared_target(
+            name,
+            setting,
+            inputs.seinfo.policy,
+            &mut |package| inputs.seinfo.compatibility.target_sdk(package),
+            if first_shared_code {
+                Some(
+                    inputs
+                        .seinfo
+                        .compatibility
+                        .target_sdk(&candidate.record.parsed)
+                        .map_err(|message| {
+                            SigningError::Rejected(super::Error {
+                                package: name.clone(),
+                                path: candidate.record.settings.code_path.clone(),
+                                phase: "seinfo",
+                                message,
+                            })
+                        })?,
+                )
+            } else {
+                None
+            },
+        )
+        .map_err(|message| {
+            SigningError::Rejected(super::Error {
+                package: name.clone(),
+                path: candidate.record.settings.code_path.clone(),
+                phase: "seinfo",
+                message,
+            })
+        })?;
         if let Some(group) = first_shared_member {
-            let group = staged.identities.shared_users.get_mut(&group).unwrap();
+            let group = self.identities.shared_users.get_mut(&group).unwrap();
             group.remove_package(name);
             group.add_package_with_code(
                 name,
@@ -400,15 +409,13 @@ impl SigningScan {
                 Some(candidate.record.parsed.target_sdk_version),
             );
         }
-        staged.complete_transferred_identity(&candidate.record.identity);
-        staged
-            .permission_admissions
+        self.complete_transferred_identity(&candidate.record.identity);
+        self.permission_admissions
             .push(super::permission_admissions::Admission {
                 name: candidate.record.settings.name.clone(),
                 scan_as_instant: inputs.scan_as_instant_app,
                 old_package,
             });
-        *self = staged;
         Ok(CompletedScanMetadata {
             candidate,
             copies,
