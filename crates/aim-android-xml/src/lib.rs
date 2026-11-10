@@ -276,6 +276,14 @@ pub(crate) fn normalize_next(e: &mut Element, binary: bool, lossless: bool) -> R
                     )
                 };
             }
+            // resolveEntity throws for any name it cannot parse, as for
+            // one no Rust string holds.
+            Node::Utf16(ENTITY_REF, name) if binary => {
+                return Err(format!(
+                    "ABX: unknown entity: {}",
+                    name.to_rust().unwrap_err()
+                ));
+            }
             Node::Token(COMMENT | 8, _) | Node::Utf16(COMMENT | 8, _) => {}
             _ => pending_text = false,
         }
@@ -584,6 +592,18 @@ mod java_string_tests {
                 lone(0xde00)
             ]
         );
+        // An entity name no Rust string holds is unknown, as resolveEntity
+        // throws for it, whether or not text precedes it.
+        for content in [vec![], vec![Node::Token(TEXT, Some("x".into()))]] {
+            let mut root = read(b"<s/>").unwrap();
+            root.content = content;
+            root.content.push(Node::Utf16(
+                ENTITY_REF,
+                JavaString::from_units(vec![0x23, 0xd83d]),
+            ));
+            let error = read_next_lossless(&abx::write(&root).unwrap()).unwrap_err();
+            assert!(error.contains("unknown entity"), "{error}");
+        }
         // A cast to char wraps; well-formed results stay Rust strings.
         root.content.truncate(1);
         root.content
