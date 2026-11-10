@@ -42,6 +42,11 @@ pub(super) struct Sent {
     pub options: Option<RawBundle>,
 }
 
+/// `ActivityOptions.KEY_PENDING_INTENT_LAUNCH_FLAGS`, and the flags of it
+/// a send takes: `FLAG_ACTIVITY_NEW_TASK` (also `FLAG_RECEIVER_FOREGROUND`)
+/// and `FLAG_ACTIVITY_MULTIPLE_TASK`.
+const KEY_PENDING_INTENT_LAUNCH_FLAGS: &str = "android.activity.pendingIntentLaunchFlags";
+const PENDING_INTENT_LAUNCH_FLAGS: i32 = 0x1000_0000 | 0x0800_0000;
 /// `Intent.IMMUTABLE_FLAGS`: the grant flags.
 const IMMUTABLE_FLAGS: i32 = 0x1 | 0x2 | 0x40 | 0x80;
 
@@ -713,6 +718,16 @@ impl AppHost {
                 let mask = sent.flags_mask & !IMMUTABLE_FLAGS;
                 let values = sent.flags_values & mask;
                 let flags = (final_intent.intent.flags & !mask) | values;
+                let extended = final_intent.intent.extended_flags;
+                final_intent.set_flags(flags, extended);
+            }
+            // The sender's launch flags, even into an immutable one
+            // (`getPendingIntentLaunchFlags`, of these flags only).
+            if let Some(options) = &sent.options {
+                let launch = options
+                    .int(KEY_PENDING_INTENT_LAUNCH_FLAGS, 0)
+                    .map_err(|_| Exception::illegal_argument("activity options"))?;
+                let flags = final_intent.intent.flags | launch & PENDING_INTENT_LAUNCH_FLAGS;
                 let extended = final_intent.intent.extended_flags;
                 final_intent.set_flags(flags, extended);
             }
