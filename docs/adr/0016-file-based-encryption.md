@@ -267,8 +267,19 @@ turns FBE on and depends on slice 4's CE protection: it lands after it.
   a host copy takes its directory's policy (`inherit`), not its source's.
   guest-init's builtins give a policy when they create, so their chown and
   chmod records (`guest_inode::change`) do not adopt. An inode written past
-  both, or written by an older build, has none; nothing reports such
-  inodes yet (#2906). The app host's writers of `/data/system_ce/<user>`
+  both, or by an older build, has none, a state Linux never allows:
+  `fscrypt::policy_less` lists such inodes below an encrypted directory
+  (diagnostics and tests), and `mount_all` gives each its directory's
+  policy (`fscrypt::repair`, `inherit` as template placement does) once
+  per data directory: a filesystem this build encrypts, or one repaired
+  once, is marked whole (`fscrypt/whole`) and not walked again, so only a
+  data directory first encrypted by an earlier build pays the walk (#2906):
+  0.29-0.59 s for the 4,486 inodes of a fresh app host data directory just
+  attached (its metadata not yet cached), too much for every boot. A
+  writer that bypasses both after that is a bug `policy_less` finds, not
+  a state the mount repairs: it found the package parser's cache
+  (`/data/system/package_cache`, 494 inodes) and the move claims'
+  directory, which now adopt. The app host's writers of `/data/system_ce/<user>`
   wait for the user's unlock, as their originals do (usage stats,
   shortcuts, widgets, launch params, accounts' CE database, hibernation),
   so vold prepares a fresh directory's CE storage at the first try.

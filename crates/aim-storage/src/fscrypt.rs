@@ -47,6 +47,8 @@ const TABLE: &str = "policies";
 const TABLE_NEXT: &str = "policies.next";
 const CE_PROTECTOR: &str = "ce-protector";
 const CE_PROTECTOR_NEXT: &str = "ce-protector.next";
+/// Present once no inode below an encrypted directory lacks a policy.
+const WHOLE: &str = "whole";
 const SECRET: &str = "secret";
 const SECRET_NEXT: &str = "secret.next";
 const MAGIC: &[u8] = b"AIMFSCRYPT01\0";
@@ -337,6 +339,71 @@ pub fn adopt(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// The inodes of the tree `root` (the data filesystem's `/data`) below an
+/// encrypted directory that have no policy: written host-side past
+/// [`adopt`], or by a build from before it. Linux never leaves an inode so;
+/// the guest would read its policy as ENODATA, fail a rename or link of it
+/// into its own tree with EXDEV and read it while the key is absent. Only
+/// directories, regular files and symlinks are encrypted, as on Linux.
+pub fn policy_less(root: &Path) -> io::Result<Vec<PathBuf>> {
+    walk(root, false)
+}
+
+/// Gives each inode [`policy_less`] would list its directory's policy, as
+/// [`inherit`] gives a new one, a directory before what it holds; returns
+/// them.
+pub fn repair(root: &Path) -> io::Result<Vec<PathBuf>> {
+    walk(root, true)
+}
+
+fn walk(root: &Path, repair: bool) -> io::Result<Vec<PathBuf>> {
+    let device = fs::symlink_metadata(root)?.dev();
+    let mut found = Vec::new();
+    let mut pending = vec![(root.to_path_buf(), context(root)?.is_some())];
+    // An entry removed while the walk runs (a live /data) is gone, not
+    // without a policy.
+    let gone = |error: &io::Error| error.kind() == io::ErrorKind::NotFound;
+    while let Some((dir, encrypted)) = pending.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Err(error) if gone(&error) => continue,
+            entries => entries?,
+        };
+        for entry in entries {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if !(kind.is_dir() || kind.is_file() || kind.is_symlink()) {
+                continue;
+            }
+            let path = entry.path();
+            let visit = || -> io::Result<bool> {
+                // Outside an encrypted tree only a directory can start one.
+                let has = (encrypted || kind.is_dir()) && context(&path)?.is_some();
+                if encrypted && !has && repair {
+                    inherit(&dir, &path)?;
+                }
+                Ok(has)
+            };
+            let has = match visit() {
+                Err(error) if gone(&error) => continue,
+                has => has?,
+            };
+            if encrypted && !has {
+                found.push(path.clone());
+            }
+            if kind.is_dir() {
+                let device_of = match entry.metadata() {
+                    Err(error) if gone(&error) => continue,
+                    metadata => metadata?.dev(),
+                };
+                if device_of == device {
+                    pending.push((path, encrypted || has));
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
 impl Owner {
     /// Creates the persistent directory and its secret under `data`, and
     /// an empty keyring, the shared page and the locator under `runtime`,
@@ -445,7 +512,26 @@ impl Owner {
         if self.has_policies()? {
             return Ok(());
         }
-        replace(&self.table.with_file_name(TABLE_NEXT), &self.table, "")
+        replace(&self.table.with_file_name(TABLE_NEXT), &self.table, "")?;
+        // Nothing in it has a policy yet, and what this build writes
+        // host-side adopts one.
+        open(&self.table.with_file_name(WHOLE), true).map(drop)
+    }
+
+    /// [`repair`]s `tree` (`/data`) unless the filesystem is known whole:
+    /// encrypted by a build whose host-side writers adopt, or repaired
+    /// before. A data directory first encrypted by an earlier build pays
+    /// the walk once. Returns what was repaired, None when skipped.
+    pub fn repair_once(&self, tree: &Path) -> io::Result<Option<Vec<PathBuf>>> {
+        let whole = self.table.with_file_name(WHOLE);
+        match fs::symlink_metadata(&whole) {
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            Err(_) => {}
+        }
+        let repaired = repair(tree)?;
+        open(&whole, true)?;
+        Ok(Some(repaired))
     }
 
     /// Records `protector` as what protects the users' CE keys of the
@@ -1122,6 +1208,92 @@ mod tests {
         assert!(super::context(&copy).unwrap().is_some());
         inherit(&plain, &copy).unwrap();
         assert_eq!(super::context(&copy).unwrap(), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Inodes an earlier build wrote below an encrypted directory without
+    /// a policy are listed, and repaired once: each takes its directory's,
+    /// a directory before what it holds; what has a policy, an unencrypted
+    /// tree and a special file are left as they are.
+    #[test]
+    fn policy_less_inodes_are_listed_and_repaired_once() {
+        let dir = crate::scratch_dir("fscrypt-repair");
+        let (runtime, data) = (dir.join("run"), dir.join("data"));
+        let volume = data.join("data");
+        fs::create_dir_all(&runtime).unwrap();
+        for path in ["system/users/0", "user/0", "plain/sub"] {
+            fs::create_dir_all(volume.join(path)).unwrap();
+        }
+        Owner::prepare(&runtime, &data).unwrap();
+        let owner = Owner::locate(&runtime).unwrap().unwrap();
+        // A data directory an earlier build encrypted: the table, no mark.
+        replace(&data.join("fscrypt").join(TABLE_NEXT), &owner.table, "").unwrap();
+        let system = [&[2u8, 1, 4, 2, 0, 0, 0, 0][..], &[7; 16], &[0; NONCE]].concat();
+        let ce = [&[2u8, 1, 4, 2, 0, 0, 0, 0][..], &[9; 16], &[0; NONCE]].concat();
+        store(&volume.join("system"), &system).unwrap();
+        store(&volume.join("user/0"), &ce).unwrap();
+        fs::write(volume.join("system/users/0/settings.xml"), b"").unwrap();
+        fs::write(volume.join("user/0/written"), b"").unwrap();
+        fs::write(volume.join("plain/sub/file"), b"").unwrap();
+        std::os::unix::fs::symlink("target", volume.join("system/link")).unwrap();
+        let adopted = volume.join("system/adopted");
+        fs::write(&adopted, b"").unwrap();
+        adopt(&adopted).unwrap();
+        let kept = super::context(&adopted).unwrap();
+        let socket = volume.join("system/socket");
+        std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let sorted = |mut paths: Vec<PathBuf>| {
+            paths.sort();
+            paths
+        };
+        let expected: Vec<PathBuf> = [
+            "system/link",
+            "system/users",
+            "system/users/0",
+            "system/users/0/settings.xml",
+            "user/0/written",
+        ]
+        .iter()
+        .map(|path| volume.join(path))
+        .collect();
+        assert_eq!(sorted(policy_less(&volume).unwrap()), expected);
+        assert_eq!(
+            sorted(owner.repair_once(&volume).unwrap().unwrap()),
+            expected
+        );
+        assert!(policy_less(&volume).unwrap().is_empty());
+        for (path, from) in [
+            ("system/users/0/settings.xml", &system),
+            ("system/link", &system),
+            ("user/0/written", &ce),
+        ] {
+            let own = super::context(&volume.join(path)).unwrap().unwrap();
+            assert_eq!(policy(&own), policy(from), "{path}");
+        }
+        assert_eq!(super::context(&adopted).unwrap(), kept);
+        assert_eq!(super::context(&socket).unwrap(), None);
+        assert_eq!(
+            super::context(&volume.join("plain/sub/file")).unwrap(),
+            None
+        );
+        // Repaired once, the filesystem is whole: later mounts skip the walk.
+        fs::write(volume.join("system/later"), b"").unwrap();
+        assert_eq!(owner.repair_once(&volume).unwrap(), None);
+        assert_eq!(policy_less(&volume).unwrap(), [volume.join("system/later")]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A filesystem this build encrypts is whole from the start.
+    #[test]
+    fn a_filesystem_encrypted_now_needs_no_repair() {
+        let dir = crate::scratch_dir("fscrypt-whole");
+        let (runtime, data) = (dir.join("run"), dir.join("data"));
+        fs::create_dir_all(&runtime).unwrap();
+        fs::create_dir_all(data.join("data")).unwrap();
+        Owner::prepare(&runtime, &data).unwrap();
+        let owner = Owner::locate(&runtime).unwrap().unwrap();
+        owner.encrypt().unwrap();
+        assert_eq!(owner.repair_once(&data.join("data")).unwrap(), None);
         fs::remove_dir_all(dir).unwrap();
     }
 }

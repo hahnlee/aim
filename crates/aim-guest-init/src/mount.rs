@@ -152,6 +152,21 @@ impl DataMount {
         }
     }
 
+    /// Gives the inodes of `/data` that an earlier build wrote below an
+    /// encrypted directory without a policy their directory's
+    /// (`fscrypt::Owner::repair_once`), once per data directory, after
+    /// `mount_all` accepted it and before anything reads them. Returns how
+    /// many it repaired and how long the walk took, None when the data
+    /// directory is known whole.
+    pub fn repair_policies(&self) -> Result<Option<(usize, Duration)>, String> {
+        let start = Instant::now();
+        let repaired = self
+            .fscrypt()?
+            .repair_once(&self.layout.data.join("data"))
+            .map_err(|e| format!("fscrypt: repairing /data: {e}"))?;
+        Ok(repaired.map(|repaired| (repaired.len(), start.elapsed())))
+    }
+
     /// Places the data template's files (`data::TEMPLATE_FILES`) in the
     /// volume once their directories exist with their policies, after
     /// `init_user0`: each moved inode takes its new directory's policy, as
@@ -295,6 +310,38 @@ mod tests {
         owner.set_policy(&misc, &policy).unwrap();
         owner.encrypt().unwrap();
         assert!(owner.locking());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A data directory an earlier build encrypted is repaired at its next
+    /// mount, once; one encrypted now is never walked.
+    #[test]
+    fn policy_less_inodes_are_repaired_once_per_data_directory() {
+        let dir = std::env::temp_dir().join(format!("aim-repair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layout = Layout::new(dir.join("image"), dir.join("data"), Some(dir.join("run")));
+        std::fs::create_dir_all(&layout.runtime).unwrap();
+        let mut mount = DataMount::start(layout, None, None, None, Instant::now()).unwrap();
+        mount.mount().unwrap();
+        let misc = dir.join("data/data/misc");
+        std::fs::create_dir(&misc).unwrap();
+        let policy = [&[2u8, 1, 4, 2, 0, 0, 0, 0][..], &[7; 16]].concat();
+        // set_policy before encrypt: a data directory without the mark.
+        mount.fscrypt().unwrap().set_policy(&misc, &policy).unwrap();
+        std::fs::create_dir(misc.join("vold")).unwrap();
+        std::fs::write(misc.join("vold/key"), "").unwrap();
+        mount.fscrypt().unwrap().encrypt().unwrap();
+        assert_eq!(mount.repair_policies().unwrap().unwrap().0, 2);
+        let key = aim_storage::fscrypt::context(&misc.join("vold/key")).unwrap();
+        assert_eq!(key.unwrap()[..24], policy[..]);
+        assert_eq!(mount.repair_policies().unwrap(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let layout = Layout::new(dir.join("image"), dir.join("data"), Some(dir.join("run")));
+        std::fs::create_dir_all(&layout.runtime).unwrap();
+        let mut mount = DataMount::start(layout, None, None, None, Instant::now()).unwrap();
+        mount.mount().unwrap();
+        mount.fscrypt().unwrap().encrypt().unwrap();
+        assert_eq!(mount.repair_policies().unwrap(), None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

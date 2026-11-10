@@ -7847,9 +7847,11 @@ impl System {
             .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?,
         );
         let claims = image.data.join("system/native-package-moves");
-        std::fs::create_dir_all(&claims).map_err(|error| {
-            Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string())
-        })?;
+        std::fs::create_dir_all(&claims)
+            .and_then(|()| aim_storage::fscrypt::adopt(&claims))
+            .map_err(|error| {
+                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string())
+            })?;
         self.initialize_native_package_runtime(
             bridge,
             package_runtime::Inputs {
