@@ -23,7 +23,8 @@
 //! that is already there raises nothing, as on Linux. The registration
 //! lasts until the last guest fd of the file known here closes (Linux
 //! removes the fasync entry at the last reference), and a fork child gets
-//! a copy of each owner, as an inotify's.
+//! a copy of each owner and registration, as an inotify's; the copies
+//! elect one process to signal each event ([`Elect`]).
 //!
 //! An evdev (its socket is the layer's transport) and a pty (Darwin's
 //! F_SETOWN of a tty sets its foreground group, and the description's
@@ -201,6 +202,71 @@ pub fn close_private(fd: i32) {
     unsafe { libc::close(fd) };
 }
 
+/// The one process that signals for an O_ASYNC registration that a fork
+/// child copied: Linux has one fasync entry per open file, here each
+/// process holding the file has a copy and is woken for the same event.
+/// The copies share a private file, and the process that holds, or now
+/// takes, an exclusive POSIX record lock on it signals; Darwin gives the
+/// lock to one process at a time and drops it when that process closes
+/// the file or exits, so another copy takes over.
+pub struct Elect(i32);
+
+impl Elect {
+    pub fn new() -> Result<Elect, Errno> {
+        let mut tmpl = std::env::temp_dir()
+            .join("linux-abi-fasync.XXXXXX")
+            .into_os_string()
+            .into_encoded_bytes();
+        tmpl.push(0);
+        // SAFETY: mkstemp fills in the template; the name goes at once.
+        let fd = unsafe { libc::mkstemp(tmpl.as_mut_ptr().cast()) };
+        if fd < 0 {
+            return Err(errno::last());
+        }
+        // SAFETY: our new file's name and descriptor.
+        unsafe {
+            libc::unlink(tmpl.as_ptr().cast());
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+        Ok(Elect(fdtab::hide(fd)))
+    }
+
+    /// Whether this process signals the event at hand.
+    pub fn won(&self) -> bool {
+        // SAFETY: an all-zero flock is valid.
+        let mut whole: libc::flock = unsafe { std::mem::zeroed() };
+        whole.l_type = libc::F_WRLCK as i16;
+        whole.l_whence = libc::SEEK_SET as i16;
+        // SAFETY: a lock request on our private file.
+        if unsafe { libc::fcntl(self.0, libc::F_SETLK, &whole) } == 0 {
+            return true;
+        }
+        let error = errno::last();
+        if error == errno::EAGAIN || error == errno::EACCES {
+            return false;
+        }
+        // Signalling twice is safer than not at all.
+        crate::diag!("O_ASYNC election: errno {error}");
+        true
+    }
+
+    /// Fork: the child shares the private file.
+    pub(super) fn save(&self, w: &mut super::fork_state::Writer) {
+        w.retain_private(self.0);
+        w.i32(self.0);
+    }
+
+    pub(super) fn load(r: &mut super::fork_state::Reader) -> Elect {
+        Elect(r.i32())
+    }
+}
+
+impl Drop for Elect {
+    fn drop(&mut self) {
+        close_private(self.0);
+    }
+}
+
 /// The owner of an open file that is kept here, shared by its dups.
 struct File {
     fown: Fown,
@@ -358,6 +424,7 @@ struct Armed {
     /// The private kqueue holding the knote.
     kq: i32,
     id: u64,
+    elect: Elect,
 }
 
 impl Arrival for File {
@@ -368,6 +435,9 @@ impl Arrival for File {
                     .iter()
                     .filter_map(|e| armed.fasync.reason(armed.held, &mut armed.space, e))
                     .collect();
+                if reasons.is_empty() || !armed.elect.won() {
+                    return;
+                }
                 (armed.fd, reasons)
             }
             None => return,
@@ -504,7 +574,7 @@ fn project(fd: i32, guest: i32, file: &Arc<File>) -> Result<(), Errno> {
         file.disarm();
         return Ok(());
     }
-    refresh(fd, guest, file)
+    refresh(fd, guest, file, None)
 }
 
 /// The status flags of host descriptor `fd`, as Darwin's F_GETFL gives
@@ -522,8 +592,8 @@ fn status(fd: i32) -> Result<i32, Errno> {
 }
 
 /// Arm or disarm file `file` (descriptor `fd`, guest fd `guest`) as its
-/// O_ASYNC flag now says.
-fn refresh(fd: i32, guest: i32, file: &Arc<File>) -> Result<(), Errno> {
+/// O_ASYNC flag now says, sharing the election `elect` of a fork parent.
+fn refresh(fd: i32, guest: i32, file: &Arc<File>, elect: Option<Elect>) -> Result<(), Errno> {
     let flags = status(fd)?;
     let fasync = match file.source.fasync {
         Some(fasync) if flags & libc::O_ASYNC != 0 => fasync,
@@ -536,6 +606,10 @@ fn refresh(fd: i32, guest: i32, file: &Arc<File>) -> Result<(), Errno> {
     if armed.is_some() {
         return Ok(());
     }
+    let elect = match elect {
+        Some(elect) => elect,
+        None => Elect::new()?,
+    };
     let held = private_kqueue(Some(fd))?;
     let kq = match private_kqueue(None) {
         Ok(kq) => kq,
@@ -583,6 +657,7 @@ fn refresh(fd: i32, guest: i32, file: &Arc<File>) -> Result<(), Errno> {
                 held,
                 kq,
                 id,
+                elect,
             });
             Ok(())
         }
@@ -602,7 +677,7 @@ pub fn status_changed(fd: i32, guest: i32) -> Result<(), Errno> {
             if file.source.fasync.is_some()
                 && file.source.darwin_owner(&file.fown.owner()).is_none() =>
         {
-            refresh(fd, guest, &file)
+            refresh(fd, guest, &file, None)
         }
         _ => Ok(()),
     }
@@ -654,12 +729,15 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
         w.seq(fds.iter(), |w, fd| w.i32(*fd));
         file.fown.save(w);
         file.source.save(w);
-        w.opt(lock(&file.armed).as_ref(), |w, armed| w.i32(armed.fd));
+        w.opt(lock(&file.armed).as_ref(), |w, armed| {
+            w.i32(armed.fd);
+            armed.elect.save(w);
+        });
     });
 }
 
 /// The registrations [`fork_restore`] read, armed by [`after_fork_child`].
-static RESTORED: Mutex<Vec<(i32, i32, Arc<File>)>> = Mutex::new(Vec::new());
+static RESTORED: Mutex<Vec<(i32, i32, Arc<File>, Elect)>> = Mutex::new(Vec::new());
 
 pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
     let groups = r.seq(|r| {
@@ -669,13 +747,13 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             source: Source::load(r),
             armed: Mutex::new(None),
         });
-        (fds, file, r.opt(|r| r.i32()))
+        (fds, file, r.opt(|r| (r.i32(), Elect::load(r))))
     });
     let mut files = lock(&FILES);
     let files = files.get_or_insert_default();
     for (fds, file, armed) in groups {
-        if let (Some(si_fd), Some(fd)) = (armed, fds.first()) {
-            lock(&RESTORED).push((*fd, si_fd, file.clone()));
+        if let (Some((si_fd, elect)), Some(fd)) = (armed, fds.first()) {
+            lock(&RESTORED).push((*fd, si_fd, file.clone(), elect));
         }
         for fd in fds {
             files.insert(fd, file.clone());
@@ -685,8 +763,8 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
 
 /// Fork child: arm each registration again on its inherited file.
 pub fn after_fork_child() -> Result<(), Errno> {
-    for (fd, si_fd, file) in std::mem::take(&mut *lock(&RESTORED)) {
-        refresh(fd, si_fd, &file)?;
+    for (fd, si_fd, file, elect) in std::mem::take(&mut *lock(&RESTORED)) {
+        refresh(fd, si_fd, &file, Some(elect))?;
     }
     Ok(())
 }
@@ -884,6 +962,8 @@ mod tests {
         let restored = std::mem::take(&mut *lock(&RESTORED));
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].1, a);
+        // The copy's election is the parent's own file here.
+        std::mem::forget(restored);
         *lock(&FILES) = saved;
 
         close(&[a]);

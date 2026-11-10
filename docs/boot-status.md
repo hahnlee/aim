@@ -130,7 +130,10 @@ or tty's POLL_OUT comes on every freeing of space, not only after a write found
 it full.
 eventfd, timerfd, signalfd, epoll, pidfd, regular files and memfds keep their
 owner in the layer and, as on Linux, never signal it; a fork child copies these
-owners (#2858, #2859, #2860). An evdev signals its owner the same way, POLL_IN
+owners (#2858, #2859, #2860). A fork child's copy of an O_ASYNC registration
+(host file or inotify) and its parent's signal each event once: the copy that
+holds a POSIX record lock on a private file they share signals, and another
+takes the lock once that process closes the file or exits (#2861). An evdev signals its owner the same way, POLL_IN
 on events and POLL_HUP when the device goes, and a pty POLL_IN on input and
 POLL_OUT on write space; a pty's O_ASYNC is its description's in the pty
 keeper, and both keep every owner in the layer (#2877). A fork child

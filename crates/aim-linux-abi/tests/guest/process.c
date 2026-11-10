@@ -775,6 +775,85 @@ static void kqueue_fd_cloexec_fork(void) {
   printf("ok kqueue_fd_cloexec_fork\n");
 }
 
+// The F_SETSIG signals `sig` naming fd `fd` with POLL_IN that arrive
+// within 300 ms of each other.
+static int fasync_signals(int sig, int fd) {
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, sig);
+  int n = 0;
+  for (;;) {
+    struct timespec t = {0, 300 * 1000 * 1000};
+    siginfo_t si;
+    if (sigtimedwait(&set, &si, &t) != sig) return n;
+    n += si.si_fd == fd && si.si_code == POLL_IN;
+  }
+}
+
+// A fork child shares an O_ASYNC socket and inotify with its parent, as
+// Linux's one open file: each event signals the owner once, and the
+// child's copy signals once the parent closed its own. The owner is not
+// the namespace's init, which takes no siginfo from another process.
+static void fasync_fork_once_owner(void) {
+  int sig = SIGRTMIN + 2;
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, sig);
+  CHECK(sigprocmask(SIG_BLOCK, &set, NULL) == 0, "block");
+  const char* dir = "/data/local/tmp/fasync-fork";
+  mkdir(dir, 0755);
+  int sv[2];
+  CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+  int ino = inotify_init1(IN_NONBLOCK);
+  CHECK(ino >= 0 && inotify_add_watch(ino, dir, IN_CREATE) >= 0, "inotify");
+  int fds[2] = {sv[0], ino};
+  for (int i = 0; i < 2; i++)
+    CHECK(fcntl(fds[i], F_SETOWN, getpid()) == 0 && fcntl(fds[i], F_SETSIG, sig) == 0 &&
+              fcntl(fds[i], F_SETFL, fcntl(fds[i], F_GETFL) | O_ASYNC) == 0,
+          "fasync %d", i);
+  int go[2];
+  CHECK(pipe(go) == 0, "pipe");
+  pid_t child = fork();
+  if (child == 0) {
+    char c;
+    close(go[1]);
+    read(go[0], &c, 1);
+    _exit(0);
+  }
+  close(go[0]);
+  usleep(200 * 1000);
+  CHECK(write(sv[1], "x", 1) == 1, "write");
+  int n = fasync_signals(sig, sv[0]);
+  CHECK(n == 1, "socket signals %d", n);
+  char path[64];
+  snprintf(path, sizeof(path), "%s/a", dir);
+  close(open(path, O_CREAT | O_WRONLY, 0644));
+  n = fasync_signals(sig, ino);
+  CHECK(n == 1, "inotify signals %d", n);
+  int s0 = sv[0];
+  close(sv[0]);
+  CHECK(write(sv[1], "y", 1) == 1, "write after close");
+  n = fasync_signals(sig, s0);
+  CHECK(n == 1, "child's copy signals %d", n);
+  write(go[1], "x", 1);
+  close(go[1]);
+  int st;
+  CHECK(waitpid(child, &st, 0) == child, "reap");
+  close(sv[1]);
+  close(ino);
+  unlink(path);
+  rmdir(dir);
+  exit(0);
+}
+
+static void fasync_fork_once(void) {
+  pid_t owner = fork();
+  if (owner == 0) fasync_fork_once_owner();
+  int st;
+  CHECK(waitpid(owner, &st, 0) == owner && WIFEXITED(st) && WEXITSTATUS(st) == 0, "owner %#x", st);
+  printf("ok fasync_fork_once\n");
+}
+
 // A forked child inherits an epoll fd with its registrations.
 static void epoll_fork(void) {
   int p[2];
@@ -2097,7 +2176,7 @@ int main(int argc, char** argv) {
       {"waitid_variants", waitid_variants},
       {"pidfd_poll", pidfd_poll},   {"epoll_fork", epoll_fork},   {"death_by_signal", death_by_signal},
       {"pidfd_dup", pidfd_dup},     {"pidfd_setfl", pidfd_setfl},
-      {"kqueue_fd_cloexec_fork", kqueue_fd_cloexec_fork},
+      {"kqueue_fd_cloexec_fork", kqueue_fd_cloexec_fork}, {"fasync_fork_once", fasync_fork_once},
       {"suspend_pending", suspend_pending}, {"vdso_sigreturn", vdso_sigreturn},
       {"fork_memory", fork_memory}, {"fork_then_exit", fork_then_exit},
       {"identity", identity},       {"identity_file", identity_file},
