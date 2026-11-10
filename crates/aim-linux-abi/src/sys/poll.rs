@@ -2186,6 +2186,14 @@ mod reportable_tests {
     /// close also readable and hung up (`SHUTDOWN_MASK`).
     #[test]
     fn an_unconnected_unix_connection_socket_is_hung_up_and_writable() {
+        // A child a test running in parallel forks holds every host
+        // socket, close-on-exec or not, until it execs or exits: the
+        // closed peer with them.
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::an_unconnected_unix_connection_socket_is_hung_up_and_writable",
+        ) {
+            return;
+        }
         let _view = crate::vfs::test_view();
         const EPOLLIN: u64 = 0x1;
         const EPOLLOUT: u64 = 0x4;
@@ -2195,8 +2203,6 @@ mod reportable_tests {
         let unconnected = POLLOUT | POLLWRNORM | POLLWRBAND | POLLHUP;
         for ty in [1u64, 5] {
             let socket = || {
-                // Close-on-exec: a process a test running in parallel
-                // spawns would otherwise hold the peer open.
                 let fd = crate::sys::net::socket([1, ty | O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0]);
                 assert!(fd >= 0, "socket {fd}");
                 fd
