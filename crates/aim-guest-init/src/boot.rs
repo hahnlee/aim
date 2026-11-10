@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use aim_android_image::system_server::{NATIVE_SERVICES, parse_native_services};
@@ -335,9 +335,6 @@ pub struct Boot {
     props: Rc<RefCell<Properties>>,
     linux_run: LinuxRun,
     events: Option<Receiver<PropertyEvent>>,
-    /// Run mode: the properties the host sets, changes of the Mac's
-    /// settings (`mac::watch`) and the app host's.
-    mac: Option<Receiver<(String, String)>>,
     _sockets: Option<PropertySockets>,
     /// Run mode: the binder host behind every service's `--binder`.
     binder: Option<Arc<Server>>,
@@ -1046,9 +1043,9 @@ impl Boot {
             unsafe { libc::getpid() }
         };
         let mut native_services = None;
-        // The properties the host sets while the guest runs: the Mac's
-        // settings (`mac::watch`) and the app host's.
-        let (host_properties, host_property_sets) = mpsc::channel();
+        // The boot loop's events: property service requests, children's
+        // exits and the properties the host sets while the guest runs.
+        let (event_sender, event_receiver) = mpsc::channel();
         if let Some(server) = &binder {
             share_areas(&properties, server);
             if let Some(file) = &options.binder_trace {
@@ -1066,7 +1063,7 @@ impl Boot {
                 let properties_dir = layout.properties_dir();
                 let wait_dir = properties_dir.clone();
                 let socket_dir = layout.socket_dir();
-                let sets = std::sync::Mutex::new(host_properties.clone());
+                let sets = std::sync::Mutex::new(event_sender.clone());
                 services
                     .configure_app_host(
                         image.root(),
@@ -1082,7 +1079,7 @@ impl Boot {
                             drop(
                                 sets.lock()
                                     .unwrap()
-                                    .send((name.to_string(), value.to_string())),
+                                    .send(PropertyEvent::Host(name.to_string(), value.to_string())),
                             )
                         }),
                         Box::new(move || {
@@ -1222,16 +1219,12 @@ impl Boot {
         executor.data = Some(data_mount.clone());
         executor.sync_services(manager.services());
 
-        let mac = (options.mode == RunMode::Run).then(|| {
-            crate::mac::watch(host_properties, tzdata, mac);
-            host_property_sets
-        });
         let (events, sockets) = if options.mode == RunMode::Run {
-            let (sender, receiver) = mpsc::channel();
-            watch_children(sender.clone()).map_err(|e| format!("SIGCHLD watcher: {e}"))?;
-            let sockets = PropertySockets::start(&layout.socket_dir(), sender)
+            crate::mac::watch(event_sender.clone(), tzdata, mac);
+            watch_children(event_sender.clone()).map_err(|e| format!("SIGCHLD watcher: {e}"))?;
+            let sockets = PropertySockets::start(&layout.socket_dir(), event_sender)
                 .map_err(|e| format!("property service sockets: {e}"))?;
-            (Some(receiver), Some(sockets))
+            (Some(event_receiver), Some(sockets))
         } else {
             (None, None)
         };
@@ -1246,7 +1239,6 @@ impl Boot {
             props,
             linux_run,
             events,
-            mac,
             _sockets: sockets,
             binder,
             native_services,
@@ -1464,6 +1456,16 @@ impl Boot {
 
     /// Sets a property for the host, as init sets one, and runs its
     /// triggers.
+    /// One event of the boot loop's: a child's exit is reaped by the
+    /// loop's next process poll.
+    fn handle_event(&mut self, event: PropertyEvent) {
+        match event {
+            PropertyEvent::Set(request) => self.handle_set_request(request),
+            PropertyEvent::Host(name, value) => self.set_host_property(&name, &value),
+            PropertyEvent::ChildExited => {}
+        }
+    }
+
     fn set_host_property(&mut self, name: &str, value: &str) {
         if let Err(error) = self.executor.set_host_property(name, value) {
             self.report.log.push(format!("{name}={value}: {error}"));
@@ -1532,8 +1534,10 @@ impl Boot {
                 self.report.log.push("stop requested".to_string());
                 break;
             }
-            while let Some((name, value)) = self.mac.as_ref().and_then(|m| m.try_recv().ok()) {
-                self.set_host_property(&name, &value);
+            // As init's main loop polls its epoll between commands: what
+            // came in while a command ran is handled before the next.
+            while let Some(event) = self.events.as_ref().and_then(|r| r.try_recv().ok()) {
+                self.handle_event(event);
             }
             self.pump_outbox();
             let next_process_action = self.executor.poll_processes();
@@ -1650,11 +1654,8 @@ impl Boot {
                 timeout = timeout.min(next.saturating_duration_since(Instant::now()));
             }
             if let Some(receiver) = &self.events {
-                match receiver.recv_timeout(timeout) {
-                    Ok(PropertyEvent::Set(request)) => self.handle_set_request(request),
-                    Ok(PropertyEvent::ChildExited)
-                    | Err(RecvTimeoutError::Timeout)
-                    | Err(RecvTimeoutError::Disconnected) => {}
+                if let Ok(event) = receiver.recv_timeout(timeout) {
+                    self.handle_event(event);
                 }
             } else {
                 std::thread::sleep(timeout);
@@ -1741,12 +1742,11 @@ impl Boot {
             }
             let wait = left.min(Duration::from_millis(50));
             match &self.events {
-                Some(receiver) => match receiver.recv_timeout(wait) {
-                    Ok(PropertyEvent::Set(request)) => self.handle_set_request(request),
-                    Ok(PropertyEvent::ChildExited)
-                    | Err(RecvTimeoutError::Timeout)
-                    | Err(RecvTimeoutError::Disconnected) => {}
-                },
+                Some(receiver) => {
+                    if let Ok(event) = receiver.recv_timeout(wait) {
+                        self.handle_event(event);
+                    }
+                }
                 None => std::thread::sleep(wait),
             }
         }
@@ -1820,7 +1820,11 @@ impl Boot {
                 self.handle_set_request(request);
                 true
             }
-            Ok(PropertyEvent::ChildExited) | Err(_) => false,
+            Ok(event) => {
+                self.handle_event(event);
+                false
+            }
+            Err(_) => false,
         }
     }
 

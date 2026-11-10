@@ -49,10 +49,14 @@ impl SetRequest {
     }
 }
 
-/// Events the socket threads and the child watcher send to the boot loop.
+/// Events the socket threads, the child watcher and the host send to the
+/// boot loop.
 #[derive(Debug)]
 pub enum PropertyEvent {
     Set(SetRequest),
+    /// A property the host sets: the Mac's settings (`mac::watch`) and the
+    /// app host's.
+    Host(String, String),
     /// SIGCHLD: a child may have exited; the loop reaps it.
     ChildExited,
 }

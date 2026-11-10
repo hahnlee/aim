@@ -9,6 +9,8 @@
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::mpsc::Sender;
 
+use crate::propsvc::PropertyEvent;
+
 /// An IANA zone name in the image's tzdata.
 pub const TIME_ZONE_PROP: &str = "vendor.aim.mac.time_zone";
 /// The first of the Mac's languages as the device names it
@@ -93,11 +95,7 @@ pub fn properties(tzdata: &[u8]) -> Vec<(&'static str, String)> {
 /// from `initial`, checking every [`POLL`]: a `readlink` and a preferences
 /// read, with no run loop for the Mac's change notifications in
 /// guest-init.
-pub fn watch(
-    events: Sender<(String, String)>,
-    tzdata: Vec<u8>,
-    initial: Vec<(&'static str, String)>,
-) {
+pub fn watch(events: Sender<PropertyEvent>, tzdata: Vec<u8>, initial: Vec<(&'static str, String)>) {
     std::thread::Builder::new()
         .name("mac-settings".into())
         .spawn(move || {
@@ -111,7 +109,9 @@ pub fn watch(
                     // the Mac's changes (`aim_services::locale`).
                     if *name != LOCALE_PROP
                         && !last.iter().any(|(n, v)| n == name && v == value)
-                        && events.send((name.to_string(), value.clone())).is_err()
+                        && events
+                            .send(PropertyEvent::Host(name.to_string(), value.clone()))
+                            .is_err()
                     {
                         return;
                     }
