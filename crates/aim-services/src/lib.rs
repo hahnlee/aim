@@ -295,10 +295,14 @@ impl NativeServices {
         set_property: app_host::SetProperty,
         connect: app_host::Connect,
         display: Option<&std::path::Path>,
+        ce_keychain: Option<&std::path::Path>,
     ) -> Result<(), String> {
         let Some(host) = &self.app_host else {
             return Ok(());
         };
+        if let Some(keychain) = ce_keychain {
+            host.keep_ce_secrets_in(keychain);
+        }
         host.configure(
             root,
             data,

@@ -2,7 +2,8 @@
 //! [--only svc1,svc2] [--exclude svc1,svc2] [--runtime DIR] [--linux-run PATH]
 //! [--gpu DIR] [--vulkan DIR] [--display SOCKET] [--trace]
 //! [--binder-trace FILE [--binder-capture DESCRIPTOR#CODE,...]]
-//! [--binder-shadow SERVICES --binder-shadow-log FILE] [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet] [--userdata DIR] [--package-constructor-capture DIR]`
+//! [--binder-shadow SERVICES --binder-shadow-log FILE] [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet] [--userdata DIR] [--package-constructor-capture DIR]
+//! [--ce-keychain FILE]`
 //!
 //! Development entry point for aimd's init role. With `--run`, the data
 //! directory's persistent content lives in a case-sensitive disk image
@@ -14,6 +15,9 @@
 //! (`sys.powerctl` `reboot,...`) boots again in the same process.
 //! `--package-constructor-capture` captures the initial construction only;
 //! automatic reboots consume the option and preserve its immutable output.
+//! `--ce-keychain` keeps the users' CE secrets in that keychain file, made
+//! if missing, instead of the Mac user's keychain: a throwaway data
+//! directory's (`aim_storage::data::keychain_of`, ADR 0016).
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -31,6 +35,7 @@ fn usage() -> ! {
          \x20                 [--linux-run PATH] [--gpu DIR] [--vulkan DIR] [--display SOCKET] [--trace]\n\
          \x20                 [--binder-trace FILE [--binder-capture DESCRIPTOR#CODE,...]] [--binder-shadow a,b --binder-shadow-log FILE]\n\
          \x20                 [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet] [--userdata DIR] [--package-constructor-capture DIR]\n\
+         \x20                 [--ce-keychain FILE]\n\
          \x20 --package-constructor-capture DIR captures the initial construction once; automatic reboots preserve the output and omit this option."
     );
     std::process::exit(2);
@@ -88,6 +93,7 @@ fn main() {
     let mut androidboot = Vec::new();
     let mut quiet = false;
     let mut userdata = None;
+    let mut ce_keychain = None;
     let mut package_constructor_capture = None;
     while let Some(arg) = args.next() {
         let option_index = argument_count - args.len() - 1;
@@ -140,6 +146,7 @@ fn main() {
             "--binder-shadow-log" => binder_shadow_log = Some(PathBuf::from(value())),
             "--quiet" => quiet = true,
             "--userdata" => userdata = Some(PathBuf::from(value())),
+            "--ce-keychain" => ce_keychain = Some(PathBuf::from(value())),
             "--package-constructor-capture" => {
                 package_constructor_capture = Some(PathBuf::from(value()));
                 capture_arguments.push(option_index);
@@ -182,6 +189,7 @@ fn main() {
     };
     options.timeout = timeout;
     options.userdata = userdata;
+    options.ce_keychain = ce_keychain;
     options.merge_androidboot(androidboot);
     let mut boot = match Boot::prepare(options) {
         Ok(boot) => boot,

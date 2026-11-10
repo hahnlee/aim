@@ -11,8 +11,15 @@
 //! instead is bound to its maker's code (its partition list): another
 //! ad-hoc build reading it blocks on a prompt. No call shows a prompt: a
 //! locked keychain fails the read (`errAuthorizationInternal`).
+//!
+//! A throwaway data directory (a test's, the build's) keeps its items in a
+//! keychain file of its own instead ([`Keychain::file`]), out of the
+//! user's search list and removed with the directory, so that nothing of
+//! it reaches the user's keychain.
 
-use std::ffi::c_void;
+use std::ffi::{CString, c_char, c_void};
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
 use zeroize::Zeroizing;
 
@@ -43,6 +50,9 @@ aim_hostcall::dylib! {
         ) -> CFTypeRef;
         fn CFArrayGetCount(array: CFTypeRef) -> isize;
         fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
+        fn CFArrayCreateMutable(alloc: CFTypeRef, capacity: isize, callbacks: *const c_void) -> CFTypeRef;
+        fn CFArrayAppendValue(array: CFTypeRef, value: CFTypeRef);
+        fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> bool;
         fn CFDictionaryCreateMutable(
             alloc: CFTypeRef,
             capacity: isize,
@@ -80,14 +90,37 @@ aim_hostcall::dylib! {
             description: CFTypeRef,
             prompt: u16,
         ) -> i32;
+        fn SecKeychainOpen(path: *const c_char, keychain: *mut CFTypeRef) -> i32;
+        fn SecKeychainCreate(
+            path: *const c_char,
+            password_len: u32,
+            password: *const c_void,
+            prompt: bool,
+            access: CFTypeRef,
+            keychain: *mut CFTypeRef,
+        ) -> i32;
+        fn SecKeychainUnlock(
+            keychain: CFTypeRef,
+            password_len: u32,
+            password: *const c_void,
+            use_password: bool,
+        ) -> i32;
+        fn SecKeychainCopyDomainSearchList(domain: i32, list: *mut CFTypeRef) -> i32;
+        fn SecKeychainSetDomainSearchList(domain: i32, list: CFTypeRef) -> i32;
     }
 }
 
 /// `kCFStringEncodingUTF8`.
 const UTF8: u32 = 0x0800_0100;
-/// `errSecItemNotFound`, `errSecAllocate`.
+/// `errSecItemNotFound`, `errSecAllocate`, `errSecParam`.
 pub const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 const ERR_SEC_ALLOCATE: i32 = -108;
+const ERR_SEC_PARAM: i32 = -50;
+/// `kSecPreferencesDomainUser`.
+const DOMAIN_USER: i32 = 0;
+/// The password of a keychain file: it guards nothing from the user, who
+/// can read the data image it belongs to anyway.
+const FILE_PASSWORD: &[u8] = b"aim";
 
 /// An owned (+1) CoreFoundation reference, never NULL.
 struct Owned(CFTypeRef);
@@ -154,6 +187,38 @@ impl Keychain {
     /// The Mac user's default keychain.
     pub fn user() -> Self {
         Keychain(None)
+    }
+
+    /// The keychain file `path`, made if there is none, never in the
+    /// user's search list, and unlocked.
+    pub fn file(path: &Path) -> Result<Self, i32> {
+        let name = CString::new(path.as_os_str().as_bytes()).map_err(|_| ERR_SEC_PARAM)?;
+        let (password, len) = (FILE_PASSWORD.as_ptr().cast(), FILE_PASSWORD.len() as u32);
+        let created = !path.exists();
+        let mut keychain = std::ptr::null();
+        // SAFETY: a NUL-terminated path, the password's bytes; the keychain
+        // made or opened is released as an Owned.
+        let keychain = unsafe {
+            check(if created {
+                SecKeychainCreate(
+                    name.as_ptr(),
+                    len,
+                    password,
+                    false,
+                    std::ptr::null(),
+                    &mut keychain,
+                )
+            } else {
+                SecKeychainOpen(name.as_ptr(), &mut keychain)
+            })?;
+            Owned::new(keychain)?
+        };
+        if created {
+            unlist(keychain.0)?;
+        }
+        // SAFETY: the keychain and the password's bytes.
+        check(unsafe { SecKeychainUnlock(keychain.0, len, password, true) })?;
+        Ok(Keychain(Some(keychain)))
     }
 
     /// The item of `service` and `account`, without its data.
@@ -250,99 +315,60 @@ impl Keychain {
     }
 }
 
+/// Takes `keychain` out of the user's keychain search list, if creating
+/// it put it there.
+fn unlist(keychain: CFTypeRef) -> Result<(), i32> {
+    // SAFETY: the copied list and the filtered one are released as Owned;
+    // the list holds SecKeychainRefs.
+    unsafe {
+        let mut list = std::ptr::null();
+        check(SecKeychainCopyDomainSearchList(DOMAIN_USER, &mut list))?;
+        let list = Owned::new(list)?;
+        let kept = Owned::new(CFArrayCreateMutable(
+            std::ptr::null(),
+            0,
+            kCFTypeArrayCallBacks().cast(),
+        ))?;
+        let count = CFArrayGetCount(list.0);
+        for i in 0..count {
+            let entry = CFArrayGetValueAtIndex(list.0, i);
+            if !CFEqual(entry, keychain) {
+                CFArrayAppendValue(kept.0, entry);
+            }
+        }
+        if CFArrayGetCount(kept.0) != count {
+            check(SecKeychainSetDomainSearchList(DOMAIN_USER, kept.0))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::{CString, c_char};
-    use std::os::unix::ffi::OsStrExt;
 
     aim_hostcall::dylib! {
         static TEST_SECURITY = c"/System/Library/Frameworks/Security.framework/Security" {
-            fn SecKeychainCreate(
-                path: *const c_char,
-                password_len: u32,
-                password: *const c_void,
-                prompt: bool,
-                access: CFTypeRef,
-                keychain: *mut CFTypeRef,
-            ) -> i32;
             fn SecKeychainDelete(keychain: CFTypeRef) -> i32;
             fn SecKeychainLock(keychain: CFTypeRef) -> i32;
-            fn SecKeychainCopyDomainSearchList(domain: i32, list: *mut CFTypeRef) -> i32;
-            fn SecKeychainSetDomainSearchList(domain: i32, list: CFTypeRef) -> i32;
             fn SecItemDelete(query: CFTypeRef) -> i32;
         }
     }
 
-    aim_hostcall::dylib! {
-        static TEST_CORE_FOUNDATION = c"/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation" {
-            fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> bool;
-            fn CFArrayCreateMutable(alloc: CFTypeRef, capacity: isize, callbacks: *const c_void) -> CFTypeRef;
-            fn CFArrayAppendValue(array: CFTypeRef, value: CFTypeRef);
-        }
-    }
-
-    /// `kSecPreferencesDomainUser`, `errAuthorizationInternal`,
-    /// `errSecDuplicateItem`.
-    const DOMAIN_USER: i32 = 0;
+    /// `errAuthorizationInternal`, `errSecDuplicateItem`.
     const ERR_AUTHORIZATION_INTERNAL: i32 = -60008;
     const ERR_SEC_DUPLICATE_ITEM: i32 = -25299;
 
-    /// Takes `keychain` out of the user's keychain search list, if
-    /// creating it put it there.
-    fn unlist(keychain: CFTypeRef) {
-        // SAFETY: the copied list and the filtered one are released as
-        // Owned; the list holds SecKeychainRefs.
-        unsafe {
-            let mut list = std::ptr::null();
-            assert_eq!(SecKeychainCopyDomainSearchList(DOMAIN_USER, &mut list), 0);
-            let list = Owned::new(list).unwrap();
-            let kept = Owned::new(CFArrayCreateMutable(
-                std::ptr::null(),
-                0,
-                kCFTypeArrayCallBacks().cast(),
-            ))
-            .unwrap();
-            let count = CFArrayGetCount(list.0);
-            for i in 0..count {
-                let entry = CFArrayGetValueAtIndex(list.0, i);
-                if !CFEqual(entry, keychain) {
-                    CFArrayAppendValue(kept.0, entry);
-                }
-            }
-            if CFArrayGetCount(kept.0) != count {
-                assert_eq!(SecKeychainSetDomainSearchList(DOMAIN_USER, kept.0), 0);
-            }
-        }
-    }
-
-    /// A keychain of its own in a temporary directory, never in the
-    /// user's search list, deleted with the test however it ends: never
-    /// the user's.
+    /// A keychain file in a temporary directory, deleted with the test
+    /// however it ends: never the user's.
     struct Throwaway(Keychain, std::path::PathBuf);
 
     impl Throwaway {
         fn new() -> Self {
             let dir = std::env::temp_dir().join(format!("aim-keychain-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
-            let path = CString::new(dir.join("test.keychain").as_os_str().as_bytes()).unwrap();
-            let password = b"aim";
-            let mut keychain = std::ptr::null();
-            // SAFETY: a NUL-terminated path, the password's bytes.
-            let status = unsafe {
-                SecKeychainCreate(
-                    path.as_ptr(),
-                    password.len() as u32,
-                    password.as_ptr().cast(),
-                    false,
-                    std::ptr::null(),
-                    &mut keychain,
-                )
-            };
-            assert_eq!(status, 0);
-            let throwaway = Throwaway(Keychain(Some(Owned::new(keychain).unwrap())), dir);
-            unlist(keychain);
-            throwaway
+            let keychain = Keychain::file(&dir.join("test.keychain")).unwrap();
+            Throwaway(keychain, dir)
         }
 
         fn keychain(&self) -> CFTypeRef {
@@ -393,5 +419,12 @@ mod tests {
         // SAFETY: the throwaway keychain.
         assert_eq!(unsafe { SecKeychainLock(keychain.keychain()) }, 0);
         assert_eq!(read(SERVICE, "user 0"), Err(ERR_AUTHORIZATION_INTERNAL));
+        // Opened again, as the next boot of its data directory opens it:
+        // unlocked, with the item kept.
+        let again = Keychain::file(&keychain.1.join("test.keychain")).unwrap();
+        assert_eq!(
+            again.read(SERVICE, "user 0").map(|d| d.map(|d| d.to_vec())),
+            Ok(Some(vec![9; 32]))
+        );
     }
 }

@@ -236,6 +236,15 @@ fn guest_init_args(
     if let Some(services) = selected.app_host_services()? {
         args.extend(["--only".into(), services.join(",").into()]);
     }
+    // A data directory other than the user's own is a throwaway one (a
+    // test's): its CE secrets stay in a keychain file beside it, which
+    // goes with it, never in the user's keychain (ADR 0016).
+    if !files.is_default() {
+        args.extend([
+            "--ce-keychain".into(),
+            aim_storage::data::keychain_of(&files.data).into(),
+        ]);
+    }
     Ok(args)
 }
 
@@ -872,6 +881,8 @@ mod tests {
         assert!(args.contains(&"--run"));
         assert!(!args.contains(&"--binder-trace"));
         assert!(!args.contains(&"--androidboot"));
+        // Not the user's own data directory: a throwaway keychain file.
+        assert_eq!(after("--ce-keychain"), "/d.keychain");
         let shims = shims_args(&files, false, &crate::inputs::Inputs::default());
         let shims = strings(&shims);
         assert_eq!(

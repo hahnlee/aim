@@ -189,7 +189,13 @@ turns FBE on and depends on slice 4's CE protection: it lands after it.
    item missing) is logged and the user stays locked (Direct Boot): the
    app host's boot stops after `LOCKED_BOOT_COMPLETED` instead of failing.
    Every user is unsecured to LockSettings here: the Mac's session is the
-   credential. With slice 3 the FBE branches of the ported
+   credential. A throwaway data directory (a test's, the build's: any but
+   aimctl's default, or one booted with `guest-init --ce-keychain`) keeps
+   its secrets in a keychain file of its own beside it
+   (`aim_storage::data::keychain_of`, `<data>.keychain`, out of the
+   user's search list), which `data::remove` removes with it, so nothing
+   of it reaches the user's login keychain (#2882). With slice 3 the FBE
+   branches of the ported
    `fixAppsDataOnBoot` and `UserDataPreparer` then run as on a device;
    remaining: measure 3 fresh and 3 warm
    boots against main (boot-measurement discipline) and run CTS
@@ -219,7 +225,8 @@ turns FBE on and depends on slice 4's CE protection: it lands after it.
   opens it only with the item's secret: a data directory moved to another
   Mac user or Mac, or whose item was deleted, keeps its CE data locked
   (the unlock fails), as a device whose synthetic password is lost does.
-  Deleting a data directory leaves its item in the keychain.
+  Deleting the user's own data directory by hand leaves its item in the
+  keychain; a throwaway one's keychain file goes with it.
 - `secdiscard` cannot securely erase on a `/data` backed by APFS: its F2FS
   and block-discard ioctls do not exist there, so it falls back to
   overwriting, which a copy-on-write filesystem and SSD remapping do not

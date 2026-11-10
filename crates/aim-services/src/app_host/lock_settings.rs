@@ -122,18 +122,30 @@ pub(super) trait CeSecrets: Send + Sync {
     fn create(&self, account: &str, secret: &[u8]) -> Result<(), String>;
 }
 
-/// The Mac user's keychain: available while the Mac user's session is.
-struct MacKeychain;
+/// The Mac user's keychain, available while the Mac user's session is, or
+/// the keychain file of a throwaway data directory.
+struct MacKeychain(Option<std::path::PathBuf>);
+
+impl MacKeychain {
+    fn keychain(&self, account: &str) -> Result<aim_host_lock::keychain::Keychain, String> {
+        match &self.0 {
+            None => Ok(aim_host_lock::keychain::Keychain::user()),
+            Some(path) => aim_host_lock::keychain::Keychain::file(path).map_err(|status| {
+                format!("keychain {}: {account}: OSStatus {status}", path.display())
+            }),
+        }
+    }
+}
 
 impl CeSecrets for MacKeychain {
     fn read(&self, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
-        aim_host_lock::keychain::Keychain::user()
+        self.keychain(account)?
             .read(CE_SECRET_SERVICE, account)
             .map_err(|status| format!("keychain: {CE_SECRET_SERVICE} {account}: OSStatus {status}"))
     }
 
     fn create(&self, account: &str, secret: &[u8]) -> Result<(), String> {
-        aim_host_lock::keychain::Keychain::user()
+        self.keychain(account)?
             .add(
                 CE_SECRET_SERVICE,
                 account,
@@ -637,11 +649,17 @@ impl AppHost {
 
     fn ce_secrets(&self) -> &dyn CeSecrets {
         self.ce_secrets
-            .get_or_init(|| Box::new(MacKeychain))
+            .get_or_init(|| Box::new(MacKeychain(None)))
             .as_ref()
     }
 
-    #[cfg(test)]
+    /// Keeps the users' CE secrets in the keychain file `path`, a
+    /// throwaway data directory's, instead of the Mac user's keychain.
+    pub fn keep_ce_secrets_in(&self, path: &std::path::Path) {
+        self.set_ce_secrets(Box::new(MacKeychain(Some(path.to_path_buf()))));
+    }
+
+    /// Keeps the users' CE secrets in `secrets`, before any is read.
     pub(super) fn set_ce_secrets(&self, secrets: Box<dyn CeSecrets>) {
         assert!(self.ce_secrets.set(secrets).is_ok());
     }

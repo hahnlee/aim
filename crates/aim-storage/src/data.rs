@@ -77,6 +77,15 @@ pub fn runtime_of(dir: &Path) -> PathBuf {
     dir.with_file_name(name)
 }
 
+/// The keychain file of a throwaway data directory `dir` (a test's, the
+/// build's), beside it: its users' CE secrets go with it instead of
+/// staying in the Mac user's keychain (ADR 0016).
+pub fn keychain_of(dir: &Path) -> PathBuf {
+    let mut name = dir.file_name().unwrap_or_default().to_os_string();
+    name.push(".keychain");
+    dir.with_file_name(name)
+}
+
 fn lock_of(dir: &Path) -> PathBuf {
     let mut name = dir.file_name().unwrap_or_default().to_os_string();
     name.push(".lock");
@@ -488,8 +497,9 @@ fn repair(image: &Path) -> Result<(), String> {
     result
 }
 
-/// Removes the data directory `dir`, its image and its runtime directory,
-/// detaching the image first. Nothing of it may be in use.
+/// Removes the data directory `dir`, its image, its runtime directory and
+/// its keychain file, detaching the image first. Nothing of it may be in
+/// use.
 pub fn remove(dir: &Path) -> Result<(), String> {
     let dir = mount_point(dir)?;
     let _lock = lock(&dir)?;
@@ -508,6 +518,12 @@ pub fn remove(dir: &Path) -> Result<(), String> {
     }
     let _ = fs::remove_file(lock_of(&dir));
     let _ = fs::remove_dir_all(runtime_of(&dir));
+    match fs::remove_file(keychain_of(&dir)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("{}: {e}", keychain_of(&dir).display()));
+        }
+        _ => {}
+    }
     // Empty once detached; a plain directory from before data images
     // holds the data itself.
     match fs::remove_dir_all(&dir) {
