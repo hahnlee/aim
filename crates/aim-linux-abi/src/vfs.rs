@@ -2879,17 +2879,18 @@ impl Resolved {
     }
 }
 
-/// Symlink answers for the read-only image (target, or None for anything
-/// else), which never change: resolving walks every component, and the
-/// image's paths are the most walked.
-static IMAGE_LINKS: Mutex<Option<HashMap<PathBuf, Option<PathBuf>>>> = Mutex::new(None);
+/// [`link_target`]'s answers for the read-only image (a symlink's target,
+/// else the lstat of what is there), which never change: resolving walks
+/// every component, and the image's paths are the most walked.
+type ImageNode = (Option<PathBuf>, Option<libc::stat>);
+static IMAGE_LINKS: Mutex<Option<HashMap<PathBuf, ImageNode>>> = Mutex::new(None);
 const IMAGE_LINKS_MAX: usize = 1 << 14;
 
 /// The target of `host` if it is a symlink, else (where an lstat found it)
 /// its stat: a walk's check of the directory it is then needs no stat of
 /// its own.
-fn link_target(host: PathBuf, area: Area) -> (Option<PathBuf>, Option<libc::stat>) {
-    if area != Area::Image || !vfs().mapped {
+fn link_target(host: PathBuf, area: Area) -> ImageNode {
+    let node = |host: &PathBuf| {
         let Ok(name) = host_cstring(host.clone()) else {
             return (None, None);
         };
@@ -2900,7 +2901,10 @@ fn link_target(host: PathBuf, area: Area) -> (Option<PathBuf>, Option<libc::stat
         if stat.st_mode & libc::S_IFMT != libc::S_IFLNK {
             return (None, Some(stat));
         }
-        return (std::fs::read_link(&host).ok(), None);
+        (std::fs::read_link(host).ok(), None)
+    };
+    if area != Area::Image || !vfs().mapped {
+        return node(&host);
     }
     if let Some(known) = IMAGE_LINKS
         .lock()
@@ -2908,16 +2912,16 @@ fn link_target(host: PathBuf, area: Area) -> (Option<PathBuf>, Option<libc::stat
         .as_ref()
         .and_then(|m| m.get(&host))
     {
-        return (known.clone(), None);
+        return known.clone();
     }
-    let target = std::fs::read_link(&host).ok();
+    let known = node(&host);
     let mut links = IMAGE_LINKS.lock().unwrap();
     let map = links.get_or_insert_with(HashMap::new);
     if map.len() >= IMAGE_LINKS_MAX {
         map.clear();
     }
-    map.insert(host, target.clone());
-    (target, None)
+    map.insert(host, known.clone());
+    known
 }
 
 /// Resolve a guest path relative to a Linux dirfd into a host path.
@@ -3083,8 +3087,14 @@ fn resolve_inner(
     }
     let mut links = 0;
     let mut fuse_walk = None;
-    // The host lstat of the walk's last component, where one was taken.
-    let mut known = None;
+    // The host lstat of the walk's last component, where one was taken;
+    // for a checked walk's start, its directory's (on the image, kept).
+    let mut known = if relative_base {
+        let (host, area) = lookup(&done.host_path());
+        link_target(host, area).1
+    } else {
+        None
+    };
     while let Some(c) = pending.pop() {
         // The checks stat the directory by its host names.
         check(&done.host_path(), known.as_ref())?;
@@ -3265,6 +3275,43 @@ mod tests {
         drop(mounts);
         assert_eq!(super::lookup("/visibility/file").0, second.join("file"));
     }
+    /// A walk through the image hands its checks the image's lstat it
+    /// keeps with the image's symlink answers, the first time and after.
+    #[test]
+    fn checks_get_the_images_kept_lstat() {
+        use std::os::unix::fs::MetadataExt;
+        let (_view, dir) = super::test_view();
+        let image = dir.join("root/walk-image");
+        std::fs::create_dir_all(image.join("sub")).unwrap();
+        for _ in 0..2 {
+            let mut seen = Vec::new();
+            super::resolve_checked(
+                super::LINUX_AT_FDCWD,
+                b"/walk-image/sub/file",
+                false,
+                |directory, known| {
+                    if let Some(known) = known {
+                        let host =
+                            std::fs::metadata(dir.join("root").join(&directory[1..])).unwrap();
+                        assert_eq!(known.st_ino, host.ino());
+                    }
+                    seen.push((directory.to_owned(), known.is_some()));
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                seen,
+                [
+                    ("/", true),
+                    ("/walk-image", true),
+                    ("/walk-image/sub", true)
+                ]
+                .map(|(directory, known)| (directory.to_string(), known))
+            );
+        }
+    }
+
     /// A walk hands each directory's check the lstat it took of that
     /// directory as a component, and none after a symlink or `..`.
     #[test]
@@ -3281,7 +3328,9 @@ mod tests {
             b"/data/walk-known/link/b/../b/file",
             false,
             |directory, known| {
-                if let Some(known) = known {
+                if let Some(known) = known
+                    && directory != "/"
+                {
                     let host = std::fs::metadata(root.join(&directory[1..])).unwrap();
                     assert_eq!(
                         (known.st_dev as u64, known.st_ino),
@@ -3294,7 +3343,7 @@ mod tests {
         )
         .unwrap();
         let expected = [
-            ("/", false),
+            ("/", true),
             ("/data", true),
             ("/data/walk-known", true),
             ("/data/walk-known", false),
