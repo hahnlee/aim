@@ -575,6 +575,9 @@ struct Mapping {
     logical_protection: i32,
     shared: bool,
     source: Arc<Source>,
+    /// The source's identity, fixed for its open file: taken once, since
+    /// every mapping change rereads all of them.
+    identity: Identity,
     retired: AtomicBool,
     failed: AtomicBool,
     pending: AtomicBool,
@@ -632,17 +635,12 @@ pub fn publish_membership(
     Ok(())
 }
 pub fn tracked_identities() -> io::Result<std::collections::BTreeSet<[u8; 36]>> {
-    MAPPINGS
+    Ok(MAPPINGS
         .lock()
         .unwrap()
         .iter()
-        .map(|registration| {
-            unsafe { &*registration.mapping }
-                .source
-                .identity()
-                .map(|identity| identity.to_bytes())
-        })
-        .collect()
+        .map(|registration| unsafe { &*registration.mapping }.identity.to_bytes())
+        .collect())
 }
 /// Restored VM owners join with the child's real coordinator process epoch
 /// before the fork owner sends its ready acknowledgement.
@@ -1245,6 +1243,7 @@ impl PreparedMapsGuard {
                         .last()
                         .map_or(libc::PROT_READ, |page| page.protection),
                     shared: record.old.shared,
+                    identity: source.identity()?,
                     source,
                     retired: AtomicBool::new(false),
                     failed: AtomicBool::new(false),
@@ -1962,6 +1961,7 @@ fn register_inner(
         .iter()
         .position(|slot| slot.mapping.load(Ordering::Acquire).is_null())
         .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOMEM))?;
+    let identity = source.identity()?;
     let mapping = Box::into_raw(Box::new(Mapping {
         generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
         base,
@@ -1970,6 +1970,7 @@ fn register_inner(
         logical_protection: protection,
         shared,
         source,
+        identity,
         retired: AtomicBool::new(false),
         failed: AtomicBool::new(false),
         pending: AtomicBool::new(false),
