@@ -192,8 +192,11 @@ fn pipe_queued(fd: i32) -> i32 {
 /// them. A read end is readable only with data queued, where Darwin's is
 /// also once its writers are gone. A write end whose readers are gone,
 /// which Darwin reports as hung up and, when asked, readable, is POLLERR
-/// and writable alone: Darwin frees the pipe's buffer with its last reader
-/// (Linux keeps it, so a full one is not writable).
+/// and writable alone. Linux keeps the buffer, so a full one is not
+/// writable; Darwin frees it with its last reader, and that reader's
+/// description, which may close in any process sharing it, exit and
+/// SIGKILL included, was the only record of the count: the write end's
+/// `st_size`, FIONREAD and EVFILT_WRITE data are all 0 afterwards (#2815).
 fn pipe_revents(end: PipeEnd, fd: i32, revents: i16) -> i16 {
     match end {
         PipeEnd::Read if pipe_queued(fd) == 0 => revents & !(POLLIN | POLLRDNORM),
@@ -2271,11 +2274,13 @@ mod reportable_tests {
         }
         close(&[fd]);
         // Darwin frees the pipe's buffer with its last reader, so a full
-        // pipe's writer reports room too, where Linux keeps the data.
+        // pipe's writer reports room too, where Linux's is POLLERR alone
+        // (#2815).
         let fd = widowed_end(1, true);
-        assert_eq!(polled(fd, POLLOUT).1 & (POLLERR | POLLHUP), POLLERR);
+        assert_eq!(polled(fd, POLLOUT), (1, POLLOUT | POLLERR));
+        assert_eq!(selected(fd), (2, true, true));
         let level = watching(fd, 0x4);
-        assert_eq!(waited(level, 0).1 & (EPOLLERR | 0x10), EPOLLERR);
+        assert_eq!(waited(level, 0), (1, EPOLLOUT | EPOLLERR));
         close(&[level, fd]);
     }
 
