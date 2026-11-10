@@ -175,7 +175,9 @@ itself (`OP_WINDOWS`, from guest-init) and, in window mode:
 - **Opens a task** for each task it makes, at the bounds freeform
   gives a task started without any (`TaskLaunchParamsModifier
   .getTaskBounds`: 412×732 dp, 1064×600 dp for a landscape activity, fit
-  into the display and centred, then moved off another task's corners), and
+  into the display and centred, or 75 dp down and right of a freeform
+  source task of that size; launch bounds turned to the activity's
+  orientation; then moved off another freeform task's corners), and
   reports it (`TASK`, `PACKAGE`, `ACTIVITY`, then `FRONT`). Its
   activities' configuration is the freeform task's (`TaskFragment
   .computeConfigResourceOverrides`: its sizes from its bounds). Every

@@ -235,14 +235,19 @@ impl Tasks {
             .map(|t| (t.windowing_mode, t.bounds))
     }
 
-    /// The bounds of the tasks of a Mac window: not the organizer root
-    /// tasks nor the root home task, behind the desktop.
-    fn all_bounds(&self) -> Vec<Rect> {
-        self.tasks
-            .lock()
-            .unwrap()
+    /// The bounds a launch keeps clear of
+    /// (`adjustBoundsToAvoidConflictInDisplayArea`): of the children of the
+    /// freeform root tasks, but `except`'s own, which a relaunch of it
+    /// would otherwise move off itself (#613).
+    fn freeform_bounds(&self, except: Option<i32>) -> Vec<Rect> {
+        let tasks = self.tasks.lock().unwrap();
+        let root_mode = |t: &Task| match t.parent {
+            Some(p) => tasks.iter().find(|r| r.id == p).map(|r| r.windowing_mode),
+            None => Some(t.windowing_mode),
+        };
+        tasks
             .iter()
-            .filter(|t| t.root.is_none() && t.id != self.home.load(Ordering::Relaxed))
+            .filter(|t| t.root.is_none() && Some(t.id) != except && root_mode(t) == Some(5))
             .map(|t| t.bounds)
             .collect()
     }
@@ -532,25 +537,24 @@ impl AppHost {
         let saved_bounds = saved
             .map(|p| p.bounds)
             .filter(|b| b.width() > 0 && b.height() > 0);
+        // `getTaskBounds`: launch bounds in the activity's orientation, the
+        // persisted ones as they are, else a freeform source's cascaded
+        // (`cascadeBounds`) if of the default size, else the default; each
+        // away from the other freeform tasks.
         let bounds = if windowing_mode == 5 {
-            let others = self.tasks.all_bounds();
-            match saved_bounds {
-                Some(b) => super::freeform::restored_bounds(area, &others, b),
-                None => super::freeform::default_bounds(
-                    &activity,
-                    area,
-                    display.density_dpi(),
-                    false,
-                    &others,
-                ),
+            let others = self.tasks.freeform_bounds(None);
+            let dpi = display.density_dpi();
+            let task_bounds = |initial, b| {
+                super::freeform::task_bounds(&activity, area, dpi, false, initial, b, &others)
+            };
+            match (options.bounds, saved_bounds) {
+                (Some(b), _) => task_bounds(true, Some(b)),
+                (None, Some(b)) => super::freeform::restored_bounds(area, &others, b),
+                (None, None) => task_bounds(false, self.cascade_from(source, area, dpi)),
             }
         } else {
             area
         };
-        let bounds = options
-            .bounds
-            .filter(|_| windowing_mode == 5)
-            .map_or(bounds, |b| super::freeform::restored_bounds(area, &[], b));
         // TaskLaunchParamsModifier: a pinned launch requests its launch
         // bounds where the device supports freeform or picture-in-picture,
         // a multi-window one always; without them it fills the display area.
@@ -722,6 +726,14 @@ impl AppHost {
         Ok(id)
     }
 
+    /// `cascadeBounds` from the task `source`, if freeform: its bounds moved
+    /// right and down on the display area `area`.
+    fn cascade_from(&self, source: Option<i32>, area: Rect, density_dpi: i32) -> Option<Rect> {
+        let source = source.filter(|&s| self.tasks.windowing_mode(s) == Some(5))?;
+        let bounds = self.tasks.bounds(source)?;
+        Some(super::freeform::cascade(bounds, area, density_dpi))
+    }
+
     /// `TaskDisplayArea.getLaunchRootTask` of a start in the windowing
     /// `mode` it resolves, of the activity type `kind`, with `options` from
     /// the task `source`, for the existing task `candidate` if any: the
@@ -884,23 +896,29 @@ impl AppHost {
             (t.requested_mode, t.requested_bounds.is_some())
         };
         // The bounds the mode's policy takes from the options; a fullscreen or
-        // freeform task of no requested bounds takes freeform bounds, the
-        // launch's or by default (`getTaskBounds`, also a fullscreen task's
-        // restore bounds).
-        let bounds = match self.initial_launch_bounds(launch_mode, &options)? {
-            Some(b) if matches!(launch_mode, 1 | 5) && !overrides => {
-                Some(super::freeform::restored_bounds(area, &[], b))
-            }
-            None if matches!(launch_mode, 1 | 5) && !overrides => {
-                Some(super::freeform::default_bounds(
-                    &super::freeform::Activity::from(info),
-                    area,
-                    display.0.density_dpi(),
-                    false,
-                    &[],
-                ))
-            }
-            initial => initial,
+        // freeform task of no requested bounds lays out freeform bounds from
+        // them, else from a freeform source's cascaded (`getTaskBounds`, also
+        // a fullscreen task's restore bounds), away from the other freeform
+        // tasks.
+        let initial = self.initial_launch_bounds(launch_mode, &options)?;
+        let bounds = if matches!(launch_mode, 1 | 5) && !overrides {
+            let dpi = display.0.density_dpi();
+            let suggested = initial.or_else(|| {
+                (launch_mode == 5)
+                    .then(|| self.cascade_from(source, area, dpi))
+                    .flatten()
+            });
+            Some(super::freeform::task_bounds(
+                &super::freeform::Activity::from(info),
+                area,
+                dpi,
+                false,
+                initial.is_some(),
+                suggested,
+                &self.tasks.freeform_bounds(Some(id)),
+            ))
+        } else {
+            initial
         };
         // A root task takes a mode other than the display area's, or the
         // display area's over a requested mode of another but pinned
@@ -1478,7 +1496,7 @@ impl AppHost {
     /// moves to the desktop, rather than the display area's, whose window
     /// would have its title bar above the screen.
     fn desktop_bounds(&self, id: i32) -> Result<Option<Rect>, String> {
-        let (component, others) = {
+        let component = {
             let tasks = self.tasks.tasks.lock().unwrap();
             let t = tasks
                 .iter()
@@ -1487,13 +1505,9 @@ impl AppHost {
             if t.requested_bounds.is_some() || t.restore_bounds.is_some() {
                 return Ok(None);
             }
-            let others: Vec<Rect> = tasks
-                .iter()
-                .filter(|o| o.root.is_none() && o.id != id)
-                .map(|o| o.bounds)
-                .collect();
-            (t.component.clone(), others)
+            t.component.clone()
         };
+        let others = self.tasks.freeform_bounds(Some(id));
         let (package, class) = component
             .split_once('/')
             .ok_or_else(|| format!("task {id} component {component}"))?;
@@ -2360,7 +2374,9 @@ pub(super) mod tests {
         use aim_binder_host::parcel::{EX_SECURITY, Parcel};
         crate::system::with_discovery_binders(|ready, _, _, export| {
             let host = launch_host(ready, true);
-            let info = ready.activity_info_of("p", "p.Main").unwrap();
+            let mut info = ready.activity_info_of("p", "p.Main").unwrap();
+            // Of no orientation, as parsed: launch bounds keep theirs.
+            info.screen_orientation = -1;
             assert!(
                 host.framework
                     .set(
@@ -2391,6 +2407,7 @@ pub(super) mod tests {
             }
             // Without picture-in-picture, a pinned launch inherits the freeform
             // display area.
+            let mut freeform = 0;
             for (requested, mode) in [(1, 1), (5, 5), (2, 5)] {
                 let bundle = RawBundle::empty()
                     .with_ints(&[
@@ -2427,7 +2444,17 @@ pub(super) mod tests {
                     .unwrap()
                     .task;
                 if mode == 5 {
-                    assert_eq!(host.tasks.own_bounds(id), Some((5, bounds)));
+                    // A second freeform task at the same bounds moves off the
+                    // first, by a sixteenth of the display down and right
+                    // (`adjustBoundsToAvoidConflict`).
+                    let display = host.display().unwrap();
+                    let mut expected = bounds;
+                    expected.offset(
+                        freeform * display.0.width / 16,
+                        freeform * display.0.height / 16,
+                    );
+                    assert_eq!(host.tasks.own_bounds(id), Some((5, expected)));
+                    freeform += 1;
                 } else {
                     assert!(host.tasks.own_bounds(id).is_none());
                     let display = host.display().unwrap();
@@ -3283,7 +3310,7 @@ pub(super) mod tests {
                 receive.read(&mut [0]).unwrap_err().kind(),
                 std::io::ErrorKind::WouldBlock
             );
-            assert_eq!(host.tasks.all_bounds(), [old, old]);
+            assert_eq!(host.tasks.freeform_bounds(None), [old, old]);
             // `setActivityType`: a home activity is resizeable only if it
             // asked to be, so its task has no multi-window on a phone.
             assert_eq!(
@@ -4464,7 +4491,9 @@ pub(super) mod tests {
                     class: "p.Main".into(),
                 });
             }
-            let info = host.activity_info_of("p", "p.Main").unwrap();
+            let mut info = host.activity_info_of("p", "p.Main").unwrap();
+            // Of no orientation, as parsed: launch bounds keep theirs.
+            info.screen_orientation = -1;
             let display = host.display().unwrap();
             let area = r(0, 0, display.0.width, display.0.height);
             let default = super::super::freeform::default_bounds(
@@ -5170,6 +5199,79 @@ pub(super) mod tests {
                 .collect();
             let d = [default.left, default.top, default.right, default.bottom];
             assert_eq!(records, [d]);
+        });
+    }
+
+    /// `getTaskBounds` lays a reused task of no bounds of its own out off
+    /// the other freeform tasks (`adjustBoundsToAvoidConflict`), and a new
+    /// task from a freeform source of the default size cascaded off it
+    /// (`cascadeBounds`).
+    #[test]
+    fn launch_bounds_keep_off_the_other_freeform_tasks() {
+        use super::super::activity_options::LaunchOptions;
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            enable_freeform(host);
+            let (_thread, activities, _receive, _) = wct_tasks(host, export, Rect::default());
+            host.activities
+                .records
+                .lock()
+                .unwrap()
+                .get_mut(&activities[1])
+                .unwrap()
+                .info
+                .resize_mode = 2;
+            // Portrait: a landscape default is shrunk to fit the phone's
+            // display, and a cascade of it no longer of the default size.
+            let mut info = host.activity_info_of("p", "p.Main").unwrap();
+            info.screen_orientation = 1;
+            let activity = super::super::freeform::Activity::from(&info);
+            let display = host.display().unwrap();
+            let (area, dpi) = (
+                Rect {
+                    left: 0,
+                    top: 0,
+                    right: display.0.width,
+                    bottom: display.0.height,
+                },
+                display.0.density_dpi(),
+            );
+            let default = super::super::freeform::default_bounds(&activity, area, dpi, false, &[]);
+            {
+                let mut tasks = host.tasks.tasks.lock().unwrap();
+                let t = tasks.iter_mut().find(|t| t.id == 7).unwrap();
+                t.bounds = default;
+                t.requested_bounds = Some(default);
+                let t = tasks.iter_mut().find(|t| t.id == 8).unwrap();
+                t.windowing_mode = 1;
+                t.requested_mode = 1;
+                t.requested_bounds = None;
+                t.resolved_bounds = None;
+                t.restore_bounds = None;
+            }
+            // Before the reused task's start persists its bounds.
+            *host.tasks.next.lock().unwrap() = 100;
+            let id = host
+                .new_task_with_options(10100, "p", "p.Main", &info, Some(7), Default::default())
+                .unwrap();
+            let cascaded = super::super::freeform::cascade(default, area, dpi);
+            assert_eq!(host.tasks.bounds(id), Some(cascaded));
+            let freeform = LaunchOptions {
+                mode: 5,
+                ..Default::default()
+            };
+            host.apply_task_launch_options(8, freeform, &info, None, false)
+                .unwrap();
+            assert_eq!(
+                host.tasks.bounds(8),
+                Some(super::super::freeform::default_bounds(
+                    &activity,
+                    area,
+                    dpi,
+                    false,
+                    &[default, cascaded]
+                ))
+            );
+            assert_ne!(host.tasks.bounds(8), Some(default));
         });
     }
 
