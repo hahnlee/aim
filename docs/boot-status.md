@@ -157,7 +157,10 @@ write fails with EPIPE and SIGPIPE (unless MSG_NOSIGNAL), as
 `sk_stream_wait_connect` fails it, a listening one's too, where Darwin's fails
 with ENOTCONN; a connecting one's waits for the connection up to SO_SNDTIMEO
 (then EAGAIN; a signal's EINTR restarts only untimed), or is EAGAIN
-non-blocking; a TCP write raises SIGPIPE for EPIPE like a send (#2927);
+non-blocking; a TCP write raises SIGPIPE for EPIPE like a send (#2927), and a
+TCP send or write that Darwin fails with EPIPE returns a pending error instead,
+without SIGPIPE, as `sk_stream_error` does: a refused connect's first send is
+ECONNREFUSED (#2937);
 edge-triggered once per
 change, a shutdown included: its shutdown is recorded, as `inet_shutdown` (with
 ENOTCONN, an unconnected UDP socket's too, #2921) and `unix_shutdown` (with success, in any state Darwin's fails in:

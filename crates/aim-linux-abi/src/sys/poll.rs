@@ -2103,16 +2103,10 @@ mod reportable_tests {
         close(&[blocking]);
     }
 
-    /// `sk_stream_wait_connect`: a send or write on a TCP socket neither
-    /// connected nor connecting, never connected or listening, fails with
-    /// EPIPE and raises SIGPIPE unless MSG_NOSIGNAL (`sk_stream_error`),
-    /// where Darwin's fails with ENOTCONN.
-    #[test]
-    fn a_send_on_an_unconnected_tcp_socket_is_epipe() {
-        let _view = crate::vfs::test_view();
-        const MSG_NOSIGNAL: u64 = 0x4000;
+    /// `send`'s result, and whether it raised SIGPIPE at this thread.
+    fn raised(send: &dyn Fn() -> i64) -> (i64, bool) {
         // SAFETY: this thread's signal mask and pending SIGPIPE.
-        let raised = |send: &dyn Fn() -> i64| unsafe {
+        unsafe {
             let mut pipe: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&mut pipe);
             libc::sigaddset(&mut pipe, libc::SIGPIPE);
@@ -2128,7 +2122,45 @@ mod reportable_tests {
             }
             libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
             (r, raised)
-        };
+        }
+    }
+
+    /// After a refused connect, a send or write returns the pending
+    /// ECONNREFUSED first, without SIGPIPE, and only then fails with EPIPE
+    /// (`sk_stream_error`, `sock_error`), where Darwin's fails with EPIPE
+    /// at once.
+    #[test]
+    fn a_send_after_a_refused_connect_returns_the_refusal_first() {
+        let _view = crate::vfs::test_view();
+        let byte = b"x".as_ptr() as u64;
+        for write in [false, true] {
+            let (fd, connected) = refused(1);
+            assert_eq!(connected, -115);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while polled(fd, POLLIN).1 & POLLHUP == 0 && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let send = || {
+                if write {
+                    fs::write([fd as u64, byte, 1, 0, 0, 0])
+                } else {
+                    crate::sys::net::sendto([fd as u64, byte, 1, 0, 0, 0])
+                }
+            };
+            assert_eq!(raised(&send), (-111, false), "write {write}");
+            assert_eq!(raised(&send), (-32, true), "write {write}");
+            close(&[fd]);
+        }
+    }
+
+    /// `sk_stream_wait_connect`: a send or write on a TCP socket neither
+    /// connected nor connecting, never connected or listening, fails with
+    /// EPIPE and raises SIGPIPE unless MSG_NOSIGNAL (`sk_stream_error`),
+    /// where Darwin's fails with ENOTCONN.
+    #[test]
+    fn a_send_on_an_unconnected_tcp_socket_is_epipe() {
+        let _view = crate::vfs::test_view();
+        const MSG_NOSIGNAL: u64 = 0x4000;
         let fresh = crate::sys::net::socket([2, 1 | O_NONBLOCK, 0, 0, 0, 0]);
         let listener = crate::sys::net::socket([10, 1 | O_NONBLOCK, 0, 0, 0, 0]);
         let mut address = [0u8; 28];

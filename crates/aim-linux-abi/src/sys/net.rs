@@ -2389,6 +2389,23 @@ fn wait_connect(fd: i32, flags: u64) -> Result<(), i64> {
     }
 }
 
+/// `sk_stream_error` of a TCP send on `s`, host socket `fd`, that failed
+/// with `r`: EPIPE gives way to a pending error (`sock_error`), the kept
+/// one or the host socket's, which Darwin's send leaves pending, and
+/// otherwise raises SIGPIPE unless MSG_NOSIGNAL.
+fn stream_error(s: &Sock, fd: i32, r: i64, flags: u64) -> i64 {
+    if r == -32 {
+        let kept = s.kept_error.swap(0, Ordering::Relaxed);
+        if kept != 0 {
+            return -(kept as i64);
+        }
+        if let error @ 1.. = get_int(fd, libc::SOL_SOCKET, libc::SO_ERROR).unwrap_or(0) {
+            return -(errno::from_darwin(error) as i64);
+        }
+    }
+    epipe(r, flags)
+}
+
 /// A send failed with EPIPE: Linux raises SIGPIPE unless MSG_NOSIGNAL.
 fn epipe(r: i64, flags: u64) -> i64 {
     if r == -32 && flags & L_MSG_NOSIGNAL == 0 {
@@ -2518,7 +2535,12 @@ fn send(
     while r == -107 && any_sock(input).is_some_and(|s| s.tcp()) {
         match wait_connect(input.fd(), flags) {
             Ok(()) => r = transmit(input, iov, name, ctrl, flags),
-            Err(error) => return epipe(error, flags),
+            Err(error) => {
+                return match any_sock(input) {
+                    Some(s) => stream_error(&s, input.fd(), error, flags),
+                    None => epipe(error, flags),
+                };
+            }
         }
     }
     if unix_dgram.is_some() && !addressed && r == -89 {
@@ -2591,7 +2613,10 @@ fn transmit(
         return -111;
     }
     if r < 0 {
-        return epipe(r, flags);
+        return match any_sock(input).filter(|s| s.tcp()) {
+            Some(s) => stream_error(&s, fd, r, flags),
+            None => epipe(r, flags),
+        };
     }
     match ty {
         Some(SockType::SeqPacket) => {
@@ -3607,7 +3632,11 @@ pub(super) fn write_pinned(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i
         traffic::account(&s, fd, true, r, None);
         // A TCP write's `sk_stream_error`, as a send's without
         // MSG_NOSIGNAL.
-        return Some(if s.tcp() { epipe(r, 0) } else { r });
+        return Some(if s.tcp() {
+            stream_error(&s, fd, r, 0)
+        } else {
+            r
+        });
     }
     Some(send(&input, iov, None, None, 0))
 }
