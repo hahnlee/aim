@@ -718,30 +718,6 @@ impl Boot {
         let data_mount = Rc::new(RefCell::new(data_mount));
         let sweep = layout.sweep_runtime().map_err(|e| e.to_string())?;
         layout.prepare_runtime().map_err(|e| e.to_string())?;
-        let verity_control = if options.mode == RunMode::Run {
-            data_mount.borrow_mut().mount()?;
-            let store = Arc::new(
-                aim_storage::fsverity::Store::new(
-                    &layout.data.join("fs-verity"),
-                    &layout.runtime.join("fs-verity-leases"),
-                )
-                .map_err(|error| format!("verity store: {error:?}"))?,
-            );
-            let owner = aim_storage::verity_control::RunningServer::start_private_with_store(
-                Duration::from_secs(5),
-                store,
-            )
-            .map_err(|error| format!("native verity control startup: {error}"))?;
-            aim_storage::verity_control::OwnerConfig {
-                endpoint: owner.endpoint().to_path_buf(),
-                process: owner.process,
-            }
-            .write(&layout.runtime.join("verity-control-owner"))
-            .map_err(|error| format!("native verity owner locator: {error}"))?;
-            Some(owner)
-        } else {
-            None
-        };
         let mut map = layout.path_map();
         std::fs::write(layout.path_map_file(), map.to_file_text()).map_err(|e| e.to_string())?;
         let mut init_registration = None;
@@ -929,6 +905,33 @@ impl Boot {
         manager.queue_boot(&properties);
         mark("init scripts loaded");
 
+        // The data image has been attaching while the boot prepared; the
+        // owners that serve from it wait for it: the verity store, then the
+        // native services.
+        let verity_control = if options.mode == RunMode::Run {
+            data_mount.borrow_mut().mount()?;
+            let store = Arc::new(
+                aim_storage::fsverity::Store::new(
+                    &layout.data.join("fs-verity"),
+                    &layout.runtime.join("fs-verity-leases"),
+                )
+                .map_err(|error| format!("verity store: {error:?}"))?,
+            );
+            let owner = aim_storage::verity_control::RunningServer::start_private_with_store(
+                Duration::from_secs(5),
+                store,
+            )
+            .map_err(|error| format!("native verity control startup: {error}"))?;
+            aim_storage::verity_control::OwnerConfig {
+                endpoint: owner.endpoint().to_path_buf(),
+                process: owner.process,
+            }
+            .write(&layout.runtime.join("verity-control-owner"))
+            .map_err(|error| format!("native verity owner locator: {error}"))?;
+            Some(owner)
+        } else {
+            None
+        };
         // The owners' endpoints are one boot's: a reboot (or another boot)
         // in this process names new ones.
         static BOOTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
