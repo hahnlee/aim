@@ -467,17 +467,30 @@ pub enum IoOwner {
 
 const SIGIO: i32 = 29;
 const SI_KERNEL: i32 = 0x80;
-const POLL_IN: i32 = 1;
-/// `band_table[POLL_IN - 1]`: EPOLLIN | EPOLLRDNORM.
-const POLL_IN_BAND: u64 = 0x41;
+pub const POLL_IN: i32 = 1;
+pub const POLL_OUT: i32 = 2;
+pub const POLL_HUP: i32 = 6;
 
-/// `send_sigio`: tell `owner` that file `fd` became readable, with
-/// `signum` (F_SETSIG) and a POLL_IN siginfo, or with a plain SIGIO when
-/// `signum` is 0 or could not be queued, to each target that `sigio_perm`
-/// lets the owner's setter (real and effective uids `setter`) signal.
-/// Linux reports no failure to anyone: an owner that is gone or may not be
-/// signalled takes nothing.
-pub fn send_io(owner: IoOwner, signum: i32, fd: i32, setter: (u32, u32)) {
+/// `band_table[reason - POLL_IN]`: the poll bits of a POLL_* reason.
+fn io_band(reason: i32) -> u64 {
+    match reason {
+        // EPOLLIN | EPOLLRDNORM.
+        POLL_IN => 0x41,
+        // EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND.
+        POLL_OUT => 0x304,
+        // EPOLLHUP | EPOLLERR.
+        _ => 0x18,
+    }
+}
+
+/// `send_sigio`: tell `owner` of file `fd` about `reason` (POLL_IN,
+/// POLL_OUT or POLL_HUP), with `signum` (F_SETSIG) and a siginfo carrying
+/// the reason, its band and `fd`, or with a plain SIGIO when `signum` is 0
+/// or could not be queued, to each target that `sigio_perm` lets the
+/// owner's setter (real and effective uids `setter`) signal. Linux reports
+/// no failure to anyone: an owner that is gone or may not be signalled
+/// takes nothing.
+pub fn send_io(owner: IoOwner, signum: i32, fd: i32, reason: i32, setter: (u32, u32)) {
     let targets = match owner {
         IoOwner::Thread(tid) if thread::find(tid).is_some() => vec![(my_pid() as i32, tid)],
         IoOwner::Thread(tid) => vec![(thread::owner(tid), tid)],
@@ -499,8 +512,8 @@ pub fn send_io(owner: IoOwner, signum: i32, fd: i32, setter: (u32, u32)) {
             continue;
         }
         if signum != 0 {
-            let mut info = Siginfo::new(signum, POLL_IN);
-            info.fields[0] = POLL_IN_BAND;
+            let mut info = Siginfo::new(signum, reason);
+            info.fields[0] = io_band(reason);
             info.fields[1] = fd as u32 as u64;
             if send_io_to(pid, tid, info) == 0 {
                 continue;

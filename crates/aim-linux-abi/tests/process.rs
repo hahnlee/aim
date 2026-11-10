@@ -352,6 +352,16 @@ fn kqueue_fds_keep_their_own_cloexec_across_fork() {
 }
 
 #[test]
+fn a_fork_childs_fasync_copy_signals_each_event_once() {
+    check("fasync_fork_once");
+}
+
+#[test]
+fn a_forked_o_async_files_record_is_shared_without_lost_changes() {
+    check("fasync_shared_record");
+}
+
+#[test]
 fn epoll_fds_survive_fork() {
     check("epoll_fork");
 }

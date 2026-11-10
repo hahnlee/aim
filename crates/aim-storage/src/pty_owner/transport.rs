@@ -1384,10 +1384,9 @@ impl Server {
                 ..Default::default()
             },
             SET_FLAGS => {
-                if request.frame.flags & 0x2000 != 0 {
-                    return Err(error(libc::EOPNOTSUPP));
-                }
-                let value = (flags & !0xc00) | (request.frame.flags & 0xc00);
+                // Linux O_ASYNC, O_NONBLOCK and O_APPEND; the client
+                // delivers O_ASYNC's signals (`tty_fasync`).
+                let value = (flags & !0x2c00) | (request.frame.flags & 0x2c00);
                 let target = request.ports[0].name();
                 self.registry
                     .descriptions

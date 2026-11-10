@@ -943,4 +943,70 @@ mod tests {
         owner.shutdown().unwrap();
         std::fs::remove_dir(runtime).unwrap();
     }
+
+    /// `tty_fasync`: a pty's O_ASYNC is its description's, and input for
+    /// the master signals its F_SETSIG owner with POLL_IN and the fd.
+    #[test]
+    fn o_async_master_signals_input() {
+        if super::super::fdtab::isolated_kernel_test(
+            "sys::pty_owner::tests::o_async_master_signals_input",
+        ) {
+            return;
+        }
+        use super::super::fs::{fcntl, ioctl, write};
+        const SIGRT: i32 = 43;
+        const O_ASYNC: i64 = 0o20000;
+        super::super::fdtab::init();
+        super::super::signal::install_host_handlers();
+        let (_guard, root) = crate::vfs::test_view();
+        let runtime = root.join("pty-owner-async");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&runtime)
+            .unwrap();
+        let runtime = std::fs::canonicalize(runtime).unwrap();
+        let name = format!("dev.aim.pty-abi-async.{}", std::process::id());
+        let owner =
+            aim_storage::pty_owner::transport::RunningServer::start(&name, &runtime).unwrap();
+        let client = Arc::new(Client::lookup(&name, owner.config.process).unwrap());
+        let endpoint = client.allocate(2).unwrap();
+        let master_description = Arc::new(Description { client, endpoint });
+        let slave = publish(master_description.open_slave(2).unwrap());
+        let master = publish(master_description.clone());
+        let pid = unsafe { libc::getpid() } as u64;
+        assert_eq!(fcntl([master.0 as u64, 8, pid, 0, 0, 0]), 0);
+        assert_eq!(fcntl([master.0 as u64, 10, SIGRT as u64, 0, 0, 0]), 0);
+        assert_eq!(fcntl([master.0 as u64, 4, O_ASYNC as u64, 0, 0, 0]), 0);
+        assert_ne!(fcntl([master.0 as u64, 3, 0, 0, 0, 0]) & O_ASYNC, 0);
+        assert_eq!(
+            unsafe { libc::fcntl(master.0, libc::F_GETFL) } & libc::O_ASYNC,
+            0
+        );
+        let input = *b"x\n";
+        assert_eq!(
+            write([slave.0 as u64, input.as_ptr() as u64, 2, 0, 0, 0]),
+            2
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let info = loop {
+            if let Some(info) = super::super::signal::take_process(SIGRT) {
+                break info;
+            }
+            assert!(std::time::Instant::now() < deadline, "no POLL_IN signal");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!((info.code, info.fields[0]), (1, 0x41));
+        assert_eq!(info.fields[1] as i32, master.0);
+        let off = 0i32;
+        assert_eq!(
+            ioctl([master.0 as u64, 0x5452, &off as *const i32 as u64, 0, 0, 0]),
+            0
+        );
+        assert_eq!(fcntl([master.0 as u64, 3, 0, 0, 0, 0]) & O_ASYNC, 0);
+        drop(master);
+        drop(slave);
+        drop(master_description);
+        owner.shutdown().unwrap();
+        std::fs::remove_dir(runtime).unwrap();
+    }
 }

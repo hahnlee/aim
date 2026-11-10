@@ -91,7 +91,9 @@ impl Drop for Watch {
     }
 }
 
-/// O_ASYNC, set through guest fd `fd` (the signals' `si_fd`).
+/// The registration of O_ASYNC, set through guest fd `fd` (the signals'
+/// `si_fd`); the flag itself is the owner's record, which a fork child
+/// shares.
 struct Fasync {
     fd: i32,
     /// None in a fork child until [`after_fork_child`].
@@ -699,12 +701,16 @@ impl Inotify {
     /// inotify must not wait on locked.
     fn unlock(&self, mut s: std::sync::MutexGuard<'_, State>) {
         let raised = std::mem::take(&mut s.raised);
-        let fd = s.fasync.as_ref().map(|f| f.fd);
+        let fd = s
+            .fasync
+            .as_ref()
+            .filter(|_| raised > 0 && s.owner.is_async() && s.owner.won())
+            .map(|f| f.fd);
         let owner = s.owner.owner();
         drop(s);
         if let Some(fd) = fd {
             for _ in 0..raised {
-                owner.readable(fd);
+                owner.notify(fd, super::signal::POLL_IN);
             }
         }
     }
@@ -716,7 +722,7 @@ impl Inotify {
 
     /// Whether O_ASYNC is set.
     pub fn is_async(&self) -> bool {
-        self.state.lock().unwrap().fasync.is_some()
+        self.state.lock().unwrap().owner.is_async()
     }
 }
 
@@ -808,15 +814,17 @@ pub fn set_async(ino: &Arc<Inotify>, fd: i32, guest: i32, on: bool) -> Result<()
             if let Some(armed) = s.fasync.take().and_then(|f| f.armed) {
                 disarm(armed);
             }
+            s.owner.abstain();
         }
         _ => {}
     }
-    Ok(())
+    s.owner.set_async(on)
 }
 
 /// Fork: an inotify is its watches (each on an inherited vnode fd), its
 /// queued events and its O_ASYNC state (Linux children share the file;
-/// here each process has a copy, which signals the owner too).
+/// here each process has a copy, sharing the owner's record, and one copy
+/// signals the owner).
 pub(super) fn save(ino: &Inotify, w: &mut super::fork_state::Writer) {
     use std::os::unix::ffi::OsStrExt;
     let s = ino.state.lock().unwrap();

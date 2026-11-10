@@ -730,7 +730,7 @@ static void pidfd_setfl(void) {
 
 // Each fd number keeps its own close-on-exec flag across fork, also when
 // it shares its open file (a kqueue the child makes again) with others,
-// and the open file keeps its O_NONBLOCK.
+// and the open file keeps its O_NONBLOCK and O_ASYNC.
 static void kqueue_fd_cloexec_fork(void) {
   int go[2];
   CHECK(pipe(go) == 0, "pipe");
@@ -750,7 +750,9 @@ static void kqueue_fd_cloexec_fork(void) {
     fds[2 * i + 1] = fcntl(objects[i], F_DUPFD_CLOEXEC, 0);
     CHECK(fds[2 * i] >= 0 && fds[2 * i + 1] >= 0, "dup %d", i);
   }
-  CHECK(fcntl(objects[1], F_SETFL, O_NONBLOCK) == 0 && fcntl(objects[2], F_SETFL, O_NONBLOCK) == 0,
+  CHECK(fcntl(objects[0], F_SETFL, O_ASYNC) == 0 &&
+            fcntl(objects[1], F_SETFL, O_NONBLOCK | O_ASYNC) == 0 &&
+            fcntl(objects[2], F_SETFL, O_NONBLOCK) == 0,
         "F_SETFL");
   pid_t child = fork();
   if (child == 0) {
@@ -759,6 +761,7 @@ static void kqueue_fd_cloexec_fork(void) {
     bad |= fcntl(objects[0], F_GETFD) != FD_CLOEXEC || fcntl(objects[1], F_GETFD) != FD_CLOEXEC ||
            fcntl(objects[2], F_GETFD) != 0;
     for (int i = 0; i < 6; i++) bad |= !(fcntl(fds[i], F_GETFL) & O_NONBLOCK) != (i < 2);
+    for (int i = 0; i < 6; i++) bad |= !(fcntl(fds[i], F_GETFL) & O_ASYNC) != (i >= 4);
     _exit(bad);
   }
   int st;
@@ -770,6 +773,195 @@ static void kqueue_fd_cloexec_fork(void) {
   close(go[1]);
   CHECK(waitpid(pid, &st, 0) == pid, "reap");
   printf("ok kqueue_fd_cloexec_fork\n");
+}
+
+// The F_SETSIG signals `sig` naming fd `fd` with POLL_IN that arrive
+// within 300 ms of each other.
+static int fasync_signals(int sig, int fd) {
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, sig);
+  int n = 0;
+  for (;;) {
+    struct timespec t = {0, 300 * 1000 * 1000};
+    siginfo_t si;
+    if (sigtimedwait(&set, &si, &t) != sig) return n;
+    n += si.si_fd == fd && si.si_code == POLL_IN;
+  }
+}
+
+// A fork child shares an O_ASYNC socket and inotify with its parent, as
+// Linux's one open file: each event signals the owner once, also after
+// the parent clears and sets O_ASYNC again; F_SETSIG and O_ASYNC through
+// the parent hold for the child's copy; and the child's copy signals once
+// the parent closed its own. The owner is not
+// the namespace's init, which takes no siginfo from another process.
+static void fasync_fork_once_owner(void) {
+  int sig = SIGRTMIN + 2, sig2 = SIGRTMIN + 4;
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, sig);
+  sigaddset(&set, sig2);
+  CHECK(sigprocmask(SIG_BLOCK, &set, NULL) == 0, "block");
+  const char* dir = "/data/local/tmp/fasync-fork";
+  mkdir(dir, 0755);
+  int sv[2];
+  CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+  int ino = inotify_init1(IN_NONBLOCK);
+  CHECK(ino >= 0 && inotify_add_watch(ino, dir, IN_CREATE) >= 0, "inotify");
+  int fds[2] = {sv[0], ino};
+  for (int i = 0; i < 2; i++)
+    CHECK(fcntl(fds[i], F_SETOWN, getpid()) == 0 && fcntl(fds[i], F_SETSIG, sig) == 0 &&
+              fcntl(fds[i], F_SETFL, fcntl(fds[i], F_GETFL) | O_ASYNC) == 0,
+          "fasync %d", i);
+  int go[2];
+  CHECK(pipe(go) == 0, "pipe");
+  pid_t child = fork();
+  if (child == 0) {
+    char c;
+    close(go[1]);
+    read(go[0], &c, 1);
+    _exit(0);
+  }
+  close(go[0]);
+  usleep(200 * 1000);
+  CHECK(write(sv[1], "x", 1) == 1, "write");
+  int n = fasync_signals(sig, sv[0]);
+  CHECK(n == 1, "socket signals %d", n);
+  char path[64];
+  snprintf(path, sizeof(path), "%s/a", dir);
+  close(open(path, O_CREAT | O_WRONLY, 0644));
+  n = fasync_signals(sig, ino);
+  CHECK(n == 1, "inotify signals %d", n);
+  int flags = fcntl(sv[0], F_GETFL);
+  CHECK(fcntl(sv[0], F_SETFL, flags & ~O_ASYNC) == 0, "clear O_ASYNC");
+  CHECK(write(sv[1], "x", 1) == 1, "write");
+  n = fasync_signals(sig, sv[0]);
+  CHECK(n == 0, "signals without O_ASYNC %d", n);
+  CHECK(fcntl(sv[0], F_SETFL, flags) == 0, "set O_ASYNC");
+  CHECK(write(sv[1], "x", 1) == 1, "write");
+  n = fasync_signals(sig, sv[0]);
+  CHECK(n == 1, "signals after O_ASYNC again %d", n);
+  CHECK(fcntl(sv[0], F_SETSIG, sig2) == 0, "F_SETSIG");
+  for (int i = 0; i < 3; i++) {
+    CHECK(write(sv[1], "x", 1) == 1, "write");
+    n = fasync_signals(sig2, sv[0]);
+    CHECK(n == 1, "signals after F_SETSIG %d", n);
+  }
+  n = fasync_signals(sig, sv[0]);
+  CHECK(n == 0, "old signal %d", n);
+  int s0 = sv[0];
+  close(sv[0]);
+  CHECK(write(sv[1], "y", 1) == 1, "write after close");
+  n = fasync_signals(sig2, s0);
+  CHECK(n == 1, "child's copy signals %d", n);
+  write(go[1], "x", 1);
+  close(go[1]);
+  int st;
+  CHECK(waitpid(child, &st, 0) == child, "reap");
+  close(sv[1]);
+  close(ino);
+  unlink(path);
+  rmdir(dir);
+  exit(0);
+}
+
+static void fasync_fork_once(void) {
+  pid_t owner = fork();
+  if (owner == 0) fasync_fork_once_owner();
+  int st;
+  CHECK(waitpid(owner, &st, 0) == owner && WIFEXITED(st) && WEXITSTATUS(st) == 0, "owner %#x", st);
+  printf("ok fasync_fork_once\n");
+}
+
+// Each holder in turn clears O_ASYNC and the other sets it again: the one
+// that stopped watching gives up signalling, so each event still signals
+// the owner once.
+static void fasync_handoff_owner(void) {
+  int sig = SIGRTMIN + 5;
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, sig);
+  CHECK(sigprocmask(SIG_BLOCK, &set, NULL) == 0, "block");
+  int sv[2], cmd[2], ack[2];
+  CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && pipe(cmd) == 0 && pipe(ack) == 0, "fds");
+  CHECK(fcntl(sv[0], F_SETOWN, getpid()) == 0 && fcntl(sv[0], F_SETSIG, sig) == 0 &&
+            fcntl(sv[0], F_SETFL, O_ASYNC) == 0,
+        "fasync");
+  pid_t child = fork();
+  if (child == 0) {
+    char c;
+    while (read(cmd[0], &c, 1) == 1 && c != 'q') {
+      fcntl(sv[0], F_SETFL, c == 's' ? O_ASYNC : 0);
+      write(ack[1], &c, 1);
+    }
+    _exit(0);
+  }
+  usleep(200 * 1000);
+  for (int round = 0; round < 2; round++) {
+    // Someone wins the election.
+    CHECK(write(sv[1], "x", 1) == 1, "write");
+    int n = fasync_signals(sig, sv[0]);
+    CHECK(n == 1, "round %d: signals %d", round, n);
+    char c = round == 0 ? 's' : 'c';
+    if (round == 0) CHECK(fcntl(sv[0], F_SETFL, 0) == 0, "parent clears");
+    else {
+      CHECK(write(cmd[1], &c, 1) == 1 && read(ack[0], &c, 1) == 1, "child clears");
+      c = 's';
+    }
+    if (round == 0) CHECK(write(cmd[1], &c, 1) == 1 && read(ack[0], &c, 1) == 1, "child sets");
+    else CHECK(fcntl(sv[0], F_SETFL, O_ASYNC) == 0, "parent sets");
+    CHECK(write(sv[1], "y", 1) == 1, "write");
+    n = fasync_signals(sig, sv[0]);
+    CHECK(n == 1, "round %d after the hand-off: signals %d", round, n);
+  }
+  CHECK(write(cmd[1], "q", 1) == 1, "quit");
+  int st;
+  CHECK(waitpid(child, &st, 0) == child, "reap");
+  exit(0);
+}
+
+// Concurrent owner changes from two holders lose none: each reads back
+// what it just set.
+static void fasync_record_race_owner(void) {
+  int sv[2];
+  CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+  CHECK(fcntl(sv[0], F_SETSIG, SIGRTMIN) == 0, "F_SETSIG");
+  pid_t parent = getpid();
+  pid_t child = fork();
+  if (child == 0) {
+    pid_t me = getpid();
+    int bad = 0;
+    for (int i = 0; i < 3000; i++) {
+      pid_t want = i % 2 ? me : parent;
+      fcntl(sv[0], F_SETOWN, want);
+      bad += fcntl(sv[0], F_GETOWN) != want;
+    }
+    _exit(bad ? 1 : 0);
+  }
+  int bad = 0;
+  for (int i = 0; i < 3000; i++) {
+    int want = SIGRTMIN + i % 2;
+    fcntl(sv[0], F_SETSIG, want);
+    bad += fcntl(sv[0], F_GETSIG) != want;
+  }
+  int st;
+  CHECK(waitpid(child, &st, 0) == child && WIFEXITED(st), "reap");
+  CHECK(bad == 0 && WEXITSTATUS(st) == 0, "lost changes: parent %d, child %d", bad,
+        WEXITSTATUS(st));
+  exit(0);
+}
+
+static void fasync_shared_record(void) {
+  void (*owners[2])(void) = {fasync_handoff_owner, fasync_record_race_owner};
+  for (int i = 0; i < 2; i++) {
+    pid_t owner = fork();
+    if (owner == 0) owners[i]();
+    int st;
+    CHECK(waitpid(owner, &st, 0) == owner && WIFEXITED(st) && WEXITSTATUS(st) == 0,
+          "case %d: %#x", i, st);
+  }
+  printf("ok fasync_shared_record\n");
 }
 
 // A forked child inherits an epoll fd with its registrations.
@@ -2094,7 +2286,8 @@ int main(int argc, char** argv) {
       {"waitid_variants", waitid_variants},
       {"pidfd_poll", pidfd_poll},   {"epoll_fork", epoll_fork},   {"death_by_signal", death_by_signal},
       {"pidfd_dup", pidfd_dup},     {"pidfd_setfl", pidfd_setfl},
-      {"kqueue_fd_cloexec_fork", kqueue_fd_cloexec_fork},
+      {"kqueue_fd_cloexec_fork", kqueue_fd_cloexec_fork}, {"fasync_fork_once", fasync_fork_once},
+      {"fasync_shared_record", fasync_shared_record},
       {"suspend_pending", suspend_pending}, {"vdso_sigreturn", vdso_sigreturn},
       {"fork_memory", fork_memory}, {"fork_then_exit", fork_then_exit},
       {"identity", identity},       {"identity_file", identity_file},
