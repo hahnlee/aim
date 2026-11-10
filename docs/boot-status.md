@@ -284,7 +284,12 @@ mode (the options', else a fullscreen display area's fullscreen or freeform
 source task's, else its own) changes a root task's mode as
 `shouldUpdateExistingTaskWindowingMode` allows (never a pinned one's to the
 display area's), and the launch bounds of that mode lay the task out
-(`LaunchParamsController.layoutTask`). A start
+(`LaunchParamsController.layoutTask`): the options', else the activity's
+`<layout>`, else the component's persisted params (mode and bounds), else
+default freeform bounds, a freeform source's cascaded, turned to the
+activity's orientation and kept off the other freeform tasks but not the
+task itself (#2913; host tests only; an unresizeable app stays freeform,
+#2785). A start
 that avoids the front (`ActivityOptions.setAvoidMoveToFront`, or a blocked
 background start, which goes only into a task holding its caller's activity
 and is otherwise aborted, its asked-for or forwarded result cancelled)
