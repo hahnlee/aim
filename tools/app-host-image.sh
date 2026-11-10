@@ -26,12 +26,13 @@ rm -rf "$out"
 mkdir -p "$(dirname "$out")"
 cp -c -R "$derived" "$out"
 # Entries are read-only: removing one makes it writable first. A copy is
-# staged under a dot name, so an interrupted run leaves no partial entry.
+# staged under a dot name, as linux-translate stages its own (.tmp-*), so
+# an interrupted run leaves no partial entry, only a stage removed here.
 cache="$(dirname "$out")/translated"
 mkdir -p "$cache"
-for entry in "$cache"/.copy-* "$cache"/*; do
+for entry in "$cache"/.copy-* "$cache"/.tmp-* "$cache"/*; do
   name="${entry##*/}"
-  [[ -e "$entry" && "$name" != paths && ( "$name" == .copy-* || ! -e "$translated/$name" ) ]] || continue
+  [[ -e "$entry" && "$name" != paths && ( "$name" == .copy-* || "$name" == .tmp-* || ! -e "$translated/$name" ) ]] || continue
   chmod -R u+w "$entry"
   rm -rf "$entry"
 done
