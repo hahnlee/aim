@@ -205,21 +205,28 @@ fn pipe_revents(end: PipeEnd, fd: i32, revents: i16) -> i16 {
     }
 }
 
-/// Whether `pin`, on host `fd`, is a TCP socket never connected.
-fn unconnected(pin: Option<&super::fdtab::Pinned>, fd: i32) -> bool {
-    matches!(
-        pin.and_then(|pin| pin.kind()),
-        Some(super::fdtab::Kind::Sock(s)) if super::net::unconnected(s, fd)
-    )
+/// The shutdowns of the TCP socket `pin` holds, on host `fd`, if it was
+/// never connected ([`super::net::unconnected`]).
+fn unconnected(pin: Option<&super::fdtab::Pinned>, fd: i32) -> Option<u32> {
+    match pin.and_then(|pin| pin.kind()) {
+        Some(super::fdtab::Kind::Sock(s)) => super::net::unconnected(s, fd),
+        _ => None,
+    }
 }
 
 /// The `revents` of guest fd `fd`, pinned as `pin`, for `asked`, from its
 /// host descriptor's Darwin poll `h`: a socket's as `tcp_poll`,
 /// `unix_poll`, `datagram_poll` and `sock_poll` report it.
 fn guest_revents(fd: i32, pin: Option<&super::fdtab::Pinned>, h: &libc::pollfd, asked: i16) -> i16 {
-    // `TCP_CLOSE` without a shutdown is hung up and writable.
-    if unconnected(pin, h.fd) {
-        return POLLHUP | asked & (POLLOUT | POLLWRNORM);
+    // `TCP_CLOSE` is hung up and writable, and readable once shut for
+    // receiving.
+    if let Some(shutdown) = unconnected(pin, h.fd) {
+        let read = if shutdown & super::net::RCV_SHUTDOWN != 0 {
+            POLLIN | POLLRDNORM | POLLRDHUP
+        } else {
+            0
+        };
+        return POLLHUP | asked & (POLLOUT | POLLWRNORM | read);
     }
     let mut revents = match (h.revents & POLLHUP != 0)
         .then(|| {
@@ -606,7 +613,7 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             (pin.is_some()
                 && h.events & (POLLIN | libc::POLLOUT) == 0
                 && super::net::pending_error(h.fd).is_some())
-                || unconnected(pin.as_ref(), h.fd)
+                || unconnected(pin.as_ref(), h.fd).is_some()
                 || super::net::kept_error(h.fd)
         });
         let n = host_poll(&mut host, if invalid || errored { 0 } else { left }, mask);
@@ -770,7 +777,7 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
         // OUT, ERR), not POLLEX_SET.
         let unconnected = host.iter().zip(&pins).any(|(h, pin)| {
             h.events & (libc::POLLIN | libc::POLLOUT) != 0
-                && (unconnected(pin.as_ref(), h.fd) || super::net::kept_error(h.fd))
+                && (unconnected(pin.as_ref(), h.fd).is_some() || super::net::kept_error(h.fd))
         });
         let n = host_poll(&mut host, if unconnected { 0 } else { left }, mask);
         if n < 0 {
@@ -1930,6 +1937,40 @@ mod reportable_tests {
                 }
             }
             close(&[fd]);
+        }
+    }
+
+    /// `inet_shutdown` of an unconnected TCP socket fails with ENOTCONN
+    /// but records the shutdown and wakes its waiters: shut for receiving,
+    /// it polls readable and RDHUP too, and an edge-triggered interest is
+    /// queued again by either.
+    #[test]
+    fn an_unconnected_tcp_socket_shutdown_is_recorded() {
+        let _view = crate::vfs::test_view();
+        const EPOLLRDHUP: u32 = 0x2000;
+        for how in [0u64, 1] {
+            let fd = crate::sys::net::socket([2, 1 | O_NONBLOCK, 0, 0, 0, 0]);
+            assert!(fd >= 0, "socket {fd}");
+            let edge = watching(fd, 0x1 | 0x4 | EPOLLRDHUP | 1 << 31);
+            assert_eq!(waited(edge, 0), (1, 0x4 | 0x10), "how {how}");
+            assert_eq!(waited(edge, 0).0, 0, "how {how}");
+            assert_eq!(
+                crate::sys::net::shutdown([fd as u64, how, 0, 0, 0, 0]),
+                -107
+            );
+            let (revents, epoll) = if how == 0 {
+                (
+                    POLLIN | POLLRDNORM | POLLRDHUP | POLLOUT | POLLWRNORM | POLLHUP,
+                    0x1 | 0x4 | EPOLLRDHUP as u64 | 0x10,
+                )
+            } else {
+                (POLLOUT | POLLWRNORM | POLLHUP, 0x4 | 0x10)
+            };
+            assert_eq!(polled(fd, ALL | POLLRDHUP), (1, revents), "how {how}");
+            assert_eq!(selected(fd), (2, true, true), "how {how}");
+            assert_eq!(waited(edge, 0), (1, epoll), "how {how}");
+            assert_eq!(waited(edge, 0).0, 0, "how {how}");
+            close(&[fd, edge]);
         }
     }
 
