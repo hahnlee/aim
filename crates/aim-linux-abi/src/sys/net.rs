@@ -2921,17 +2921,15 @@ fn recv(
     };
     let shut = socket.as_ref().is_some_and(|s| received_shut(s));
     // A datagram socket shut for receiving is at end of file once its
-    // queue is empty, where Darwin's receive waits: an AF_UNIX one's
-    // (`unix_dgram_recvmsg`), and an IP one's that would wait
-    // (`__skb_wait_for_more_packets`), a non-blocking one failing with
-    // EAGAIN as Darwin's does.
+    // queue is empty, where Darwin's receive waits; a non-blocking one
+    // fails with EAGAIN as Darwin's does (`__skb_wait_for_more_packets`,
+    // `__unix_dgram_recvmsg`).
     let waits = flags & L_MSG_DONTWAIT == 0
         // SAFETY: F_GETFL on the socket.
         && unsafe { libc::fcntl(input.fd(), libc::F_GETFL) } & libc::O_NONBLOCK == 0;
     if shut
-        && socket
-            .as_ref()
-            .is_some_and(|s| s.ty == SockType::Dgram && (matches!(s.family, Family::Unix) || waits))
+        && waits
+        && socket.as_ref().is_some_and(|s| s.ty == SockType::Dgram)
         && socket_info(input.fd()).is_some_and(|info| {
             u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap()) == 0
         })

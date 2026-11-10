@@ -2354,9 +2354,20 @@ mod reportable_tests {
         assert_eq!(waited(level, 0), (1, 0x1));
         assert_eq!(waited(edge, 0), (1, 0x1 | 0x2000));
         assert_eq!(waited(edge, 0).0, 0);
-        // End of file once shut for receiving (`__skb_recv_datagram`).
+        // Shut for receiving, a receive that would wait reads end of
+        // file, a non-blocking one fails with EAGAIN
+        // (`__unix_dgram_recvmsg`).
         let mut buffer = [0u8; 4];
-        assert_eq!(received(dgram, &mut buffer), 0);
+        assert_eq!(received(dgram, &mut buffer), -11);
+        let blocking = crate::sys::net::socket([1, 2 | O_CLOEXEC, 0, 0, 0, 0]);
+        let timeout = [1i64, 0];
+        assert_eq!(
+            crate::sys::net::setsockopt([blocking as u64, 1, 20, timeout.as_ptr() as u64, 16, 0]),
+            0
+        );
+        assert_eq!(shutdown(blocking, 0), 0);
+        assert_eq!(received(blocking, &mut buffer), 0);
+        close(&[blocking]);
         assert_eq!(shutdown(dgram, 1), 0);
         assert_eq!(
             polled(dgram, ALL | POLLRDHUP),
