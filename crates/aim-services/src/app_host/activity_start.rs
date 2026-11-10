@@ -1184,22 +1184,14 @@ impl AppHost {
                 format!("{what} not exported from uid {target_uid}")
             }));
         }
-        if !match real_caller_uid {
+        // `BAL_BLOCK`, with background starts disabled
+        // (`isBackgroundActivityStartsEnabled`).
+        let blocked = !match real_caller_uid {
             Some(real_uid) => {
                 self.as_caller_background_allowed(uid, real_uid, args.options.as_ref())?
             }
             None => self.background_activity_start_allowed(uid)?,
-        } {
-            // WaitResult retains START_ABORTED; getExternalResult exposes success.
-            return Ok((
-                if args.launch.is_some() {
-                    102
-                } else {
-                    START_SUCCESS
-                },
-                None,
-            ));
-        }
+        };
         // `sourceRecord`, the caller's activity, and `resultRecord`, the
         // source when it asks for a result.
         let (source, source_task, mut result_to) = {
@@ -1264,6 +1256,7 @@ impl AppHost {
                 ACTIVITY_TYPE_STANDARD
             },
             clear_task_on_launch: info.flags & FLAG_CLEAR_TASK_ON_LAUNCH != 0,
+            avoid_move_to_front: launch_options.avoid_move_to_front || blocked,
         };
         let d = self
             .activities
@@ -1274,9 +1267,27 @@ impl AppHost {
             .map_err(|what| {
                 self.unimplemented_named("activity_task", &format!("{what} (#1485)"))
             })?;
+        // `isAllowedToStart`: a blocked start goes only into an existing
+        // task where its caller has an activity (`Task.isUidPresent`).
+        if blocked
+            && d.target
+                .is_none_or(|t| !self.activities.uid_present(t, uid as u32))
+        {
+            // WaitResult retains START_ABORTED; getExternalResult exposes success.
+            return Ok((
+                if args.launch.is_some() {
+                    102
+                } else {
+                    START_SUCCESS
+                },
+                None,
+            ));
+        }
+        // `setTargetRootTaskIfNeeded` lays out the target task whether or
+        // not it comes to the front.
         let reused = match d.outcome {
             Outcome::New(task) => task,
-            Outcome::Front(_) => d.front,
+            Outcome::Front(_) => d.target,
             Outcome::Deliver(token, _) => self
                 .activities
                 .stack
@@ -1292,7 +1303,7 @@ impl AppHost {
             let mut stack = self.activities.stack.lock().unwrap();
             let token = match d.outcome {
                 Outcome::Deliver(t, _) => Some(t),
-                _ => d.front.and_then(|t| stack.top(t)).map(|r| r.token),
+                _ => d.target.and_then(|t| stack.top(t)).map(|r| r.token),
             };
             deferred.extend(stack.apply(&d, Then::Nothing, None, true));
             return Ok((1, token)); // START_RETURN_INTENT_TO_CALLER

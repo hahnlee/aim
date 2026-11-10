@@ -224,13 +224,17 @@ layout and admits all supported operations before mutation (#2616). Bounds use
 #1678's per-task owner: freeform minima and restore bounds, fullscreen geometry
 inherited from the display. A root task's `setWindowingMode` and a launch's
 windowing mode (`ActivityOptions.setLaunchWindowingMode`, a new or reused root
-task, #2684) resolve as `TaskDisplayArea.validateWindowingMode` does against
+task, also one already focused, #2684, #2889) resolve as `TaskDisplayArea.validateWindowingMode` does against
 the device's and the (top-most leaf) task's or activity's multi-window,
 freeform and picture-in-picture support (a leaf task in an organizer root
 takes its mode unvalidated): a mode it cannot take is undefined and inherits the parent's (the
 display area's freeform in window mode, else fullscreen; a reused task keeps
 its own), a fullscreen display area's launch takes its source task's mode, and
-a valid multi-window launch on the display area is an explicit failure. A pinned
+a valid multi-window launch on the display area is an explicit failure. A start
+that avoids the front (`ActivityOptions.setAvoidMoveToFront`, or a blocked
+background start, which goes only into a task holding its caller's activity)
+leaves its task where it is and a new task at the back (#2795; host tests
+only). A pinned
 launch on a device with freeform or picture-in-picture takes its launch bounds,
 kept below the minimal size as a pinned task's are, and only a freeform or
 multi-window task's Mac window resizes it (`canResizeTask`; #2833, #2851; host

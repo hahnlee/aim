@@ -295,6 +295,10 @@ pub struct Decision {
     /// window mode that start, of no such decision, leaves it behind the
     /// desktop by this owner's policy (docs/windows.md).
     pub home_front: bool,
+    /// The start moves no task to the front (`avoidMoveToFront`): a new
+    /// task goes to the back (`setNewTask`'s `toTop`), and an activity
+    /// added to a task leaves it where it is.
+    pub avoid_move_to_front: bool,
     /// The activities finished first, top first (`performClearTop`,
     /// `performClearTaskForReuse`).
     pub clear: Vec<u64>,
@@ -340,6 +344,11 @@ pub struct Start<'a> {
     /// `ActivityInfo.FLAG_CLEAR_TASK_ON_LAUNCH`: the task it resets is
     /// cleared to its root.
     pub clear_task_on_launch: bool,
+    /// `mCanMoveToFrontCode` is not `MOVE_TO_FRONT_ALLOWED`: its options
+    /// ask so (`setAvoidMoveToFront`), or it is a blocked background start
+    /// (`BAL_BLOCK`); nor is its task resumed as the focused one
+    /// (`mDoResume`).
+    pub avoid_move_to_front: bool,
 }
 
 /// What a start comes to once decided.
@@ -708,6 +717,7 @@ impl Stack {
         }
         let mut d = Decision {
             result_to: s.result_to,
+            avoid_move_to_front: s.avoid_move_to_front,
             ..Default::default()
         };
         if d.result_to.is_some() && flags & FLAG_ACTIVITY_NEW_TASK != 0 {
@@ -787,6 +797,7 @@ impl Stack {
         d.outcome = Outcome::New(target);
         d.target = target;
         d.home_front = s.activity_type == super::activity::ACTIVITY_TYPE_HOME
+            && !s.avoid_move_to_front
             && d.result_to.is_none()
             && flags & FLAG_ACTIVITY_NEW_TASK != 0
             && target.is_none_or(|t| self.home == Some(t) && self.top(t).is_none());
@@ -811,7 +822,9 @@ impl Stack {
                     .find(|a| a.task == f && !a.finishing && Some(a.token) != not_top)
             });
             let mut moved_to_front = false;
-            if current.is_none_or(|a| a.task != task) || self.focused() != Some(task) {
+            if (current.is_none_or(|a| a.task != task) || self.focused() != Some(task))
+                && !s.avoid_move_to_front
+            {
                 flags |= FLAG_ACTIVITY_BROUGHT_TO_FRONT;
                 d.front = Some(task);
                 // A task already visible in multi-window mode was on top.
@@ -821,7 +834,10 @@ impl Stack {
             let reused_top = reused.and_then(|t| self.top(t));
             // recycleTask returns before complyActivityFlags, including the source's own task.
             if only {
-                d.front = Some(task);
+                // `mDoResume`: brought to the front unless the start avoids it.
+                if !s.avoid_move_to_front {
+                    d.front = Some(task);
+                }
                 d.flags = flags;
                 d.outcome = Outcome::Front(1);
                 return Ok(d);
@@ -1002,13 +1018,15 @@ impl Stack {
             Then::Add(activity, task) => {
                 if let Some(mut task) = task {
                     task.last_active = super::alarm_service::elapsed_ms();
-                    if self.behind_desktop(task.id) {
+                    if self.behind_desktop(task.id) || d.avoid_move_to_front {
                         self.tasks.insert(0, *task);
                     } else {
                         self.home_front = false;
                         self.tasks.push(*task);
                     }
-                } else if !(self.freeform && self.home == Some(activity.task)) {
+                } else if !d.avoid_move_to_front
+                    && !(self.freeform && self.home == Some(activity.task))
+                {
                     // The root home task comes to the front by the start's
                     // decision (`d.front`, `d.home_front`) only.
                     self.move_to_front(activity.task);
@@ -2020,6 +2038,7 @@ mod tests {
             result_to: None,
             activity_type: crate::app_host::activity::ACTIVITY_TYPE_STANDARD,
             clear_task_on_launch: false,
+            avoid_move_to_front: false,
         }
     }
 
@@ -2527,6 +2546,50 @@ mod tests {
             s.decide(&start("com.example/Main", 0, &intent, None))
                 .is_err()
         );
+    }
+
+    // ActivityStarter.setTargetRootTaskIfNeeded, setNewTask and
+    // startActivityInner when mCanMoveToFrontCode is not
+    // MOVE_TO_FRONT_ALLOWED.
+    #[test]
+    fn a_start_that_avoids_the_front_leaves_the_tasks_in_place() {
+        let new_task = Intent {
+            flags: FLAG_ACTIVITY_NEW_TASK,
+            ..Default::default()
+        };
+        let avoid = |component, intent| super::Start {
+            avoid_move_to_front: true,
+            ..start(component, 0, intent, None)
+        };
+        // The task found is recycled where it is.
+        let mut s = behind_launcher(vec![]);
+        let d = s.decide(&avoid("com.example/Main", &new_task)).unwrap();
+        assert_eq!(d.outcome, Outcome::Front(START_DELIVERED_TO_TOP));
+        assert_eq!((d.front, d.target), (None, Some(7)));
+        assert_eq!(d.flags & FLAG_ACTIVITY_BROUGHT_TO_FRONT, 0);
+        s.apply(&d, Then::Nothing, None, true);
+        assert_eq!(s.focused(), Some(9));
+
+        // An activity added to it leaves it behind, unlaunched.
+        let d = s.decide(&avoid("com.example/Other", &new_task)).unwrap();
+        assert_eq!((&d.outcome, d.front), (&Outcome::New(Some(7)), None));
+        let added = Then::Add(activity(2, 7, "Other", 0), None);
+        let commands = s.apply(&d, added, None, true);
+        assert_eq!(s.focused(), Some(9));
+        assert!(!commands.contains(&Launch(2)));
+
+        // A new task goes to the back.
+        let multiple = Intent {
+            flags: FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_MULTIPLE_TASK,
+            ..Default::default()
+        };
+        let d = s.decide(&avoid("com.example/Main", &multiple)).unwrap();
+        assert_eq!((&d.outcome, d.home_front), (&Outcome::New(None), false));
+        let added = Then::Add(activity(3, 8, "Main", 0), Some(task(8, "Main", Some(APP))));
+        let commands = s.apply(&d, added, None, true);
+        let order: Vec<i32> = s.tasks.iter().map(|t| t.id).collect();
+        assert_eq!((order.as_slice(), s.focused()), (&[8, 7, 9][..], Some(9)));
+        assert!(!commands.contains(&Launch(3)));
     }
 
     // ResetTargetTaskHelper.test of the tasks behind the target: an
