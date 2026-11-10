@@ -419,6 +419,29 @@ impl Fown {
         });
     }
 
+    /// Exec: the file holding the record, which the new image adopts
+    /// ([`Fown::adopt`]); None while the record is this process's alone.
+    pub(super) fn shared_fd(&self) -> Option<i32> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.shared.as_ref().map(|shared| shared.0)
+    }
+
+    /// The owner whose record inherited descriptor `fd` holds.
+    pub(super) fn adopt(fd: i32) -> Result<Fown, Errno> {
+        // SAFETY: plain fcntl on the inherited file.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(errno::last());
+        }
+        let shared = Shared(super::fdtab::hide(fd));
+        let local = shared.read()?;
+        Ok(Fown {
+            state: Mutex::new(State {
+                local,
+                shared: Some(shared),
+            }),
+        })
+    }
+
     pub(super) fn load(r: &mut super::fork_state::Reader) -> Fown {
         let owner = Owner {
             kind: r.i32(),

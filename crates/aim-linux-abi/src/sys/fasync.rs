@@ -29,6 +29,8 @@
 //! holds too, as Linux's children share the file; each event is signalled
 //! by the one holder the record's lock elects, and only while every
 //! holder's view says O_ASYNC is set and Darwin does not hold the owner.
+//! An exec that runs linux-run again passes the record's file on its
+//! command line ([`exec_text`]).
 //!
 //! An evdev (its socket is the layer's transport), a pty (its O_ASYNC is
 //! the pty keeper's description's) and a host tty (Darwin's F_SETOWN of a
@@ -799,6 +801,102 @@ pub fn after_fork_child() -> Result<(), Errno> {
     Ok(())
 }
 
+/// The owner records an exec carries: they lose close-on-exec until the
+/// exec happens, and get it back if it fails.
+pub(crate) struct ExecRecords(Vec<i32>);
+
+impl Drop for ExecRecords {
+    fn drop(&mut self) {
+        for fd in &self.0 {
+            // SAFETY: plain fcntl on our private file.
+            unsafe { libc::fcntl(*fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+    }
+}
+
+/// Exec: each file kept here with a guest fd that survives the exec, one
+/// line each: those fds, the descriptor of its owner's record, and the
+/// guest fd that set O_ASYNC, or `-`. The records survive the exec as long
+/// as the returned guard lives.
+pub(crate) fn exec_text() -> Result<(String, ExecRecords), Errno> {
+    let files = lock(&FILES);
+    let mut groups: Vec<(Vec<i32>, &Arc<File>)> = Vec::new();
+    for (fd, file) in files.iter().flatten() {
+        // SAFETY: plain fcntl.
+        let flags = unsafe { libc::fcntl(*fd, libc::F_GETFD) };
+        if flags < 0 {
+            return Err(errno::last());
+        }
+        if flags & libc::FD_CLOEXEC != 0 {
+            continue;
+        }
+        match groups
+            .iter_mut()
+            .find(|(_, other)| Arc::ptr_eq(other, file))
+        {
+            Some((fds, _)) => fds.push(*fd),
+            None => groups.push((vec![*fd], file)),
+        }
+    }
+    let mut records = ExecRecords(Vec::new());
+    let mut text = String::new();
+    for (fds, file) in groups {
+        // A record that was never shared has never been set: nothing to
+        // carry.
+        let Some(record) = file.fown.shared_fd() else {
+            continue;
+        };
+        // SAFETY: plain fcntl on our private file.
+        if unsafe { libc::fcntl(record, libc::F_SETFD, 0) } < 0 {
+            return Err(errno::last());
+        }
+        records.0.push(record);
+        let fds: Vec<String> = fds.iter().map(i32::to_string).collect();
+        let armed = match lock(&file.armed).as_ref() {
+            Some(armed) => armed.fd.to_string(),
+            None => "-".into(),
+        };
+        text += &format!("{}\t{record}\t{armed}\n", fds.join(","));
+    }
+    Ok((text, records))
+}
+
+/// After exec: the files [`exec_text`] described, on the owner records
+/// they share with the other processes that hold them, armed again.
+pub fn exec_restore(text: &str) -> Result<(), Errno> {
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let [fds, record, armed] = fields[..] else {
+            return Err(errno::EINVAL);
+        };
+        let fds = fds
+            .split(',')
+            .map(|fd| fd.parse::<i32>().ok())
+            .collect::<Option<Vec<_>>>()
+            .ok_or(errno::EINVAL)?;
+        let record = record.parse::<i32>().map_err(|_| errno::EINVAL)?;
+        let armed = match armed {
+            "-" => None,
+            fd => Some(fd.parse::<i32>().map_err(|_| errno::EINVAL)?),
+        };
+        let first = *fds.first().ok_or(errno::EINVAL)?;
+        let file = Arc::new(File {
+            fown: Fown::adopt(record)?,
+            source: Source::of(first, fdtab::get(first).as_ref())?,
+            armed: Mutex::new(None),
+        });
+        let mut table = lock(&FILES);
+        for fd in &fds {
+            table.get_or_insert_default().insert(*fd, file.clone());
+        }
+        drop(table);
+        if let Some(si_fd) = armed {
+            refresh(first, si_fd, &file)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::sigframe::Siginfo;
@@ -1289,6 +1387,41 @@ mod tests {
         put(fd, b"x");
         assert!(quiet(SIGRT) && quiet(SIGIO));
         close(&[fd]);
+    }
+
+    /// Exec by running linux-run again: what `exec_text` describes of the
+    /// fds that survive it (not a close-on-exec dup's) comes back in the
+    /// new image, armed on the same owner record.
+    #[test]
+    fn exec_carries_owner_and_registration() {
+        if fdtab::isolated_kernel_test("sys::fasync::tests::exec_carries_owner_and_registration") {
+            return;
+        }
+        const SIGRT: i32 = 45;
+        fdtab::init();
+        super::super::signal::install_host_handlers();
+        let mut p = [0i32; 2];
+        assert_eq!(fs::pipe2([p.as_mut_ptr() as u64, 0, 0, 0, 0, 0]), 0);
+        setsig(p[0], SIGRT);
+        let alias = fs::fcntl([p[0] as u64, 1030, 0, 0, 0, 0]) as i32;
+        assert!(alias >= 0);
+        let (text, records) = exec_text().unwrap();
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.starts_with(&format!("{}\t", p[0])));
+        // The old image's registration ends with it; its record's file is
+        // the one the exec carries.
+        let old = lock(&FILES).take();
+        for file in old.iter().flat_map(|files| files.values()) {
+            file.disarm();
+        }
+        exec_restore(&text).unwrap();
+        drop(records);
+        assert_eq!(fcntl(p[0], F_GETSIG, 0), SIGRT as i64);
+        assert_eq!(fcntl(alias, F_GETSIG, 0), 0);
+        put(p[1], b"x");
+        assert_eq!(reason(SIGRT, p[0]), (1, 0x41));
+        std::mem::forget(old);
+        close(&[p[0], p[1], alias]);
     }
 
     /// An eventfd has no fasync: FIOASYNC cannot change O_ASYNC, F_SETFL
