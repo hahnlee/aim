@@ -49,8 +49,7 @@
 //!   A reader that opens the keyboard while they show nothing gets
 //!   `KEY_SLEEP` pressed, for the press it was not there for.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use super::codes::*;
 use super::cursor::Hotspots;
@@ -266,9 +265,6 @@ struct Pointer {
 /// The input side of the display server: its devices and the translation
 /// state.
 pub struct Input {
-    /// Whether the Mac's screens show nothing, for a reader opening the
-    /// keyboard.
-    hidden: Arc<AtomicBool>,
     devices: Devices,
     width: u32,
     height: u32,
@@ -283,18 +279,7 @@ impl Input {
     /// `width` x `height`: the display, in pixels, at `dpi`, showing the
     /// device at `density` (`ro.sf.lcd_density`).
     pub fn new(devices: Devices, width: u32, height: u32, dpi: f64, density: u32) -> Input {
-        let hidden = Arc::new(AtomicBool::new(false));
-        let level = hidden.clone();
-        devices.on_open(
-            KEYBOARD,
-            Arc::new(move || {
-                level
-                    .load(Ordering::Relaxed)
-                    .then_some(keymap::SYSTEM_SLEEP)
-            }),
-        );
         Input {
-            hidden,
             devices,
             width,
             height,
@@ -620,23 +605,27 @@ impl Input {
     /// sleep and wake keys put Android to sleep and wake it
     /// (PhoneWindowManager's `KEYCODE_SLEEP`, `KEYCODE_WAKEUP`).
     pub fn screen_shown(&self, shown: bool, t: i64) {
-        self.hidden.store(!shown, Ordering::Relaxed);
         let usage = if shown {
             keymap::SYSTEM_WAKE_UP
         } else {
             keymap::SYSTEM_SLEEP
         };
-        if let Some(code) = self.devices.key_of(KEYBOARD, usage) {
-            self.devices.emit(KEYBOARD, t, &[(EV_KEY, code, 1)]);
-            self.devices.emit(KEYBOARD, t, &[(EV_KEY, code, 0)]);
-        }
+        self.devices
+            .set_open_key(KEYBOARD, Self::open_key(shown), Some((usage, t)));
     }
 
     /// The Mac's screens' state before the devices were made, with no
     /// reader to press a key for: a reader opening the keyboard while they
     /// show nothing gets System Sleep pressed (as each opening does).
     pub fn screen_at_start(&self, shown: bool) {
-        self.hidden.store(!shown, Ordering::Relaxed);
+        self.devices
+            .set_open_key(KEYBOARD, Self::open_key(shown), None);
+    }
+
+    /// The key a reader opening the keyboard gets while the Mac's screens
+    /// are `shown` or not.
+    fn open_key(shown: bool) -> Option<u32> {
+        (!shown).then_some(keymap::SYSTEM_SLEEP)
     }
 
     /// A physical key with scan code `usage` down or up.
@@ -944,6 +933,32 @@ mod tests {
         let mut late = open(&dir, KEYBOARD);
         assert_eq!(keys(&mut late, 4), [(KEY_SLEEP, 1), (KEY_SLEEP, 0)]);
         input.close();
+    }
+
+    /// A reader that has opened the keyboard gets the press for the state
+    /// it opened in before any change's press, whichever state that is.
+    #[test]
+    fn a_reader_opening_as_the_screens_change_gets_them_in_order() {
+        for shown in [true, false] {
+            for i in 0..20 {
+                let (input, dir) = setup(&format!("screens-race-{shown}-{i}"));
+                input.screen_at_start(shown);
+                let mut k = open(&dir, KEYBOARD);
+                input.screen_shown(!shown, 1);
+                input.screen_shown(shown, 2);
+                let (first, second) = if shown {
+                    (KEY_SLEEP, KEY_WAKEUP)
+                } else {
+                    (KEY_WAKEUP, KEY_SLEEP)
+                };
+                let mut want = vec![(first, 1), (first, 0), (second, 1), (second, 0)];
+                if !shown {
+                    want.splice(0..0, [(KEY_SLEEP, 1), (KEY_SLEEP, 0)]);
+                }
+                assert_eq!(keys(&mut k, 2 * want.len()), want);
+                input.close();
+            }
+        }
     }
 
     #[test]
