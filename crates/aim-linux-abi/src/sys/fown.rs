@@ -145,17 +145,27 @@ impl Shared {
         Ok(())
     }
 
-    /// Whether this process signals the event at hand: the one that holds,
-    /// or now takes, an exclusive POSIX record lock on the file. Darwin
-    /// gives it to one process at a time and drops it when that process
-    /// closes the file or exits, so another holder takes over.
-    fn won(&self) -> bool {
+    /// A POSIX record lock request on byte `at` of the file.
+    fn lock(&self, at: i64, kind: i16, wait: bool) -> i32 {
         // SAFETY: an all-zero flock is valid.
-        let mut whole: libc::flock = unsafe { std::mem::zeroed() };
-        whole.l_type = libc::F_WRLCK as i16;
-        whole.l_whence = libc::SEEK_SET as i16;
+        let mut range: libc::flock = unsafe { std::mem::zeroed() };
+        range.l_type = kind;
+        range.l_whence = libc::SEEK_SET as i16;
+        range.l_start = at;
+        range.l_len = 1;
+        let cmd = if wait { libc::F_SETLKW } else { libc::F_SETLK };
         // SAFETY: a lock request on our private file.
-        if unsafe { libc::fcntl(self.0, libc::F_SETLK, &whole) } == 0 {
+        unsafe { libc::fcntl(self.0, cmd, &range) }
+    }
+
+    /// Whether this process signals the event at hand: the one that holds,
+    /// or now takes, an exclusive POSIX record lock on the file's byte
+    /// [`ELECTION`]. Darwin gives it to one process at a time and drops it
+    /// when that process closes the file or exits, and a process that
+    /// stops watching gives it up ([`Shared::abstain`]), so another holder
+    /// takes over.
+    fn won(&self) -> bool {
+        if self.lock(ELECTION, libc::F_WRLCK, false) == 0 {
             return true;
         }
         let error = errno::last();
@@ -166,7 +176,19 @@ impl Shared {
         crate::diag!("O_ASYNC election: errno {error}");
         true
     }
+
+    fn abstain(&self) {
+        if self.lock(ELECTION, libc::F_UNLCK, false) < 0 {
+            crate::diag!("O_ASYNC election: unlock errno {}", errno::last());
+        }
+    }
 }
+
+/// The record file's byte whose lock elects the process that signals.
+const ELECTION: i64 = 0;
+/// The record file's byte whose lock serializes changes to the record
+/// between the processes holding it.
+const CHANGE: i64 = 1;
 
 impl Drop for Shared {
     fn drop(&mut self) {
@@ -229,10 +251,19 @@ impl Fown {
             state.shared = Some(shared);
         }
         let shared = state.shared.as_ref().unwrap();
-        let mut record = shared.read()?;
-        change(&mut record);
-        shared.write(&record)?;
-        state.local = record;
+        // Another holder's change between the read and the write would be
+        // lost; this process's threads wait on the state's lock.
+        if shared.lock(CHANGE, libc::F_WRLCK, true) < 0 {
+            return Err(errno::last());
+        }
+        let changed = shared.read().and_then(|mut record| {
+            change(&mut record);
+            shared.write(&record).map(|()| record)
+        });
+        if shared.lock(CHANGE, libc::F_UNLCK, false) < 0 {
+            return Err(errno::last());
+        }
+        state.local = changed?;
         Ok(())
     }
 
@@ -276,6 +307,14 @@ impl Fown {
     pub fn won(&self) -> bool {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.shared.as_ref().is_none_or(Shared::won)
+    }
+
+    /// This process stopped watching the file: another holder signals.
+    pub fn abstain(&self) {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(shared) = &state.shared {
+            shared.abstain();
+        }
     }
 
     fn set(&self, kind: i32, pid: i32) -> i64 {

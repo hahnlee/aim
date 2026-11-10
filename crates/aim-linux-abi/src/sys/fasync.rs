@@ -461,6 +461,7 @@ impl File {
             unregister(armed.id);
             close_private(armed.kq);
             close_private(armed.held);
+            self.fown.abstain();
         }
     }
 }

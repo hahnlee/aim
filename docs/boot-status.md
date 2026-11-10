@@ -136,8 +136,10 @@ signal it (#2858, #2859, #2860). The owner, the signal and a layer-kept O_ASYNC
 are a record in a private file that a fork child shares, so an F_SETOWN,
 F_SETSIG or F_SETFL in either reaches both; each event is signalled once, by
 the process holding a POSIX record lock on that file, and another takes the
-lock once that process closes the file or exits (#2861). An evdev signals its
-owner the same way, POLL_IN on events and POLL_HUP when the device goes, and a
+lock once that process stops watching (clears O_ASYNC, hands the owner to
+Darwin), closes the file or exits; changes to the record hold a second lock
+on it, so concurrent ones from two processes are not lost (#2861). An evdev
+signals its owner the same way, POLL_IN on events and POLL_HUP when the device goes, and a
 pty POLL_IN on input and POLL_OUT on write space; a pty's O_ASYNC is its
 description's in the pty keeper, and both keep every owner in the layer
 (#2877). A fork child

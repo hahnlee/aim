@@ -357,6 +357,11 @@ fn a_fork_childs_fasync_copy_signals_each_event_once() {
 }
 
 #[test]
+fn a_forked_o_async_files_record_is_shared_without_lost_changes() {
+    check("fasync_shared_record");
+}
+
+#[test]
 fn epoll_fds_survive_fork() {
     check("epoll_fork");
 }

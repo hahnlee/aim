@@ -814,6 +814,7 @@ pub fn set_async(ino: &Arc<Inotify>, fd: i32, guest: i32, on: bool) -> Result<()
             if let Some(armed) = s.fasync.take().and_then(|f| f.armed) {
                 disarm(armed);
             }
+            s.owner.abstain();
         }
         _ => {}
     }
