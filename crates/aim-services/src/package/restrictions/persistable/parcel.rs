@@ -1,5 +1,6 @@
 //! Original `BaseBundle.writeToParcelInner` / `Parcel.writeValue` ABI.
 use super::{Bundle, Value};
+use aim_android_xml::JavaString;
 use aim_binder_host::parcel::Parcel;
 use std::collections::BTreeSet;
 
@@ -18,11 +19,11 @@ fn length(p: &mut Parcel, len: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn string(p: &mut Parcel, value: Option<&str>) -> Result<(), String> {
-    if value.is_some_and(|s| s.encode_utf16().count() > i32::MAX as usize) {
+fn string(p: &mut Parcel, value: Option<&JavaString>) -> Result<(), String> {
+    if value.is_some_and(|s| s.units().len() > i32::MAX as usize) {
         return Err("persistable string exceeds Parcel range".into());
     }
-    p.write_string16(value);
+    p.write_string16_units(value.map(JavaString::units));
     Ok(())
 }
 
@@ -34,21 +35,21 @@ fn write_bundle(p: &mut Parcel, bundle: &Bundle) -> Result<(), String> {
     let mut keys = BTreeSet::new();
     let mut entries = Vec::new();
     for (key, value) in &bundle.entries {
-        if !keys.insert(key.as_deref()) {
+        if !keys.insert(key.as_ref()) {
             return Err("duplicate persistable key".into());
         }
         entries.push((key, value));
     }
     // ArrayMap's signed String.hashCode order, with stable insertion order
     // for hash collisions, including null and the empty string (hash zero).
-    entries.sort_by_key(|(key, _)| hash(key.as_deref()));
+    entries.sort_by_key(|(key, _)| hash(key.as_ref()));
     let length_at = p.position();
     p.write_i32(-1);
     p.write_i32(crate::bundle::MAGIC);
     let start = p.position();
     length(p, entries.len())?;
     for (key, value) in entries {
-        string(p, key.as_deref())?;
+        string(p, key.as_ref())?;
         write_value(p, value)?;
     }
     let bytes = i32::try_from(p.position() - start)
@@ -58,11 +59,8 @@ fn write_bundle(p: &mut Parcel, bundle: &Bundle) -> Result<(), String> {
     Ok(())
 }
 
-fn hash(key: Option<&str>) -> i32 {
-    key.map_or(0, |s| {
-        s.encode_utf16()
-            .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(i32::from(c)))
-    })
+fn hash(key: Option<&JavaString>) -> i32 {
+    key.map_or(0, JavaString::hash_code)
 }
 
 fn array<T>(
@@ -116,7 +114,7 @@ fn write_value(p: &mut Parcel, value: &Value) -> Result<(), String> {
             p.write_bool(*v);
             Ok(())
         })?,
-        Value::Strings(values) => array(p, values, |p, v| string(p, v.as_deref()))?,
+        Value::Strings(values) => array(p, values, |p, v| string(p, v.as_ref()))?,
         Value::Bundle(value) => write_bundle(p, value)?,
     }
     Ok(())
@@ -131,8 +129,8 @@ mod tests {
             entries: vec![(None, Value::Int(1)), (None, Value::Int(2))],
         };
         assert!(duplicated.parcel().unwrap_err().contains("duplicate"));
-        assert_eq!(hash(Some("Aa")), hash(Some("BB")));
-        assert_eq!(hash(None), hash(Some("")));
+        assert_eq!(hash(Some(&"Aa".into())), hash(Some(&"BB".into())));
+        assert_eq!(hash(None), hash(Some(&"".into())));
         assert_eq!(Bundle::default().parcel().unwrap().data(), &[0, 0, 0, 0]);
     }
 }
@@ -175,7 +173,9 @@ fn read_bundle(
     }
     let mut entries = Vec::new();
     for _ in 0..count {
-        let key = reader.read_string16()?;
+        // Parcel strings stay strict until package-restrictions reads keep
+        // Java strings, so an accepted value can always be read back (#843).
+        let key = reader.read_string16()?.map(JavaString::from);
         let value = read_value(reader, depth + 1)?;
         if reader.position() > end {
             return Err(BAD_VALUE);
@@ -190,7 +190,7 @@ fn read_bundle(
         return Err(BAD_VALUE);
     }
     reader.read_bool()?; // BaseBundle's hasIntent footer; no intent graph is accepted.
-    entries.sort_by_key(|(key, _)| hash(key.as_deref()));
+    entries.sort_by_key(|(key, _)| hash(key.as_ref()));
     Ok(Bundle { entries })
 }
 fn read_value(
@@ -203,7 +203,7 @@ fn read_value(
         -1 => Value::Null,
         0 => reader
             .read_string16()?
-            .map(Value::String)
+            .map(|s| Value::String(s.into()))
             .unwrap_or(Value::Null),
         1 => Value::Int(reader.read_i32()?),
         6 => Value::Long(reader.read_i64()?),
@@ -223,7 +223,7 @@ fn read_value(
             match kind {
                 14 => Value::Strings(
                     (0..count)
-                        .map(|_| reader.read_string16())
+                        .map(|_| reader.read_string16().map(|s| s.map(JavaString::from)))
                         .collect::<Result<_, _>>()?,
                 ),
                 18 => Value::Ints(

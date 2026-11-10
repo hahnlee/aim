@@ -382,7 +382,7 @@ fn suspend(ctx: &mut Context<'_>, command: &str) -> Result<Option<i32>, Exceptio
                         text.parse()
                             .map_err(|_| Exception::illegal_argument("Invalid double extra"))?,
                     )),
-                    _ => Value::String(text),
+                    _ => Value::String(text.into()),
                 };
                 let bundle = if arg.starts_with("--a") {
                     &mut app
@@ -392,11 +392,11 @@ fn suspend(ctx: &mut Context<'_>, command: &str) -> Result<Option<i32>, Exceptio
                 if let Some(entry) = bundle
                     .entries
                     .iter_mut()
-                    .find(|(name, _)| name.as_deref() == Some(key.as_str()))
+                    .find(|(name, _)| name.as_ref().is_some_and(|name| *name == *key))
                 {
                     entry.1 = value;
                 } else {
-                    bundle.entries.push((Some(key), value));
+                    bundle.entries.push((Some(key.into()), value));
                 }
             }
             "--" => {

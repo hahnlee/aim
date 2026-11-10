@@ -35,7 +35,7 @@ const UID_UNKNOWN: i32 = -1;
 
 fn int(bundle: &Bundle, key: &str) -> Option<i32> {
     bundle.entries.iter().rev().find_map(|(k, v)| match v {
-        Value::Int(i) if k.as_deref() == Some(key) => Some(*i),
+        Value::Int(i) if k.as_ref().is_some_and(|k| *k == *key) => Some(*i),
         _ => None,
     })
 }
@@ -112,7 +112,9 @@ impl SystemUpdate {
             int(&b, KEY_VERSION).filter(|&v| v != -1)?;
             int(&b, KEY_BOOT_COUNT).filter(|&c| c != -1 && c == self.boot_count())?;
             let info = b.entries.into_iter().rev().find_map(|(k, v)| match v {
-                Value::Bundle(info) if k.as_deref() == Some(KEY_INFO_BUNDLE) => Some(info),
+                Value::Bundle(info) if k.as_ref().is_some_and(|k| *k == *KEY_INFO_BUNDLE) => {
+                    Some(info)
+                }
                 _ => None,
             })?;
             let status = int(&info, KEY_STATUS).filter(|&s| s != STATUS_UNKNOWN)?;

@@ -2,14 +2,15 @@
 // Portions ported from AOSP PersistableBundle.java and XmlUtils.java.
 // Copyright (C) 2006, 2014 The Android Open Source Project
 // SPDX-License-Identifier: Apache-2.0
-use aim_android_xml::{Element, Node};
-use std::borrow::Cow;
+use aim_android_xml::{Element, JavaString, Node};
 mod parcel;
 
+/// Keys and strings are Java strings: they keep unpaired surrogates that
+/// binary XML reads by `aim_android_xml::read_next_lossless` carry.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Bundle {
     /// Null keys are accepted by the original ArrayMap. Duplicate keys replace.
-    pub entries: Vec<(Option<String>, Value)>,
+    pub entries: Vec<(Option<JavaString>, Value)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -19,12 +20,12 @@ pub enum Value {
     Long(i64),
     Double(Double),
     Bool(bool),
-    String(String),
+    String(JavaString),
     Ints(Vec<i32>),
     Longs(Vec<i64>),
     Doubles(Vec<Double>),
     Bools(Vec<bool>),
-    Strings(Vec<Option<String>>),
+    Strings(Vec<Option<JavaString>>),
     Bundle(Bundle),
 }
 
@@ -67,7 +68,7 @@ type Result<T> = std::result::Result<T, Error>;
 pub(super) enum Event<'a> {
     Start(&'a Element, usize),
     End(&'a Element, usize),
-    Text(Cow<'a, str>),
+    Text(JavaString),
 }
 
 /// `next()` events, including text/CDATA but excluding comments.
@@ -86,20 +87,27 @@ impl<'a> Cursor<'a> {
                         add(child, depth + 1, events);
                         pending_text = false;
                     }
-                    Node::Token(aim_android_xml::TEXT | aim_android_xml::CDSECT, Some(text)) => {
-                        if text.is_empty() {
+                    Node::Token(aim_android_xml::TEXT | aim_android_xml::CDSECT, Some(_))
+                    | Node::Utf16(aim_android_xml::TEXT | aim_android_xml::CDSECT, _) => {
+                        let text = match node {
+                            Node::Token(_, Some(text)) => JavaString::from(text.as_str()),
+                            Node::Utf16(_, text) => text.clone(),
+                            _ => unreachable!(),
+                        };
+                        if text.units().is_empty() {
                             continue;
                         }
                         if pending_text {
                             if let Some(Event::Text(previous)) = events.last_mut() {
-                                previous.to_mut().push_str(text);
+                                previous.push(&text);
                             }
                         } else {
-                            events.push(Event::Text(Cow::Borrowed(text)));
+                            events.push(Event::Text(text));
                         }
                         pending_text = true;
                     }
-                    Node::Token(aim_android_xml::COMMENT | 8, _) => {}
+                    Node::Token(aim_android_xml::COMMENT | 8, _)
+                    | Node::Utf16(aim_android_xml::COMMENT | 8, _) => {}
                     _ => pending_text = false,
                 }
             }
@@ -185,8 +193,7 @@ impl Bundle {
                 },
             };
             if let Some(key) = key {
-                e.attrs
-                    .push(("name".into(), aim_android_xml::Value::String(key.clone())));
+                e.attrs.push(("name".into(), key.clone().value(false)));
             }
             if let Some(value) = scalar {
                 e.attrs.push(("value".into(), value));
@@ -214,15 +221,11 @@ impl Bundle {
                 ),
                 Value::Strings(v) => Some(
                     v.iter()
-                        .map(|v| {
-                            v.as_ref()
-                                .map(|v| aim_android_xml::Value::String(v.clone()))
-                        })
+                        .map(|v| v.clone().map(|v| v.value(false)))
                         .collect(),
                 ),
                 Value::String(text) => {
-                    e.content
-                        .push(Node::Token(aim_android_xml::TEXT, Some(text.clone())));
+                    e.content.push(text.clone().node(aim_android_xml::TEXT));
                     None
                 }
                 _ => None,
@@ -320,6 +323,33 @@ mod tests {
     }
 
     #[test]
+    fn java_strings_survive_binary_xml_and_parcel() {
+        let lone = JavaString::from_units(vec![0xd83d]);
+        let value = Bundle {
+            entries: vec![
+                (
+                    Some(lone.clone()),
+                    Value::String(JavaString::from_units(vec![0x61, 0, 0xde00])),
+                ),
+                (Some("a".into()), Value::Strings(vec![Some(lone.clone())])),
+            ],
+        };
+        let bytes = aim_android_xml::abx::write(&value.save("app-extras").unwrap()).unwrap();
+        assert!(aim_android_xml::read_next(&bytes).is_err());
+        let root = aim_android_xml::read_next_lossless(&bytes).unwrap();
+        assert_eq!(Bundle::restore(&root).unwrap(), value);
+        assert_eq!(aim_android_xml::abx::write(&root).unwrap(), bytes);
+        let parcel = value.parcel().unwrap();
+        // writeString16 of the lone key: length 1, the unit, NUL, padding.
+        assert!(
+            parcel
+                .data()
+                .windows(8)
+                .any(|w| w == [1, 0, 0, 0, 0x3d, 0xd8, 0, 0])
+        );
+    }
+
+    #[test]
     fn duplicate_defusing_occurs_after_map_population() {
         let root = aim_android_xml::read_next(b"<extras><int name='same' value='1'/><float name='same' value='2.5'/><map name='nested'><int name='keep' value='3'/><list name='drop'/></map></extras>").unwrap();
         let value = Bundle::restore(&root).unwrap();
@@ -372,11 +402,11 @@ mod tests {
 // Float, byte-array, list and set are valid XmlUtils values, but the
 // PersistableBundle constructor removes them *after* duplicate replacement.
 fn read_map(cursor: &mut Cursor<'_>, end: &str) -> Result<Bundle> {
-    let mut entries: Vec<(Option<String>, Option<Value>)> = Vec::new();
+    let mut entries: Vec<(Option<JavaString>, Option<Value>)> = Vec::new();
     loop {
         match cursor.event() {
             Some(Event::Start(e, _)) => {
-                let key = e.string("name").map(|s| s.into_owned());
+                let key = e.java_string("name");
                 let value = read_value(cursor)?;
                 if let Some(entry) = entries.iter_mut().find(|(k, _)| *k == key) {
                     entry.1 = value;
@@ -418,10 +448,10 @@ fn read_value(cursor: &mut Cursor<'_>) -> Result<Option<Value>> {
             None
         }
         "string" => {
-            let mut text = String::new();
+            let mut text = JavaString::default();
             while let Some(event) = cursor.next() {
                 match event {
-                    Event::Text(value) => text.push_str(&value),
+                    Event::Text(value) => text.push(&value),
                     Event::Start(_, _) => return Err(xml("start tag in string")),
                     Event::End(end, _) if end.name == "string" => {
                         return Ok(Some(Value::String(text)));
@@ -450,10 +480,8 @@ fn read_value(cursor: &mut Cursor<'_>) -> Result<Option<Value>> {
                 .map(|v| Some(Value::Bools(v)));
         }
         "string-array" => {
-            return array(cursor, None, |e| {
-                Ok(e.string("value").map(|s| s.into_owned()))
-            })
-            .map(|v| Some(Value::Strings(v)));
+            return array(cursor, None, |e| Ok(e.java_string("value")))
+                .map(|v| Some(Value::Strings(v)));
         }
         "map" => {
             cursor.next();
@@ -481,10 +509,14 @@ fn read_value(cursor: &mut Cursor<'_>) -> Result<Option<Value>> {
             while let Some(event) = cursor.next() {
                 match event {
                     Event::Text(text) if num > 0 => {
-                        if text.encode_utf16().count() as i64 != i64::from(num) * 2 {
+                        if text.units().len() as i64 != i64::from(num) * 2 {
                             return Err(xml("invalid byte-array length"));
                         }
-                        if !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        if !text
+                            .units()
+                            .iter()
+                            .all(|u| u8::try_from(*u).is_ok_and(|b| b.is_ascii_hexdigit()))
+                        {
                             return Err(Error::Runtime("invalid byte-array hex".into()));
                         }
                     }

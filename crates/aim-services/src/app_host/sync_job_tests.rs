@@ -567,11 +567,9 @@ fn migrate(jobs: &JobScheduler, markers: &mut (bool, bool)) {
         let mut complete = true;
         for (ns, job) in pending.into_iter().rev() {
             if ns.is_none()
-                && job
-                    .extras
-                    .entries
-                    .iter()
-                    .any(|(k, v)| k.as_deref() == Some("SyncManagerJob") && *v == V::Bool(true))
+                && job.extras.entries.iter().any(|(k, v)| {
+                    k.as_ref().is_some_and(|k| *k == *"SyncManagerJob") && *v == V::Bool(true)
+                })
             {
                 schedule_sync(jobs, Some("SyncManager"), Some(("p", 0, "sync-tag")));
                 cancel_sync(jobs, None);

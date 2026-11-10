@@ -197,7 +197,7 @@ fn text_content(e: &Element, out: &mut String) {
         match node {
             Node::Element(child) => text_content(child, out),
             Node::Token(TEXT | CDSECT | ENTITY_REF, Some(text)) => out.push_str(text),
-            Node::Token(..) => {}
+            Node::Token(..) | Node::Utf16(..) => {}
         }
     }
 }

@@ -4,7 +4,7 @@
 // Copyright (C) 2006 The Android Open Source Project
 // SPDX-License-Identifier: Apache-2.0
 use crate::package::restrictions::persistable::{Bundle, Double, Value as Persistable};
-use aim_android_xml::{Element, Node, Value};
+use aim_android_xml::{Element, JavaString, Node, Value};
 use aim_binder_host::parcel::{BAD_VALUE, Reader, Result};
 
 pub(super) fn extras(bytes: &[u8]) -> std::result::Result<Element, String> {
@@ -45,7 +45,7 @@ fn read_bundle(reader: &mut Reader<'_>, depth: usize) -> Result<Bundle> {
     }
     let mut bundle = Bundle::default();
     for _ in 0..count {
-        let key = reader.read_string16()?;
+        let key = reader.read_string16()?.map(JavaString::from);
         let value = read_value(reader, depth)?;
         if reader.position() > end {
             return Err(BAD_VALUE);
@@ -61,7 +61,7 @@ fn read_bundle(reader: &mut Reader<'_>, depth: usize) -> Result<Bundle> {
     }
     bundle
         .entries
-        .sort_by_key(|(key, _)| key.as_deref().map_or(0, crate::package::info::java_hash));
+        .sort_by_key(|(key, _)| key.as_ref().map_or(0, JavaString::hash_code));
     Ok(bundle)
 }
 fn array<T>(
@@ -87,15 +87,17 @@ fn read_value(reader: &mut Reader<'_>, depth: usize) -> Result<Persistable> {
         -1 => Persistable::Null,
         0 => reader
             .read_string16()?
-            .map(Persistable::String)
+            .map(|s| Persistable::String(s.into()))
             .unwrap_or(Persistable::Null),
         1 => Persistable::Int(reader.read_i32()?),
         6 => Persistable::Long(reader.read_i64()?),
         8 => Persistable::Double(Double::new(f64::from_bits(reader.read_i64()? as u64))),
         9 => Persistable::Bool(reader.read_i32()? == 1),
-        14 => array(reader, 4, |r| r.read_string16())?
-            .map(Persistable::Strings)
-            .unwrap_or(Persistable::Null),
+        14 => array(reader, 4, |r| {
+            r.read_string16().map(|s| s.map(JavaString::from))
+        })?
+        .map(Persistable::Strings)
+        .unwrap_or(Persistable::Null),
         18 => array(reader, 4, |r| r.read_i32())?
             .map(Persistable::Ints)
             .unwrap_or(Persistable::Null),

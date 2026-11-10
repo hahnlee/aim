@@ -209,10 +209,16 @@ impl Parcel {
 
     /// `writeString16` (Java's `writeString`).
     pub fn write_string16(&mut self, value: Option<&str>) {
-        let Some(value) = value else {
+        let units: Option<Vec<u16>> = value.map(|v| v.encode_utf16().collect());
+        self.write_string16_units(units.as_deref());
+    }
+
+    /// `writeString16` of a Java string's UTF-16 units, unpaired surrogates
+    /// included.
+    pub fn write_string16_units(&mut self, units: Option<&[u16]>) {
+        let Some(units) = units else {
             return self.write_i32(-1);
         };
-        let units: Vec<u16> = value.encode_utf16().collect();
         self.write_i32(units.len() as i32);
         for unit in units.iter().chain([&0]) {
             self.data.extend_from_slice(&unit.to_le_bytes());
