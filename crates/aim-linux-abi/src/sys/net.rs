@@ -2298,6 +2298,32 @@ fn linux_msg_flags(h: i32) -> i32 {
     f
 }
 
+/// `sk_stream_wait_connect` for a TCP send on host socket `fd` that
+/// Darwin failed with ENOTCONN: EPIPE for a socket neither connected nor
+/// connecting (never connected, or listening); for a connecting one,
+/// EAGAIN when the send must not wait, else the wait for the connection,
+/// after which the send is tried again.
+fn wait_connect(fd: i32, flags: u64) -> Result<(), i64> {
+    const SS_ISCONNECTING: i16 = 0x4;
+    let connecting = socket_info(fd).is_some_and(|info| {
+        i16::from_ne_bytes(info[SOI_STATE..SOI_STATE + 2].try_into().unwrap()) & SS_ISCONNECTING
+            != 0
+    });
+    if !connecting {
+        return Err(-32);
+    }
+    // SAFETY: F_GETFL on the socket.
+    if flags & L_MSG_DONTWAIT != 0
+        || unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_NONBLOCK != 0
+    {
+        return Err(-(EAGAIN as i64));
+    }
+    match fdtab::wait_for(fd, libc::POLLOUT) {
+        0 => Ok(()),
+        error => Err(error),
+    }
+}
+
 /// A send failed with EPIPE: Linux raises SIGPIPE unless MSG_NOSIGNAL.
 fn epipe(r: i64, flags: u64) -> i64 {
     if r == -32 && flags & L_MSG_NOSIGNAL == 0 {
@@ -2423,6 +2449,12 @@ fn send(
         } else {
             refused(s)
         };
+    }
+    while r == -107 && any_sock(input).is_some_and(|s| s.tcp()) {
+        match wait_connect(input.fd(), flags) {
+            Ok(()) => r = transmit(input, iov, name, ctrl, flags),
+            Err(error) => return epipe(error, flags),
+        }
     }
     if unix_dgram.is_some() && !addressed && r == -89 {
         return -107;
@@ -3487,12 +3519,26 @@ pub(super) fn write_pinned(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i
     let fd = input.fd();
     let s = any_sock(&input)?;
     if let Family::Inet(_) = &s.family {
-        let r = dhcp_to_router(fd, &s, iov, None).unwrap_or_else(|| {
-            // SAFETY: the guest's iovec buffers.
-            errno::check(unsafe { libc::writev(fd, iov.as_ptr(), iov.len() as i32) } as i64)
-        });
+        let write = || {
+            dhcp_to_router(fd, &s, iov, None).unwrap_or_else(|| {
+                // SAFETY: the guest's iovec buffers.
+                errno::check(unsafe { libc::writev(fd, iov.as_ptr(), iov.len() as i32) } as i64)
+            })
+        };
+        let mut r = write();
+        while r == -107 && s.tcp() {
+            match wait_connect(fd, 0) {
+                Ok(()) => r = write(),
+                Err(error) => {
+                    r = error;
+                    break;
+                }
+            }
+        }
         traffic::account(&s, fd, true, r, None);
-        return Some(r);
+        // A TCP write's `sk_stream_error`, as a send's without
+        // MSG_NOSIGNAL.
+        return Some(if s.tcp() { epipe(r, 0) } else { r });
     }
     Some(send(&input, iov, None, None, 0))
 }

@@ -2103,6 +2103,63 @@ mod reportable_tests {
         close(&[blocking]);
     }
 
+    /// `sk_stream_wait_connect`: a send or write on a TCP socket neither
+    /// connected nor connecting, never connected or listening, fails with
+    /// EPIPE and raises SIGPIPE unless MSG_NOSIGNAL (`sk_stream_error`),
+    /// where Darwin's fails with ENOTCONN.
+    #[test]
+    fn a_send_on_an_unconnected_tcp_socket_is_epipe() {
+        let _view = crate::vfs::test_view();
+        const MSG_NOSIGNAL: u64 = 0x4000;
+        // SAFETY: this thread's signal mask and pending SIGPIPE.
+        let raised = |send: &dyn Fn() -> i64| unsafe {
+            let mut pipe: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut pipe);
+            libc::sigaddset(&mut pipe, libc::SIGPIPE);
+            let mut old: libc::sigset_t = std::mem::zeroed();
+            libc::pthread_sigmask(libc::SIG_BLOCK, &pipe, &mut old);
+            let r = send();
+            let mut pending: libc::sigset_t = std::mem::zeroed();
+            libc::sigpending(&mut pending);
+            let raised = libc::sigismember(&pending, libc::SIGPIPE) == 1;
+            if raised {
+                let mut signal = 0;
+                libc::sigwait(&pipe, &mut signal);
+            }
+            libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
+            (r, raised)
+        };
+        let fresh = crate::sys::net::socket([2, 1 | O_NONBLOCK, 0, 0, 0, 0]);
+        let listener = crate::sys::net::socket([10, 1 | O_NONBLOCK, 0, 0, 0, 0]);
+        let mut address = [0u8; 28];
+        address[..2].copy_from_slice(&10u16.to_le_bytes());
+        address[23] = 1;
+        assert_eq!(
+            crate::sys::net::bind([listener as u64, address.as_ptr() as u64, 28, 0, 0, 0]),
+            0
+        );
+        assert_eq!(crate::sys::net::listen([listener as u64, 1, 0, 0, 0, 0]), 0);
+        for fd in [fresh, listener] {
+            let byte = b"x".as_ptr() as u64;
+            let send = |flags: u64| crate::sys::net::sendto([fd as u64, byte, 1, flags, 0, 0]);
+            assert_eq!(raised(&|| send(0)), (-32, true), "fd {fd}");
+            assert_eq!(raised(&|| send(MSG_NOSIGNAL)), (-32, false), "fd {fd}");
+            assert_eq!(
+                raised(&|| fs::write([fd as u64, byte, 1, 0, 0, 0])),
+                (-32, true),
+                "fd {fd}"
+            );
+            let iov = [byte, 1];
+            let header = [0u64, 0, iov.as_ptr() as u64, 1, 0, 0, 0];
+            let sendmsg = |flags: u64| {
+                crate::sys::net::sendmsg([fd as u64, header.as_ptr() as u64, flags, 0, 0, 0])
+            };
+            assert_eq!(raised(&|| sendmsg(0)), (-32, true), "fd {fd}");
+            assert_eq!(raised(&|| sendmsg(MSG_NOSIGNAL)), (-32, false), "fd {fd}");
+        }
+        close(&[fresh, listener]);
+    }
+
     /// `POLLEX_SET` is EPOLLPRI alone: select sleeps for its timeout on an
     /// unconnected TCP socket asked only for exceptions, which `tcp_poll`
     /// reports hung up and writable.

@@ -150,7 +150,12 @@ POLLPRI|POLLRDBAND at EOF, nor a TCP socket's POLLWRBAND (#2918), to select as
 well. A TCP, AF_UNIX stream or
 AF_UNIX seqpacket socket never connected (`TCP_CLOSE`, bound or not, or after a
 refused connect) is OUT|HUP to poll, select and epoll at once (an AF_UNIX one
-with POLLWRBAND), which Darwin reports as nothing; edge-triggered once per
+with POLLWRBAND), which Darwin reports as nothing, and a TCP one's send or
+write fails with EPIPE and SIGPIPE (unless MSG_NOSIGNAL), as
+`sk_stream_wait_connect` fails it, a listening one's too, where Darwin's fails
+with ENOTCONN; a connecting one's waits for the connection, or is EAGAIN
+non-blocking; a TCP write raises SIGPIPE for EPIPE like a send (#2927);
+edge-triggered once per
 change, a shutdown included: its shutdown is recorded, as `inet_shutdown` (with
 ENOTCONN, an unconnected UDP socket's too, #2921) and `unix_shutdown` (with success, in any state Darwin's fails in:
 unconnected, listening, its peer closed) do, so SHUT_RD adds IN|RDHUP; a
