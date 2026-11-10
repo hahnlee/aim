@@ -458,6 +458,40 @@ mod tests {
             assert!(host.activities.launches.lock().unwrap().is_empty());
         });
     }
+    // Pinned ActivityStarter.recycleTask: a start into the focused task
+    // reports its top (mLastStartActivityRecord) though nothing moved.
+    #[test]
+    fn wait_for_a_start_into_the_focused_task_reports_its_top() {
+        with_start(|host, _| {
+            permissions(host);
+            let token = source(host);
+            let intent = RawIntent::of(None, 0x1000_0000, &[]).with_component("p", "p.Main");
+            host.activities.stack.lock().unwrap().tasks[0].intent = intent.intent.clone();
+            let mut p = Parcel::new();
+            super::super::activity_start_tests::args(Some("android"), 0, Some(intent))
+                .write(&mut p);
+            let p = super::super::activity::ActivityTaskManager(host.clone(), Binder::Local(0))
+                .transact(&mut Call {
+                    code: atm::START_ACTIVITY_AND_WAIT,
+                    flags: 0,
+                    sender_pid: 71,
+                    sender_euid: 1000,
+                    data: p.reader(),
+                })
+                .unwrap();
+            let mut r = p.reader();
+            r.read_exception().unwrap().unwrap();
+            assert_eq!(r.read_i32().unwrap(), 1);
+            assert_eq!(r.read_i32().unwrap(), 3); // START_DELIVERED_TO_TOP
+            assert!(!r.read_bool().unwrap());
+            assert_eq!(r.read_string16().unwrap().as_deref(), Some("p"));
+            assert_eq!(r.read_string16().unwrap().as_deref(), Some("p.Main"));
+            assert_eq!(r.read_i64().unwrap(), 0);
+            assert_eq!(r.read_i32().unwrap(), 0);
+            let stack = host.activities.stack.lock().unwrap();
+            assert_eq!(stack.focused_top().map(|a| a.token), Some(token));
+        });
+    }
     #[test]
     fn shell_wait_output_matches_android_format() {
         let mut w = WaitResult {

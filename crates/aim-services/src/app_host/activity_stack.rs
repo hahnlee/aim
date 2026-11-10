@@ -285,6 +285,9 @@ pub struct Decision {
     pub result_to: Option<u64>,
     /// The task brought to the front (`setTargetRootTaskIfNeeded`).
     pub front: Option<i32>,
+    /// The existing task the start goes to (`computeTargetTask`), in
+    /// front already or not.
+    pub target: Option<i32>,
     /// The root home task the start goes to comes to the front though no
     /// activity runs there (made by `getOrCreateRootTask`, or emptied), as
     /// `startActivityInner` moves it there (`moveToFront`). The original
@@ -782,6 +785,7 @@ impl Stack {
             }
         });
         d.outcome = Outcome::New(target);
+        d.target = target;
         d.home_front = s.activity_type == super::activity::ACTIVITY_TYPE_HOME
             && d.result_to.is_none()
             && flags & FLAG_ACTIVITY_NEW_TASK != 0

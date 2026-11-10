@@ -1367,8 +1367,16 @@ impl AppHost {
                 return Ok((code, Some(token)));
             }
             Outcome::Front(code) => {
+                commands.extend(self.activities.stack.lock().unwrap().apply(
+                    &d,
+                    Then::Nothing,
+                    Some(identity()),
+                    user_leaving,
+                ));
+                // `recycleTask`'s `mLastStartActivityRecord`: the target
+                // task's top once reset, whether or not it came to the front.
                 let stack = self.activities.stack.lock().unwrap();
-                let token = d.front.and_then(|t| stack.top(t)).map(|a| a.token);
+                let token = d.target.and_then(|t| stack.top(t)).map(|a| a.token);
                 drop(stack);
                 if let Some(token) = token {
                     self.track_activity_launch(
@@ -1381,12 +1389,6 @@ impl AppHost {
                         },
                     );
                 }
-                commands.extend(self.activities.stack.lock().unwrap().apply(
-                    &d,
-                    Then::Nothing,
-                    Some(identity()),
-                    user_leaving,
-                ));
                 deferred.extend(commands);
                 return Ok((code, token));
             }
