@@ -396,12 +396,15 @@ pub struct Spec {
     pub keymap: Vec<(u32, u16)>,
 }
 
-/// The keyboard's keymap: every key [`keymap`] maps, and Back (the
-/// consumer page's AC Back), which the Mac's back gestures press
-/// (`translate::Input::back`).
+/// The keyboard's keymap: every key [`keymap`] maps, Back (the consumer
+/// page's AC Back), which the Mac's back gestures press
+/// (`translate::Input::back`), and the system sleep and wake keys, which
+/// the Mac's screens press ([`translate::Input::screen_shown`]).
 pub fn keyboard_keymap() -> Vec<(u32, u16)> {
     let mut map = keymap::keymap();
     map.push((keymap::AC_BACK, KEY_BACK));
+    map.push((keymap::SYSTEM_SLEEP, KEY_SLEEP));
+    map.push((keymap::SYSTEM_WAKE_UP, KEY_WAKEUP));
     map
 }
 

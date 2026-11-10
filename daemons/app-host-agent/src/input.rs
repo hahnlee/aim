@@ -312,6 +312,7 @@ impl Dispatcher {
                     let usage_code = std::mem::take(&mut usage);
                     if let Some(key) =
                         mapper.process_key(&map, time, value != 0, code.into(), usage_code)
+                        && !crate::power::key(&key)
                     {
                         self.dispatch_key(key);
                     }

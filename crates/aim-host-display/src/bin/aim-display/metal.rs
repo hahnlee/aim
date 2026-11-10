@@ -421,7 +421,13 @@ pub fn watch_screen() {
 
 extern "C" fn screen_changed(_block: *const GlobalBlock, _note: Id) {
     let hidden = aim_host_display::screen::hidden();
-    HIDDEN.store(hidden.is_some(), Ordering::Relaxed);
+    let was = HIDDEN.swap(hidden.is_some(), Ordering::Relaxed);
+    // Android sleeps and wakes with the Mac's screens (docs/power.md).
+    if was != hidden.is_some()
+        && let Some(input) = crate::input::input()
+    {
+        input.screen_shown(hidden.is_none(), vsync::monotonic_ns());
+    }
     if hidden.is_some() {
         let waiting = std::mem::take(&mut *PRESENTED.lock().unwrap());
         for (_, fence) in waiting {

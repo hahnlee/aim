@@ -8,7 +8,8 @@
 //! (WindowManagerService's hold screen), keeps the Mac's display awake
 //! (`PreventUserIdleDisplaySleep`, docs/power.md); the device's state as
 //! apps read it. Binder sleep/wake requests share this display state;
-//! the Mac's display sleep/session notifications remain #670. There is no
+//! the Mac's display sleep and session lock arrive as the agent's sleep
+//! and wake key requests (docs/power.md). There is no
 //! device idle (doze); battery saver is the
 //! persisted `low_power` setting. Full-policy background-start/firewall
 //! decisions are read natively; remaining policies are #1489.

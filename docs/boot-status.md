@@ -219,7 +219,17 @@ The app host's power owner serves DEVICE_POWER-guarded Binder wake/sleep request
 with timestamp ordering, shared interactive/display queries, display-state callbacks
 and registered SCREEN_ON/OFF broadcasts (#2607). Display/screen blockers follow
 that state. Host regression checks cover denial, no-op and stale wake ordering;
-no guest boot or Mac sleep/session notification check was run (#670, 2026-11-01).
+the Mac's display sleep and session lock reach it as the agent's sleep and wake
+keys (#670); no app-host check was run.
+The Mac's screens put Android to sleep and wake it from the device's side: when
+its main display sleeps or its session locks, aim-display presses the
+keyboard's System Sleep (`KEY_SLEEP`), and System Wake Up (`KEY_WAKEUP`) when
+the screens show windows again (#670). The original PhoneWindowManager calls
+`goToSleep(SLEEP_BUTTON)` and `wakeUp(WAKE_KEY)`; a window-mode boot with the
+original PowerManagerService went Awake to Asleep (display suspend blocker
+released, SCREEN_OFF) and back (SCREEN_ON) on those keycodes, injected with
+`input keyevent` because a background `aimctl start` has no input devices
+(2026-11-11).
 The Mac's screen lock is the keyguard for `ACTION_USER_PRESENT`: the app host
 reads the session's lock at start and hears each lock/unlock, and sends
 USER_PRESENT (the keyguard's flags, user 0, no permission, most-recent delivery
@@ -1254,8 +1264,8 @@ checks WAKE_LOCK/UPDATE_DEVICE_STATS before mutation, and sends acquire/change/
 release attribution to native battery timers (#1460 slice 5h/#1928). Named
 partial/full/draw pools, screen-off/background bases, aggregate partial timers
 and PID spans have host coverage. Native power updates its existing display
-assertion attribution in place as sources change. System-sleep assertion mapping
-remains #669/#670, pending Android/Mac display sleep synchronization.
+assertion attribution in place as sources change. The system-sleep assertion
+remains #669; Android's display now sleeps with the Mac's (#670).
 A pinned retained SyncManager JVM cleanup fixture now drives the native binding,
 PowerManager and battery owners (#1460 slice 5i/#1928). Failed bind/start/stop,
 finish/cancel/death, concurrent adapters, WorkSource clearing and loop exceptions

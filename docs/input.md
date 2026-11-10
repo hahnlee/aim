@@ -26,7 +26,7 @@ NSView events ──▶ translate::Input ──▶ server::Devices ──unix so
 | Node | Name | What | Classes EventHub gives it |
 | --- | --- | --- | --- |
 | `event0` | `aim-touchscreen` | the primary button and the trackpad's pinch and rotation: multitouch protocol B (10 slots), `INPUT_PROP_DIRECT`, axes in display pixels, resolution from the display's dpi | `TOUCH \| TOUCH_MT` |
-| `event1` | `aim-keyboard` | physical keys (`KEY_*`) through a keymap of HID usages, and `KEY_BACK`; `Generic.kl`/`Generic.kcm` | `KEYBOARD \| ALPHAKEY`, built-in keyboard |
+| `event1` | `aim-keyboard` | physical keys (`KEY_*`) through a keymap of HID usages, `KEY_BACK`, and `KEY_SLEEP`/`KEY_WAKEUP` (System Sleep and Wake Up), which the Mac's screens press (docs/power.md); `Generic.kl`/`Generic.kcm` | `KEYBOARD \| ALPHAKEY`, built-in keyboard |
 | `event2` | `aim-mouse` | the pointer as an absolute mouse: `ABS_X`/`ABS_Y` in display pixels, `BTN_TOOL_MOUSE` (hover), `BTN_RIGHT`, `BTN_MIDDLE`, `BTN_SIDE`, `BTN_EXTRA`, `REL_WHEEL`/`REL_HWHEEL` and their `_HI_RES`; `INPUT_PROP_POINTER` | `TOUCH`, a pointer device: source `MOUSE` |
 
 All are `BUS_VIRTUAL`, vendor and product 0 (no real device identity), so
@@ -46,7 +46,9 @@ publishes it to the focused window, repeating a held key as
 InputDispatcher synthesizes repeats with the input settings' timeout and
 delay. InputManager answers the keyboard's `InputDevice` with the device
 id the agent stamps on its keys and its key character map. The window
-manager policy's key interception and the mouse are not modelled (#1434).
+manager policy's key interception and the mouse are not modelled
+(#1434), except the sleep and wake keys, which the agent applies as
+PhoneWindowManager does (`daemons/app-host-agent/src/power.rs`).
 
 ### Decision: the primary button is a finger, the rest a mouse
 

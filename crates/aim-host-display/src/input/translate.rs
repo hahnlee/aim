@@ -42,6 +42,10 @@
 //!   the apps and games that use it; Android 16 turns an Esc no app
 //!   handles into closing system dialogs, not Back (its `Generic.kcm`
 //!   fallback to BACK is intercepted first).
+//! - **The screens.** The Mac's main display sleeping or its session
+//!   locking presses the keyboard's `KEY_SLEEP`, the screens showing
+//!   windows again `KEY_WAKEUP` (`Generic.kl`: SLEEP, WAKEUP), which
+//!   PhoneWindowManager turns into `goToSleep(SLEEP_BUTTON)` and a wake.
 
 use std::sync::Mutex;
 
@@ -593,6 +597,23 @@ impl Input {
         }
     }
 
+    /// The Mac's screens stopped (`shown` false: its main display slept or
+    /// its session locked) or started showing windows: the keyboard's
+    /// System Sleep or System Wake Up, pressed and released, as a device's
+    /// sleep and wake keys put Android to sleep and wake it
+    /// (PhoneWindowManager's `KEYCODE_SLEEP`, `KEYCODE_WAKEUP`).
+    pub fn screen_shown(&self, shown: bool, t: i64) {
+        let usage = if shown {
+            keymap::SYSTEM_WAKE_UP
+        } else {
+            keymap::SYSTEM_SLEEP
+        };
+        if let Some(code) = self.devices.key_of(KEYBOARD, usage) {
+            self.devices.emit(KEYBOARD, t, &[(EV_KEY, code, 1)]);
+            self.devices.emit(KEYBOARD, t, &[(EV_KEY, code, 0)]);
+        }
+    }
+
     /// A physical key with scan code `usage` down or up.
     fn set_key(&self, s: &mut Pointer, usage: u32, down: bool, t: i64) {
         let held = s.keys.iter().position(|&(u, _)| u == usage);
@@ -858,6 +879,24 @@ mod tests {
 
     fn keys(k: &mut UnixStream, n: usize) -> Vec<(u16, i32)> {
         read(k, n).into_iter().map(|(_, c, v)| (c, v)).collect()
+    }
+
+    #[test]
+    fn screens_press_the_keyboard_sleep_and_wake_keys() {
+        let (input, dir) = setup("screens");
+        let mut k = open(&dir, KEYBOARD);
+        input.screen_shown(false, 1);
+        input.screen_shown(true, 2);
+        assert_eq!(
+            keys(&mut k, 8),
+            [
+                (KEY_SLEEP, 1),
+                (KEY_SLEEP, 0),
+                (KEY_WAKEUP, 1),
+                (KEY_WAKEUP, 0)
+            ]
+        );
+        input.close();
     }
 
     #[test]

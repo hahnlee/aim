@@ -47,6 +47,7 @@ mod effects;
 mod event_log;
 mod input;
 mod input_filter;
+mod power;
 mod storage;
 
 /// init's socket for this service (`socket aim_zygote_relay` in its rc).
