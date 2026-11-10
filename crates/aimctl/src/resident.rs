@@ -289,22 +289,25 @@ fn start_display(
     windows: bool,
     selected: &crate::inputs::Inputs,
 ) -> Result<Child, String> {
-    let socket = files.display();
-    let _ = fs::remove_file(&socket);
-    let mut display = Command::new(selected.program("aim-display"))
+    let _ = fs::remove_file(files.display());
+    Command::new(selected.program("aim-display"))
         .args(display_args(files, windows))
         .spawn()
-        .map_err(|e| format!("aim-display: {e}"))?;
+        .map_err(|e| format!("aim-display: {e}"))
+}
+
+/// Waits until `display` listens at its socket; false when it ended or did
+/// not within [`DISPLAY_PATIENCE`].
+fn display_up(files: &Files, display: &mut Child) -> Result<bool, String> {
+    let socket = files.display();
     let deadline = Instant::now() + DISPLAY_PATIENCE;
     while !socket.exists() {
         if Instant::now() > deadline || display.try_wait().map_err(|e| e.to_string())?.is_some() {
-            let _ = display.kill();
-            let _ = display.wait();
-            return Err("aim-display did not come up".into());
+            return Ok(false);
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(10));
     }
-    Ok(display)
+    Ok(true)
 }
 
 /// `aimctl run`: the guest in the foreground until guest-init ends, or
@@ -469,6 +472,18 @@ fn sweep_memfds(inputs: &crate::inputs::Inputs, deadline: Instant) -> Result<(),
 
 fn supervise(files: &Files, state: &mut State) -> Result<ExitCode, String> {
     let mut children = Children(vec![start_display(files, state.windows, &state.inputs)?]);
+    // guest-init prepares the boot while the display server starts, and
+    // waits for it before anything that connects to it.
+    let mut guest = Command::new(state.inputs.program("guest-init"))
+        .args(guest_init_args(files, &state.inputs)?)
+        .spawn()
+        .map_err(|e| format!("guest-init: {e}"))?;
+    if !display_up(files, &mut children.0[0])? {
+        // SAFETY: signals the child we started, which stops what it began.
+        unsafe { libc::kill(guest.id() as i32, libc::SIGTERM) };
+        let _ = guest.wait();
+        return Err("aim-display did not come up".into());
+    }
     if state.windows {
         children.0.push(
             Command::new(program("aim-apps"))
@@ -477,10 +492,6 @@ fn supervise(files: &Files, state: &mut State) -> Result<ExitCode, String> {
                 .map_err(|e| format!("aim-apps: {e}"))?,
         );
     }
-    let mut guest = Command::new(state.inputs.program("guest-init"))
-        .args(guest_init_args(files, &state.inputs)?)
-        .spawn()
-        .map_err(|e| format!("guest-init: {e}"))?;
     let guest_birth = ProcessIdentity::running(guest.id() as i32);
     let mut binding = None;
     state.guest = Some(guest.id());

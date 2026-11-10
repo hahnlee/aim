@@ -45,9 +45,10 @@ session fallback is not covered by this command-runner correction.
 ## The resident guest
 
 `aimctl run` is the guest's keeper: it starts aim-display (a device window
-of 1080×1920, or window mode with `--windows`), in window mode
-`aim-apps shims --watch` (a shim per launcher app, following installs), and
-guest-init on the data directory, and stops them when guest-init ends or
+of 1080×1920, or window mode with `--windows`) and, beside it, guest-init
+on the data directory (which waits for the display server's socket before
+anything that connects to it), then in window mode `aim-apps shims
+--watch` (a shim per launcher app, following installs), and stops them when guest-init ends or
 it gets SIGTERM, SIGINT or SIGHUP: guest-init stops its services and
 detaches the data image (three minutes at most, then it is killed), then
 the display server and the shims' keeper get SIGTERM (ten seconds, then

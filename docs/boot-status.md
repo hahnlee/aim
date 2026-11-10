@@ -9355,7 +9355,10 @@ init's first action (docs/storage.md). Six alternating disposable
 app-host boots (host load 17-45, 2026-11-11): the attach ends at
 0.31-0.52 s and the boot is prepared at 0.35-0.57 s, against 0.55-0.73 s
 when the preparation waited for the attach first; second boots reached
-`sys.boot_completed` 0.16-0.61 s sooner. `start zygote` runs about 2.1 s
+`sys.boot_completed` 0.16-0.61 s sooner. aimctl starts guest-init beside
+aim-display instead of after its socket appears (about 0.1 s); guest-init
+waits for the socket before the binder host and native services, and
+logd and keystore2 start about 0.05 s sooner (2026-11-11). `start zygote` runs about 2.1 s
 after guest-init starts on a second boot and 2.4 s on a first (host load
 5), and `boot_progress_start` about 0.75 s later. Until user 0's CE
 unlock and the removal of the previous boot's `/data/per_boot`, a key

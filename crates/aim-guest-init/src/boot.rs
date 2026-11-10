@@ -361,6 +361,27 @@ pub struct Boot {
 
 /// `servicemanager` sets it once it serves calls.
 const SERVICEMANAGER_READY: &str = "servicemanager.ready";
+/// How long the display server may take to listen at its socket.
+const DISPLAY_PATIENCE: Duration = Duration::from_secs(10);
+
+/// Waits until the display server listens at `socket`, unless a stop is
+/// requested first.
+fn wait_for_display(socket: &Path) -> Result<(), String> {
+    let deadline = Instant::now() + DISPLAY_PATIENCE;
+    while !socket.exists() {
+        if stop_requested() {
+            return Err("stop requested while the display server started".into());
+        }
+        if Instant::now() > deadline {
+            return Err(format!(
+                "{}: the display server did not come up within {DISPLAY_PATIENCE:?}",
+                socket.display()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    Ok(())
+}
 
 /// The app host agent's zygote relay socket (`aim-app-host-agent`,
 /// docs/app-host.md).
@@ -1044,6 +1065,12 @@ impl Boot {
             unsafe { libc::getpid() }
         };
         let mut native_services = None;
+        // The display server starts beside the boot (aimctl): what serves
+        // or runs from here on may connect to it.
+        if let Some(display) = &options.display {
+            wait_for_display(display)?;
+            mark("display server up");
+        }
         // The boot loop's events: property service requests, children's
         // exits and the properties the host sets while the guest runs.
         let (event_sender, event_receiver) = mpsc::channel();
@@ -1850,6 +1877,24 @@ impl Boot {
 #[cfg(test)]
 mod androidboot_options_tests {
     use super::*;
+    #[test]
+    fn the_boot_waits_for_the_display_server_to_listen() {
+        let dir = std::env::temp_dir().join(format!("aim-display-wait-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("display");
+        let listening = socket.clone();
+        let server = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            std::os::unix::net::UnixListener::bind(listening).unwrap()
+        });
+        let start = Instant::now();
+        wait_for_display(&socket).unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(30));
+        drop(server.join().unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn actual_init_signal_dispositions_exclude_uncatchable_signals() {
         let caught = init_caught_signal_mask().unwrap();
