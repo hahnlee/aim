@@ -170,9 +170,6 @@ fn real_regular_owner_costs_preserve_bytes_offsets_and_verity_admission() {
     let admission_ns = measure(|| {
         let _admission = description.store.lock_inode(&pin.descriptor()).unwrap();
     });
-    let retained_admission = measure(|| {
-        let _admission = description.admission.lock().unwrap();
-    });
     let metadata = measure(|| {
         assert!(
             description
@@ -239,7 +236,7 @@ fn real_regular_owner_costs_preserve_bytes_offsets_and_verity_admission() {
     drop(native);
     assert_eq!(fs::read(&direct_output).unwrap(), expected);
 
-    let fd = open(output_name, 0); // Open before ENABLE; retained admission must see new proof.
+    let fd = open(output_name, 0); // Open before ENABLE; its reads must see the new proof.
     let source = File::open(&output).unwrap();
     let runtime = vfs::runtime_dir().unwrap();
     let config = configuration().unwrap().unwrap();
@@ -308,7 +305,7 @@ fn real_regular_owner_costs_preserve_bytes_offsets_and_verity_admission() {
     close(fd);
     drop(source);
     println!(
-        "REGULAR_OWNER_COST bytes={SIZE} iterations={} direct512_ns={direct512} direct32k_ns={direct32k} owned512_ns={owned512} owned32k_ns={owned32k} identity_ns={identity} offset_ns={offset} admission_ns={admission_ns} retained_admission_ns={retained_admission} metadata_ns={metadata} write_check_ns={write_check} write8k_ns={write8k} direct_write8k_ns={direct_write8k} runtime={}",
+        "REGULAR_OWNER_COST bytes={SIZE} iterations={} direct512_ns={direct512} direct32k_ns={direct32k} owned512_ns={owned512} owned32k_ns={owned32k} identity_ns={identity} offset_ns={offset} admission_ns={admission_ns} metadata_ns={metadata} write_check_ns={write_check} write8k_ns={write8k} direct_write8k_ns={direct_write8k} runtime={}",
         SIZE / 512,
         runtime.display()
     );

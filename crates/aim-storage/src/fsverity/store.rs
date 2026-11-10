@@ -291,22 +291,6 @@ pub struct Admission {
     inode: Inode,
     admission: crate::inode_lease::Admission,
 }
-/// Retain the exact store and inode used to obtain admission; every lock still
-/// validates the real inode and acquires its cross-process admission lock.
-pub struct RetainedAdmission {
-    store: Store,
-    inode: Inode,
-}
-impl RetainedAdmission {
-    pub fn lock(&self) -> Result<Admission> {
-        let admission = self.inode.admission()?;
-        Ok(Admission {
-            store: self.store.clone(),
-            inode: self.inode.clone(),
-            admission,
-        })
-    }
-}
 pub struct EnableGuard {
     store: Store,
     inode: Inode,
@@ -346,11 +330,9 @@ impl Prepared {
     }
 }
 impl Admission {
-    pub fn retain(&self) -> RetainedAdmission {
-        RetainedAdmission {
-            store: self.store.clone(),
-            inode: self.inode.clone(),
-        }
+    /// The handle of the admitted inode, which an open description keeps.
+    pub fn inode(&self) -> &Inode {
+        &self.inode
     }
     pub fn identity(&self) -> Identity {
         self.inode.identity()

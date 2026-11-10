@@ -4,10 +4,7 @@ mod store;
 mod tree;
 pub use crate::inode_lease::Identity;
 use std::io;
-pub use store::{
-    Admission, EnableGuard, Metadata, Prepared, RetainedAdmission, Store, WriterExclusion,
-    lookup_in,
-};
+pub use store::{Admission, EnableGuard, Metadata, Prepared, Store, WriterExclusion, lookup_in};
 pub use tree::{BuildOptions, Descriptor, build};
 
 #[derive(Debug)]

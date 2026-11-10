@@ -10,7 +10,7 @@ use std::{
         unix::{ffi::OsStrExt, fs::OpenOptionsExt},
     },
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Condvar, Mutex},
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Identity {
@@ -73,12 +73,27 @@ struct Inner {
     directory: PrivateFd,
     path: PathBuf,
     identity: Identity,
+    offset: OffsetFile,
 }
 #[derive(Clone)]
 pub struct Inode(Arc<Inner>);
 pub struct Admission {
     inode: Inode,
     _metadata: PrivateFd,
+}
+/// The offset lock file, opened once per handle instead of for each
+/// position-dependent operation: its flock excludes other processes and
+/// other handles of the inode, which have their own open file, and `held`
+/// excludes this handle's threads, which share the one open file and so its
+/// flock.
+struct OffsetFile {
+    descriptor: std::sync::OnceLock<PrivateFd>,
+    held: Mutex<bool>,
+    released: Condvar,
+}
+/// Serializes position-dependent operations until dropped.
+pub struct OffsetLock {
+    inode: Inode,
 }
 pub struct WriterLease {
     inode: Inode,
@@ -89,8 +104,6 @@ pub struct ExclusiveLease {
     descriptor: PrivateFd,
 }
 pub type EnableSlot = ExclusiveLease;
-/// Serializes position-dependent operations; aliases retain the same flock.
-pub type OffsetLock = ExclusiveLease;
 fn duplicate(fd: BorrowedFd<'_>) -> io::Result<PrivateFd> {
     PrivateFd::allocate(|| {
         let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
@@ -152,6 +165,11 @@ impl Inode {
             directory,
             path,
             identity,
+            offset: OffsetFile {
+                descriptor: std::sync::OnceLock::new(),
+                held: Mutex::new(false),
+                released: Condvar::new(),
+            },
         })))
     }
     pub fn identity(&self) -> Identity {
@@ -218,15 +236,41 @@ impl Inode {
             _metadata: metadata,
         })
     }
+    /// Open the offset lock file now rather than at the first
+    /// position-dependent operation, so that running out of descriptors
+    /// fails the open of the file, not a later read or write.
+    pub fn keep_offset_lock(&self) -> io::Result<()> {
+        self.offset_file().map(|_| ())
+    }
+    fn offset_file(&self) -> io::Result<&PrivateFd> {
+        if let Some(descriptor) = self.0.offset.descriptor.get() {
+            return Ok(descriptor);
+        }
+        let opened = self.lock_file("offset")?;
+        Ok(self.0.offset.descriptor.get_or_init(|| opened))
+    }
     pub fn offset_lock(&self) -> io::Result<OffsetLock> {
         if Identity::from_fd(self.source())? != self.identity() {
             return Err(io::Error::from_raw_os_error(libc::ESTALE));
         }
-        let descriptor = self.lock_file("offset")?;
-        locked(descriptor.as_fd(), libc::LOCK_EX)?;
-        Ok(ExclusiveLease {
+        let descriptor = self.offset_file()?;
+        let offset = &self.0.offset;
+        let mut held = offset.held.lock().unwrap_or_else(|e| e.into_inner());
+        while *held {
+            held = offset
+                .released
+                .wait(held)
+                .unwrap_or_else(|e| e.into_inner());
+        }
+        *held = true;
+        drop(held);
+        if let Err(error) = locked(descriptor.as_fd(), libc::LOCK_EX) {
+            *offset.held.lock().unwrap_or_else(|e| e.into_inner()) = false;
+            offset.released.notify_one();
+            return Err(error);
+        }
+        Ok(OffsetLock {
             inode: self.clone(),
-            descriptor,
         })
     }
     /// Adopt the actual carrier under admission and verify its lock-file inode.
@@ -312,6 +356,23 @@ impl WriterLease {
     }
     pub fn into_fd(self) -> io::Result<OwnedFd> {
         self.descriptor.into_fd()
+    }
+}
+impl Drop for OffsetLock {
+    fn drop(&mut self) {
+        let offset = &self.inode.0.offset;
+        let mut held = offset.held.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(descriptor) = offset.descriptor.get() {
+            // An unlock of a lock this open file holds cannot block.
+            if let Err(error) = locked(descriptor.as_fd(), libc::LOCK_UN) {
+                eprintln!(
+                    "aim-storage: unlocking the offset lock of {}: {error}",
+                    self.inode.identity().name()
+                );
+            }
+        }
+        *held = false;
+        offset.released.notify_one();
     }
 }
 impl ExclusiveLease {
@@ -811,26 +872,30 @@ pub(crate) mod tests {
         }
     }
     #[test]
-    fn offset_lock_serializes_processes_until_final_alias_close() {
+    fn offset_lock_serializes_processes() {
         const MARKER: &str = "INODE_OFFSET_FORK_FIXTURE_EXECUTED";
         if isolated_fork_fixture(
-            "inode_lease::tests::offset_lock_serializes_processes_until_final_alias_close",
+            "inode_lease::tests::offset_lock_serializes_processes",
             MARKER,
         ) {
             return;
         }
         let fixture = Fixture::new();
         let lock = fixture.inode.offset_lock().unwrap();
-        let alias = lock.try_clone().unwrap();
         let ready = pipe();
         let acquired = pipe();
         let child = unsafe { libc::fork() };
         assert!(child >= 0);
         if child == 0 {
-            drop(lock);
-            drop(alias);
+            // The child's own handle of the inode, as a fork child restores
+            // its open files; the parent's handle and lock stay its own.
+            std::mem::forget(lock);
+            let inode = match Inode::open(fixture.inode.directory(), fixture.file.as_fd()) {
+                Ok(inode) => inode,
+                Err(_) => unsafe { libc::_exit(40) },
+            };
             byte(ready[1].as_raw_fd(), b'r');
-            let _lock = match fixture.inode.offset_lock() {
+            let _lock = match inode.offset_lock() {
                 Ok(lock) => lock,
                 Err(_) => unsafe { libc::_exit(41) },
             };
@@ -844,10 +909,8 @@ pub(crate) mod tests {
             events: libc::POLLIN,
             revents: 0,
         };
-        assert_eq!(unsafe { libc::poll(&mut event, 1, 50) }, 0);
+        assert_eq!(unsafe { libc::poll(&mut event, 1, 100) }, 0);
         drop(lock);
-        assert_eq!(unsafe { libc::poll(&mut event, 1, 50) }, 0);
-        drop(alias);
         assert_eq!(unsafe { libc::poll(&mut event, 1, 2000) }, 1);
         assert_eq!(read_byte(acquired[0].as_raw_fd()), b'a');
         let mut status = 0;
