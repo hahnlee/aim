@@ -275,11 +275,18 @@ impl Tasks {
     /// Whether task `id` is in an organizer root task whose relaunched
     /// leaf tasks leave it (`getRootTask().mReparentLeafTaskIfRelaunch`).
     fn reparents_if_relaunched(&self, id: i32) -> bool {
-        let tasks = self.tasks.lock().unwrap();
-        let parent = tasks.iter().find(|t| t.id == id).and_then(|t| t.parent);
-        tasks
+        self.parent(id)
+            .is_some_and(|p| self.reparents_leaf_if_relaunch(p))
+    }
+
+    /// Whether `root` is an organizer root task whose relaunched leaf
+    /// tasks leave it (`mReparentLeafTaskIfRelaunch`).
+    fn reparents_leaf_if_relaunch(&self, root: i32) -> bool {
+        self.tasks
+            .lock()
+            .unwrap()
             .iter()
-            .find(|t| Some(t.id) == parent)
+            .find(|t| t.id == root)
             .and_then(|t| t.root.as_ref())
             .is_some_and(|r| r.reparent_leaf_if_relaunch)
     }
@@ -581,6 +588,21 @@ impl AppHost {
         let parent = self
             .launch_root_task(launch_mode, kind, &options, source, None)
             .and_then(|root| Some((root, self.tasks.root(root)?)));
+        // `reuseOrCreateTask` then lays it out (`layoutTask`): in a launch
+        // root task in a multi-window mode, it takes the launch bounds of the
+        // mode it inherits (`TaskLaunchParamsModifier`), or of the display
+        // area's for a root task that lets relaunched tasks go.
+        let child_bounds = match &parent {
+            Some((root, r)) if matches!(r.windowing_mode, 2 | 5 | 6) => {
+                let mode = match options.mode {
+                    0 if self.tasks.reparents_leaf_if_relaunch(*root) => area_mode,
+                    0 => r.windowing_mode,
+                    m => m,
+                };
+                self.initial_launch_bounds(mode, &options)?
+            }
+            _ => None,
+        };
         let (windowing_mode, requested_mode, bounds, requested, launch_bounds) = match &parent {
             Some((_, root)) => (root.windowing_mode, 0, root.bounds, None, None),
             None => (
@@ -663,6 +685,21 @@ impl AppHost {
             tasks.rotate_right(1);
         }
         drop(tasks);
+        let bounds = match child_bounds {
+            Some(b) => {
+                let resolved = self
+                    .task_move_bounds(id, None, Some(b), Mover::Android)
+                    .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+                let mut tasks = self.tasks.tasks.lock().unwrap();
+                if let Some(t) = tasks.iter_mut().find(|t| t.id == id) {
+                    t.bounds = resolved;
+                    t.requested_bounds = Some(b);
+                    t.resolved_bounds = Some(resolved);
+                }
+                resolved
+            }
+            None => bounds,
+        };
         // Its surface is made with it (`WindowContainer.setParent`), as it
         // may never have a window; an app task's is made with its first.
         if home {
@@ -767,8 +804,9 @@ impl AppHost {
         }
     }
 
-    /// A reused task `id`, started with `options` from the task `source` if
-    /// any, brought to the front if `front`, takes the launch's root task,
+    /// A reused task `id`, started with `options` (whose launch root task
+    /// is the start's target root task, `mTargetRootTask`) from the task
+    /// `source` if any, brought to the front if `front`, takes the launch's root task,
     /// windowing mode and bounds
     /// (`ActivityStarter.setTargetRootTaskIfNeeded`): the launch params
     /// (`TaskLaunchParamsModifier.calculate`) give a root task its mode
@@ -867,9 +905,11 @@ impl AppHost {
         // A root task takes a mode other than the display area's, or the
         // display area's over a requested mode of another but pinned
         // (`shouldUpdateExistingTaskWindowingMode`), if it can
-        // (`validateWindowingMode`).
-        let update = launch_mode != area_mode
-            || (!matches!(requested_mode, 0 | 2) && requested_mode != launch_mode);
+        // (`validateWindowingMode`): in `getOrCreateRootTask`, which a start
+        // of a target root task does not reach.
+        let update = options.launch_root.is_none()
+            && (launch_mode != area_mode
+                || (!matches!(requested_mode, 0 | 2) && requested_mode != launch_mode));
         let mode = match root {
             None if update => {
                 Some(self.valid_task_mode(launch_mode, id)?).filter(|&m| m != 0 && m != own)
@@ -4759,6 +4799,78 @@ pub(super) mod tests {
             let c = host.create_root_task(6, None).unwrap();
             assert_eq!(relaunch(c, false), Some(a));
             assert_eq!(relaunch(c, true), Some(c));
+        });
+    }
+
+    /// In window mode (a freeform display area): a new task in a
+    /// multi-window launch root task takes the options' launch bounds
+    /// (`layoutTask`); a start of a target root task leaves a reused task
+    /// it does not bring to the front in its mode (`getOrCreateRootTask`
+    /// is not reached); and a source activity's launch root task is the
+    /// target of a start from it until its windows are drawn
+    /// (`mLaunchRootTask`).
+    #[test]
+    fn target_root_tasks_in_window_mode() {
+        use super::super::activity_options::LaunchOptions;
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            enable_freeform(host);
+            let (_thread, activities, _receive, _) =
+                tasks_in_mode(host, export, Rect::default(), true);
+            for a in &activities {
+                let mut records = host.activities.records.lock().unwrap();
+                records.get_mut(a).unwrap().info.resize_mode = 2;
+            }
+            *host.tasks.next.lock().unwrap() = 100;
+            let info = host.activity_info_of("p", "p.Main").unwrap();
+            let root = host.create_root_task(6, None).unwrap();
+            let bounds = Rect {
+                left: 100,
+                top: 200,
+                right: 900,
+                bottom: 1400,
+            };
+            let options = LaunchOptions {
+                launch_root: Some(root),
+                bounds: Some(bounds),
+                ..Default::default()
+            };
+            let id = host
+                .new_task_with_options(10100, "p", "p.Main", &info, None, options)
+                .unwrap();
+            assert_eq!(host.tasks.parent(id), Some(root));
+            assert_eq!(host.tasks.bounds(id), Some(bounds));
+            let mode = host.tasks.windowing_mode(8);
+            let fullscreen = LaunchOptions {
+                mode: 1,
+                launch_root: Some(root),
+                avoid_move_to_front: true,
+                ..Default::default()
+            };
+            host.apply_task_launch_options(8, fullscreen, &info, None, false)
+                .unwrap();
+            assert_eq!(host.tasks.parent(8), None);
+            assert_eq!(host.tasks.windowing_mode(8), mode);
+            let source = activities[0];
+            host.activities
+                .records
+                .lock()
+                .unwrap()
+                .get_mut(&source)
+                .unwrap()
+                .launch_root = Some(root);
+            let none = LaunchOptions::default();
+            assert_eq!(host.target_root_task(&none, Some(source)), Some(root));
+            let other = host.create_root_task(6, None).unwrap();
+            let into_other = LaunchOptions {
+                launch_root: Some(other),
+                ..Default::default()
+            };
+            assert_eq!(
+                host.target_root_task(&into_other, Some(source)),
+                Some(other)
+            );
+            host.activity_drawn(source);
+            assert_eq!(host.target_root_task(&none, Some(source)), None);
         });
     }
 

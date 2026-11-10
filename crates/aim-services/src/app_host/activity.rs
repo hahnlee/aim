@@ -159,6 +159,9 @@ pub struct ActivityRecord {
     /// which its launch after its process died restores.
     pub(super) saved_state: Option<KeptBundle>,
     pub(super) persistent_state: Option<RawBundle>,
+    /// `mLaunchRootTask`: its start's launch root task, which a start
+    /// from it targets until its windows are drawn.
+    pub(super) launch_root: Option<i32>,
 }
 
 /// `Build.VERSION_CODES.HONEYCOMB_MR2`.
