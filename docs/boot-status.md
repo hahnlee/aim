@@ -298,7 +298,10 @@ windows tiled side by side at their roots' bounds (however large a task's
 minimal size makes it): the user's resize of one
 moves the shared edge of the roots, as the split divider does, a drag moves
 both, and the other window follows; clearing adjacency makes them independent.
-`setLaunchRoot`, a launch with `FLAG_ACTIVITY_LAUNCH_ADJACENT` into the flag
+`setReparentLeafTaskIfRelaunch` marks a root whose leaf task, started again,
+goes onto the display area in the display area's mode, unless the start comes
+from an adjacent root, whose root it then joins (`getOrCreateRootTask`,
+#2912). `setLaunchRoot`, a launch with `FLAG_ACTIVITY_LAUNCH_ADJACENT` into the flag
 root, other root windowing modes and nested roots remain explicit failures. Host regressions cover the wire, modes,
 listing, reparenting, adjacency, tiling, deletion and organizer removal; no
 guest boot or live Mac window was checked (2026-11-04).

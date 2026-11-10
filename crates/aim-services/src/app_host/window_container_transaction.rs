@@ -43,6 +43,9 @@ pub(super) enum Hop {
     /// `setLaunchAdjacentFlagRoot`, or `clearLaunchAdjacentFlagRoot` if
     /// `clear`.
     LaunchAdjacentFlagRoot { root: Binder, clear: bool },
+    /// `setReparentLeafTaskIfRelaunch`: a relaunched leaf task of the
+    /// organizer root task goes to the display area, if `reparent`.
+    ReparentLeafTaskIfRelaunch { root: Binder, reparent: bool },
 }
 #[derive(Debug)]
 pub(super) struct Transaction {
@@ -181,10 +184,10 @@ impl Transaction {
         for _ in 0..count(r)? {
             expect(r, 1)?; // typed HierarchyOp present
             // HIERARCHY_OP_TYPE_REPARENT, _REORDER, _CHILDREN_TASKS_REPARENT,
-            // _SET_ADJACENT_ROOTS, _SET_LAUNCH_ADJACENT_FLAG_ROOT or
-            // _CLEAR_ADJACENT_ROOTS
+            // _SET_ADJACENT_ROOTS, _SET_LAUNCH_ADJACENT_FLAG_ROOT,
+            // _CLEAR_ADJACENT_ROOTS or _SET_REPARENT_LEAF_TASK_IF_RELAUNCH
             let kind = int(r)?;
-            if !matches!(kind, 0..=2 | 4 | 6 | 15) {
+            if !matches!(kind, 0..=2 | 4 | 6 | 15 | 16) {
                 return Err(unsupported());
             }
             let container = optional_binder(r)?;
@@ -206,18 +209,24 @@ impl Transaction {
             for _ in 0..5 {
                 expect(r, 0)?;
             } // Intent, fragment, keyguard, pending, shortcut
-            for _ in 0..3 {
-                if boolean(r)? {
-                    return Err(unsupported());
-                }
-            }
+            if boolean(r)? {
+                return Err(unsupported());
+            } // alwaysOnTop
+            let reparent_leaf = boolean(r)?;
+            if boolean(r)? {
+                return Err(unsupported());
+            } // isTrimmableFromRecents
             expect(r, 0)?; // excludeInsetsTypes
             if boolean(r)? {
                 return Err(unsupported());
             } // launchAdjacentDisabled
             expect(r, 0)?; // safeRegionBounds
-            // The adjacency ops' builders set their tokens and clearRoot only.
-            if matches!(kind, 4 | 6 | 15)
+            // The adjacency and reparent-leaf ops' builders set their tokens,
+            // clearRoot and the reparent-leaf flag only.
+            if reparent_leaf && kind != 16 {
+                return Err(unsupported());
+            }
+            if matches!(kind, 4 | 6 | 15 | 16)
                 && (reparent.is_some()
                     || top_only
                     || modes.is_some()
@@ -243,6 +252,13 @@ impl Transaction {
                 (15, None) => {
                     out.hierarchy
                         .push(Hop::ClearAdjacentRoots(container.ok_or_else(malformed)?));
+                    continue;
+                }
+                (16, None) => {
+                    out.hierarchy.push(Hop::ReparentLeafTaskIfRelaunch {
+                        root: container.ok_or_else(malformed)?,
+                        reparent: reparent_leaf,
+                    });
                     continue;
                 }
                 (0..=2, None) => {}
@@ -295,6 +311,7 @@ enum Admitted {
     Reorder(i32, bool),
     Reparent(i32, Option<i32>, bool),
     ReparentChildren(Children),
+    ReparentLeafTaskIfRelaunch(i32, bool),
 }
 /// An admitted `reparentTasks`.
 struct Children {
@@ -361,10 +378,10 @@ impl super::AppHost {
         // root task removed meanwhile leaves it after the commit.
         let mut committed = self.tasks.adjacency.lock().unwrap();
         let mut adjacency = committed.clone();
-        // An adjacency op on an unknown or detached container is skipped, the
-        // rest of the transaction applied.
+        // An adjacency or reparent-leaf op on an unknown or detached
+        // container is skipped, the rest of the transaction applied.
         let detached = |op| eprintln!("app host: {op}: unknown or detached container");
-        let mut adjacency_ops = false;
+        let mut skippable_ops = false;
         let created = |id, op| match self.tasks.root(id) {
             Some(_) => Ok(id),
             None => Err(Exception::illegal_argument(format!(
@@ -373,11 +390,12 @@ impl super::AppHost {
         };
         let mut hierarchy = Vec::new();
         for hop in t.hierarchy {
-            adjacency_ops |= matches!(
+            skippable_ops |= matches!(
                 hop,
                 Hop::SetAdjacentRoots(_)
                     | Hop::ClearAdjacentRoots(_)
                     | Hop::LaunchAdjacentFlagRoot { .. }
+                    | Hop::ReparentLeafTaskIfRelaunch { .. }
             );
             hierarchy.push(match hop {
                 Hop::SetAdjacentRoots(tokens) => {
@@ -436,6 +454,21 @@ impl super::AppHost {
                     adjacency.launch_root = (!clear).then_some(id);
                     continue;
                 }
+                Hop::ReparentLeafTaskIfRelaunch { root, reparent } => {
+                    let Some(id) = attached(root) else {
+                        detached("setReparentLeafTaskIfRelaunch");
+                        continue;
+                    };
+                    if self.tasks.root(id).is_none() {
+                        return Err(Exception::new(
+                            EX_UNSUPPORTED_OPERATION,
+                            format!(
+                                "Cannot set reparent leaf task flag on non-organized task : {id}"
+                            ),
+                        ));
+                    }
+                    Admitted::ReparentLeafTaskIfRelaunch(id, reparent)
+                }
                 Hop::Reorder(token, top) => Admitted::Reorder(resolve(token)?, top),
                 Hop::Reparent {
                     task,
@@ -471,7 +504,7 @@ impl super::AppHost {
                 }),
             });
         }
-        if changes.is_empty() && roots.is_empty() && hierarchy.is_empty() && !adjacency_ops {
+        if changes.is_empty() && roots.is_empty() && hierarchy.is_empty() && !skippable_ops {
             return Err(unsupported());
         }
         *committed = adjacency;
@@ -500,6 +533,10 @@ impl super::AppHost {
                     }
                 }
                 Admitted::ReparentChildren(c) => self.reparent_children(c),
+                Admitted::ReparentLeafTaskIfRelaunch(id, reparent) => {
+                    self.tasks.set_reparent_leaf_if_relaunch(id, reparent);
+                    Ok(())
+                }
             }
             .map_err(owner_error)?;
         }
