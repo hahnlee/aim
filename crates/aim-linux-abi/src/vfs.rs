@@ -402,6 +402,8 @@ struct FuseRefresh {
     rules: Vec<(String, Propagation)>,
     private: bool,
     mounts: Vec<Mount>,
+    /// The generation of the mount table found to hold `mounts`.
+    generation: Option<u64>,
 }
 static LAST_FUSE_REFRESH: Mutex<Option<FuseRefresh>> = Mutex::new(None);
 fn fuse_table_identity() -> Result<Option<(u64, i64, i64, i64, i64)>, Errno> {
@@ -437,12 +439,21 @@ pub fn refresh_fuse_mounts() -> Result<(), Errno> {
         .ok_or(errno::ENODEV)?;
     let mut last = LAST_FUSE_REFRESH.lock().unwrap();
     let table = fuse_table_identity()?;
-    if last.as_ref().is_some_and(|last| {
+    if last.as_mut().is_some_and(|last| {
         last.table == table
             && std::sync::Arc::ptr_eq(&last.records, &receiving)
             && last.private == PRIVATE_MOUNTS.load(Ordering::Acquire)
             && *PROPAGATION_RULES.lock().unwrap() == last.rules
-            && *vfs().mounts.read().unwrap() == last.mounts
+            && {
+                // The same generation is the same table; another one may
+                // still hold the same mounts.
+                let mounts = vfs().mounts.read().unwrap();
+                let same = last.generation == Some(mounts.generation()) || *mounts == last.mounts;
+                if same {
+                    last.generation = Some(mounts.generation());
+                }
+                same
+            }
     }) {
         return Ok(());
     }
@@ -543,6 +554,7 @@ pub fn refresh_fuse_mounts() -> Result<(), Errno> {
         rules: PROPAGATION_RULES.lock().unwrap().clone(),
         private: PRIVATE_MOUNTS.load(Ordering::Acquire),
         mounts: mounts.clone(),
+        generation: None,
     });
     Ok(())
 }
@@ -912,9 +924,9 @@ pub fn kernel_fs_root(fstype: &str) -> Option<PathBuf> {
     let mounts = VFS.get()?.mounts.read().unwrap();
     mounts
         .iter()
-        .filter(|m| !hidden(&mounts, m))
-        .find(|m| m.fstype.as_deref() == Some(fstype))
-        .map(|m| m.host.clone())
+        .enumerate()
+        .find(|(index, m)| mounts.visible(*index) && m.fstype.as_deref() == Some(fstype))
+        .map(|(_, m)| m.host.clone())
 }
 
 /// The cgroup v1 hierarchies mounted: each one's controller and the host
@@ -926,8 +938,9 @@ pub fn cgroup_v1_hierarchies() -> Vec<(aim_storage::cgroup_v1::Controller, PathB
     let mounts = v.mounts.read().unwrap();
     let mut out: Vec<_> = mounts
         .iter()
-        .filter(|m| !hidden(&mounts, m))
-        .filter_map(|m| {
+        .enumerate()
+        .filter(|(index, _)| mounts.visible(*index))
+        .filter_map(|(_, m)| {
             let c = aim_storage::cgroup_v1::Controller::from_map_kind(m.fstype.as_deref()?)?;
             Some((c, m.host.clone()))
         })
@@ -1088,10 +1101,90 @@ struct Vfs {
     /// The device of the root when it is a read-only mount (the image's).
     read_only_dev: Option<i32>,
     /// Longest guest prefix first; among equal prefixes the latest mount.
-    mounts: RwLock<Vec<Mount>>,
+    mounts: MountTable,
     /// Directory holding the path map (the guest-init runtime directory).
     runtime: Option<PathBuf>,
     cwd: Mutex<String>,
+}
+
+/// The mount table, with which of its mounts no later one hides (found
+/// at the first lookup after a change) and a count of its changes:
+/// lookups ask visibility for every path, and the table changes far less
+/// often.
+struct MountTable(RwLock<Table>);
+struct Table {
+    mounts: Vec<Mount>,
+    visible: OnceLock<Vec<bool>>,
+    generation: u64,
+}
+impl MountTable {
+    fn new(mounts: Vec<Mount>) -> Self {
+        Self(RwLock::new(Table {
+            mounts,
+            visible: OnceLock::new(),
+            generation: 0,
+        }))
+    }
+    fn read(&self) -> std::sync::LockResult<MountsRead<'_>> {
+        self.0
+            .read()
+            .map(MountsRead)
+            .map_err(|error| std::sync::PoisonError::new(MountsRead(error.into_inner())))
+    }
+    fn write(&self) -> std::sync::LockResult<MountsWrite<'_>> {
+        self.0
+            .write()
+            .map(MountsWrite)
+            .map_err(|error| std::sync::PoisonError::new(MountsWrite(error.into_inner())))
+    }
+}
+impl Table {
+    /// A write ended: what was derived from the table is found again when
+    /// next asked, so a write that changed nothing costs nothing more.
+    fn changed(&mut self) {
+        self.visible = OnceLock::new();
+        self.generation += 1;
+    }
+}
+struct MountsRead<'a>(std::sync::RwLockReadGuard<'a, Table>);
+impl MountsRead<'_> {
+    /// Whether no later mount hides the `index`th.
+    fn visible(&self, index: usize) -> bool {
+        let table = &self.0;
+        table.visible.get_or_init(|| {
+            table
+                .mounts
+                .iter()
+                .map(|m| !hidden(&table.mounts, m))
+                .collect()
+        })[index]
+    }
+    fn generation(&self) -> u64 {
+        self.0.generation
+    }
+}
+impl std::ops::Deref for MountsRead<'_> {
+    type Target = Vec<Mount>;
+    fn deref(&self) -> &Vec<Mount> {
+        &self.0.mounts
+    }
+}
+struct MountsWrite<'a>(std::sync::RwLockWriteGuard<'a, Table>);
+impl std::ops::Deref for MountsWrite<'_> {
+    type Target = Vec<Mount>;
+    fn deref(&self) -> &Vec<Mount> {
+        &self.0.mounts
+    }
+}
+impl std::ops::DerefMut for MountsWrite<'_> {
+    fn deref_mut(&mut self) -> &mut Vec<Mount> {
+        &mut self.0.mounts
+    }
+}
+impl Drop for MountsWrite<'_> {
+    fn drop(&mut self) {
+        self.0.changed();
+    }
 }
 
 static VFS: OnceLock<Vfs> = OnceLock::new();
@@ -1418,7 +1511,7 @@ pub fn init(root: &Path, map: Option<&Path>) -> Result<(), String> {
         root,
         mapped: map.is_some(),
         read_only_dev,
-        mounts: RwLock::new(mounts),
+        mounts: MountTable::new(mounts),
         runtime,
         cwd: Mutex::new("/".into()),
     });
@@ -1930,10 +2023,11 @@ fn hidden(mounts: &[Mount], m: &Mount) -> bool {
 /// The mount that holds the normalized guest path, and the path below it:
 /// the deepest one not hidden. `mounts` is ordered longest mount point
 /// first, the latest first among equal ones.
-fn holder<'a, 'p>(mounts: &'a [Mount], guest: &'p str) -> Option<(&'a Mount, &'p str)> {
+fn holder<'a, 'p>(mounts: &'a MountsRead<'_>, guest: &'p str) -> Option<(&'a Mount, &'p str)> {
     mounts
         .iter()
-        .find_map(|m| Some((m, below(&m.guest, guest)?)).filter(|(m, _)| !hidden(mounts, m)))
+        .enumerate()
+        .find_map(|(index, m)| Some((m, below(&m.guest, guest)?)).filter(|_| mounts.visible(index)))
 }
 
 /// Host path and area of a normalized absolute guest path, without
@@ -2601,24 +2695,24 @@ pub(crate) struct HostPathView {
 
 impl HostPathView {
     pub(crate) fn capture() -> Option<Self> {
-        /// The visible mounts of the last mount table seen: finding them
-        /// compares every mount with every other, and the table changes far
-        /// less often than a stat asks.
-        static VISIBLE: Mutex<Option<(Vec<Mount>, Arc<Vec<(String, PathBuf)>>)>> = Mutex::new(None);
+        /// The visible mounts of the last mount table seen, by its
+        /// generation: the table changes far less often than a stat asks.
+        static VISIBLE: Mutex<Option<(u64, Arc<Vec<(String, PathBuf)>>)>> = Mutex::new(None);
         let v = VFS.get()?;
         let mounts = v.mounts.read().unwrap();
         let mut visible = VISIBLE.lock().unwrap();
         let current = match visible.as_ref() {
-            Some((table, current)) if *table == *mounts => current.clone(),
+            Some((generation, current)) if *generation == mounts.generation() => current.clone(),
             _ => {
                 let current: Arc<Vec<_>> = Arc::new(
                     mounts
                         .iter()
-                        .filter(|m| !hidden(&mounts, m))
-                        .map(|m| (m.guest.clone(), m.host.clone()))
+                        .enumerate()
+                        .filter(|(index, _)| mounts.visible(*index))
+                        .map(|(_, m)| (m.guest.clone(), m.host.clone()))
                         .collect(),
                 );
-                *visible = Some((mounts.clone(), current.clone()));
+                *visible = Some((mounts.generation(), current.clone()));
                 current
             }
         };
@@ -3144,6 +3238,33 @@ pub(crate) fn test_view() -> (std::sync::MutexGuard<'static, ()>, &'static Path)
 
 #[cfg(test)]
 mod tests {
+    /// The table's visibility of each mount and its generation follow
+    /// every write.
+    #[test]
+    fn mount_visibility_follows_each_change() {
+        let (_view, dir) = super::test_view();
+        let (first, second) = (dir.join("visibility-first"), dir.join("visibility-second"));
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let before = super::vfs().mounts.read().unwrap().generation();
+        for host in [&first, &second] {
+            super::add_mount(
+                "/visibility",
+                host.clone(),
+                super::Area::Writable,
+                "tmpfs",
+                "tmpfs",
+            )
+            .unwrap();
+        }
+        let mounts = super::vfs().mounts.read().unwrap();
+        assert!(mounts.generation() >= before + 2);
+        for (index, mount) in mounts.iter().enumerate() {
+            assert_eq!(mounts.visible(index), !super::hidden(&mounts, mount));
+        }
+        drop(mounts);
+        assert_eq!(super::lookup("/visibility/file").0, second.join("file"));
+    }
     /// A walk hands each directory's check the lstat it took of that
     /// directory as a component, and none after a symlink or `..`.
     #[test]
