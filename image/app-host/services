@@ -15,8 +15,10 @@
 # would run (the original AppSearch module, Telecom); tombstoned keeps the tombstones crash_dump writes and the stack
 # traces processes dump on SIGQUIT; installd creates apps' data directories
 # as the package side asks (`createAppData`); vdc is post-fs-data's
-# `init_user0`, vold preparing /data/data and user 0's DE storage before
-# them.
+# `installkey` and `init_user0`, vold making the system DE key and
+# preparing /data/data and user 0's DE storage before them; rm is
+# boot_completed's removal of the previous boot's /data/per_boot, whose
+# per-boot key is gone, before it is made again with this boot's.
 apexd-bootstrap
 apexd
 keystore2
@@ -50,6 +52,7 @@ system_aconfigd_socket_service
 mainline_aconfigd_socket_service
 vold
 vdc
+rm
 bpfloader
 netd
 system_suspend

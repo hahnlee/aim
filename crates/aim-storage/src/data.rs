@@ -221,6 +221,12 @@ pub struct DataImage {
 /// The empty data image among the data templates.
 pub const EMPTY_TEMPLATE: &str = "empty.asif";
 
+/// Where a data template keeps its files, laid out as the volume (`data/`
+/// is the guest's `/data`): outside the guest's view until guest-init
+/// places them, once their directories have their file-based encryption
+/// policies, which a new data directory's keys make (ADR 0016).
+pub const TEMPLATE_FILES: &str = "template";
+
 /// The name of the data template a build-time first boot of the system
 /// image of identity `image` made for a device of `sku` (the SKU makes
 /// system features, which the template's package state depends on).

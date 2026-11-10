@@ -109,8 +109,12 @@ pub struct GuestExecutor {
     pub shutdown: Option<String>,
     /// Exits observed while waiting for a helper, handled afterwards.
     deferred_exits: Vec<(u32, Exit)>,
-    /// The running exec service's pid.
+    /// The running exec service's pid and name.
     pub exec_pid: Option<u32>,
+    exec_service: Option<String>,
+    /// The exec service (`init_user0`'s) after which the data template's
+    /// files are placed.
+    template_after: Option<String>,
     pub helper_timeout: Duration,
     /// The boot's deadline (`--timeout`): a wait for a helper ends there
     /// too, as it does when a stop is requested.
@@ -143,6 +147,8 @@ impl GuestExecutor {
             shutdown: None,
             deferred_exits: Vec::new(),
             exec_pid: None,
+            exec_service: None,
+            template_after: None,
             helper_timeout: Duration::from_secs(60),
             stop_at: None,
             data: None,
@@ -487,6 +493,7 @@ impl GuestExecutor {
         };
         if blocking && let StartOutcome::Started { pid, .. } = &outcome {
             self.exec_pid = Some(*pid);
+            self.exec_service = Some(name);
         }
         let effect = self.record_start(outcome);
         self.effect(effect);
@@ -729,6 +736,14 @@ impl GuestExecutor {
                 "mount_all ({mode}): partitions are pre-extracted and /data has no fileencryption=; ro.crypto.state=unencrypted, trigger nonencrypted"
             )));
         };
+        if let Some(data) = &self.data
+            && data.borrow().predates_fbe()?
+        {
+            let reason = "a data directory made without file-based encryption cannot get it (ADR 0016): recreate it";
+            self.fatal
+                .get_or_insert_with(|| format!("mount_all: {reason}"));
+            return Err(reason.to_string());
+        }
         // FS_MGR_MNTALL_DEV_FILE_ENCRYPTED.
         self.set_property("ro.crypto.state", "encrypted")?;
         self.set_property("ro.crypto.type", "file")?;
@@ -737,6 +752,25 @@ impl GuestExecutor {
         Ok(Effect::Applied(format!(
             "mount_all ({mode}): /data file-encrypted ({options}); ro.crypto.state=encrypted, ro.crypto.type=file, trigger nonencrypted"
         )))
+    }
+
+    /// Places the data template's files (`DataMount::place_template`); a
+    /// failure ends the boot.
+    fn place_template(&mut self) {
+        let Some(data) = &self.data else {
+            return;
+        };
+        let placed = data.borrow().place_template();
+        match placed {
+            Ok(0) => {}
+            Ok(moved) => self.log.push(format!(
+                "data template: placed {moved} files and directories"
+            )),
+            Err(error) => {
+                self.log.push(format!("FATAL: {error}"));
+                self.fatal.get_or_insert(error);
+            }
+        }
     }
 
     /// `IsFbeEnabled`.
@@ -925,6 +959,13 @@ impl GuestExecutor {
                     SupervisorEvent::ExecFinished { service } => {
                         self.log.push(format!("exec service '{service}' finished"));
                         self.exec_pid = None;
+                        self.exec_service = None;
+                        if self.template_after.as_ref() == Some(&service) {
+                            self.template_after = None;
+                            if self.shutdown.is_none() {
+                                self.place_template();
+                            }
+                        }
                         self.outbox.push_back(Outgoing::ExecFinished);
                     }
                     SupervisorEvent::Fatal(reason) => {
@@ -1185,7 +1226,17 @@ impl GuestExecutor {
             }
             // do_init_user0: vold prepares /data/data, /data/user/0 and
             // user 0's DE storage, with their keys when FBE is on.
-            Command::InitUser0 => return self.exec_vdc_reboot_on_failure("init_user0"),
+            // The data template's files follow, in the directories it
+            // made.
+            Command::InitUser0 => {
+                let flow = self.exec_vdc_reboot_on_failure("init_user0")?;
+                if flow == CommandFlow::ExecServiceRunning {
+                    self.template_after = self.exec_service.clone();
+                } else {
+                    self.place_template();
+                }
+                return Ok(flow);
+            }
             // do_installkey: the system DE key, which the `mkdir`s of
             // encrypted directories that follow name.
             Command::Installkey { dir } => {

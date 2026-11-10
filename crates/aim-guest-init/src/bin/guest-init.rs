@@ -256,6 +256,17 @@ fn main() {
         eprintln!("guest-init: native boot fatal: {fatal}");
         std::process::exit(1);
     }
+    // A reboot into recovery (init's `reboot_into_recovery`, such as the
+    // data wipe it asks for when /data cannot be encrypted) has no recovery
+    // to go to: the boot ends with what recovery was asked to do.
+    if let Some(command) = report
+        .shutdown
+        .as_deref()
+        .filter(|command| command.starts_with("reboot,recovery"))
+    {
+        eprintln!("guest-init: reboot into recovery requested, and there is none: {command}");
+        std::process::exit(1);
+    }
     // A reboot restarts the device: the kernel's reboot(2) is this
     // process's to carry out, so the boot runs again from the start, with
     // the same behavior arguments and pid (which names the boot's binder, so its

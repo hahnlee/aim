@@ -57,7 +57,7 @@ reason = "the device's init script: ro.hardware.egl and .vulkan, GLES version, d
 [[add]]
 path = "/vendor/etc/fstab.aim"
 source = "image/vendor/etc/fstab.aim"
-reason = "the device's fstab for mount_all and vold: /data without file-based encryption"
+reason = "the device's fstab for mount_all and vold: /data file-encrypted (fileencryption=, ADR 0016)"
 
 [[replace]]
 path = "/vendor/build.prop"

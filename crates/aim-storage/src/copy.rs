@@ -1,7 +1,9 @@
 //! Copies between the guest's volumes that keep what the guest sees of each
 //! file: its content, host mode, extended attributes (the guest's owner,
 //! mode and SELinux label: docs/guest-init-contract.md section 6) and
-//! access and modification times.
+//! access and modification times. An fscrypt policy names a key of its own
+//! volume, so it is not copied: a copy takes the policy of where it lands,
+//! as on Linux.
 
 use std::ffi::CString;
 use std::fs;
@@ -158,7 +160,7 @@ fn attributes(source: &Path, dest: &Path, mode: u32) -> Result<(), String> {
         }
         for name in names[..len as usize]
             .split(|&b| b == 0)
-            .filter(|n| !n.is_empty())
+            .filter(|n| !n.is_empty() && *n != crate::fscrypt::CONTEXT.to_bytes())
         {
             let name = CString::new(name).map_err(|e| e.to_string())?;
             let size = libc::getxattr(

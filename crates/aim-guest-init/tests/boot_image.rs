@@ -207,29 +207,25 @@ fn real_image_dry_run_boot() {
         boot.property("service.adb.listen_addrs").as_deref(),
         Some("tcp:localhost:5555")
     );
+    // /data is file-encrypted (fstab.aim's fileencryption=): installkey
+    // has vold make the system DE key before the first encrypted
+    // directory, keystore's among them, is made.
     assert_eq!(
         boot.property("ro.crypto.state").as_deref(),
-        Some("unencrypted")
+        Some("encrypted")
     );
-    let keystore_store = report
-        .commands
-        .iter()
-        .position(|record| {
-            record.executed.action == "fs"
-                && record.executed.command == "mkdir /data/misc/keystore 0700 keystore keystore"
-                && record.executed.result.is_ok()
-        })
-        .expect("the device fs action must prepare keystore's store");
-    let keystore_start = report
-        .commands
-        .iter()
-        .position(|record| {
-            record.effects.iter().any(
-                |effect| matches!(effect, Effect::Launch { service, .. } if service == "keystore2"),
-            )
-        })
-        .expect("keystore2 not launched");
-    assert!(keystore_store < keystore_start);
+    assert_eq!(boot.property("ro.crypto.type").as_deref(), Some("file"));
+    let executed = |command: &str| {
+        report
+            .commands
+            .iter()
+            .position(|record| record.executed.command == command && record.executed.result.is_ok())
+            .unwrap_or_else(|| panic!("{command} not executed"))
+    };
+    assert!(
+        executed("installkey /data")
+            < executed("mkdir /data/misc 01771 system misc encryption=Require")
+    );
     assert_eq!(
         boot.property("ro.persistent_properties.ready").as_deref(),
         Some("true")

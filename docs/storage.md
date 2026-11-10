@@ -22,7 +22,11 @@ bench`) keeps everything of `DATA` in `DATA.asif` beside it:
   boot` and aimctl pass `target/aim/userdata`, docs/first-boot.md), which
   is instant: the one a build-time first boot made for the booted image
   and the Mac's SKU (`userdata/template` node), else the empty image
-  `DIR/empty.asif` (`userdata/empty`). Without one, `diskutil image create blank --format ASIF` with no
+  `DIR/empty.asif` (`userdata/empty`). A template keeps its files in
+  `template/` beside the guest's `data/`, not in it: `/data` is
+  file-encrypted with the new directory's own keys, so guest-init moves
+  them in once `init_user0` has made their directories, each taking its
+  directory's policy (ADR 0016). Without one, `diskutil image create blank --format ASIF` with no
   filesystem, then `newfs_apfs -e` (case-sensitive APFS, volume
   `aim-data`), about 0.5 s more of a first boot (#563). Clones share the
   template's volume UUID, which the guest does not see. Its size is only
