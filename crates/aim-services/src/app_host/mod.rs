@@ -96,6 +96,7 @@ pub mod hint_manager;
 mod home;
 pub mod input_manager;
 pub mod input_method;
+mod input_policy;
 pub mod input_shell;
 mod installer_archive_queries;
 mod installer_completion;
@@ -273,6 +274,11 @@ const CONTROL_DESCRIPTOR: &str = "dev.aim.IAppHost";
 const START_ACTIVITY: u32 = 1;
 /// `void attachAgent(IBinder agent)`: the app host agent (`aim-app-host-agent`).
 const ATTACH_AGENT: u32 = 2;
+/// `int interceptBeforeQueueingNonInteractive(boolean motion, int keyCode,
+/// boolean down, long whenNanos, int policyFlags)`: the agent's input
+/// while the device is not interactive, through the window policy
+/// (`input_policy`).
+const INTERCEPT_NON_INTERACTIVE: u32 = 3;
 /// The agent's `openInputChannel(String name, int displayWidth, int
 /// displayHeight, int left, int top, int right, int bottom)`, and where
 /// the client's socket (a `ParcelFileDescriptor`) starts in its reply:
@@ -286,6 +292,8 @@ const FOCUS_INPUT_CHANNEL: u32 = 2;
 const SET_INPUT_CHANNEL_FRAME: u32 = 3;
 /// `IAppHostAgent.syncInputWindows(int[] liveChannels)`: dispatch-lock acknowledgment.
 const SYNC_INPUT_WINDOWS: u32 = 18;
+/// The agent's `setInteractive(boolean interactive)`.
+const SET_INTERACTIVE: u32 = 22;
 const KILL_PROCESS: u32 = 4;
 
 /// `Process.FIRST_APPLICATION_UID`, `UserHandle.PER_USER_RANGE`.
@@ -3787,6 +3795,19 @@ impl AppHost {
         .map(|_| ())
     }
 
+    /// `InputManagerInternal.setInteractive`: the agent's dispatcher hears
+    /// whether the device is interactive. One not attached yet hears it as
+    /// it attaches.
+    pub(super) fn set_input_interactive(&self, interactive: bool) -> Result<(), Exception> {
+        if self.agent.lock().unwrap().is_none() {
+            return Ok(());
+        }
+        self.call_agent(SET_INTERACTIVE, "setInteractive", |p| {
+            p.write_bool(interactive)
+        })
+        .map(|_| ())
+    }
+
     fn attach_agent(&self, agent: Strong) {
         *self.agent.lock().unwrap() = Some(agent);
         self.agent_attached.notify_all();
@@ -6049,6 +6070,31 @@ impl Service for Control {
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
+        if call.code == INTERCEPT_NON_INTERACTIVE {
+            if call.sender_euid != 1000 {
+                return reply(Err(Exception::security(
+                    "interceptBeforeQueueingNonInteractive is the agent's",
+                )));
+            }
+            call.data
+                .enforce_interface(CONTROL_DESCRIPTOR)
+                .map_err(|_| BAD_VALUE)?;
+            let d = &mut call.data;
+            let motion = d.read_bool().map_err(|_| BAD_VALUE)?;
+            let key_code = d.read_i32().map_err(|_| BAD_VALUE)?;
+            let down = d.read_bool().map_err(|_| BAD_VALUE)?;
+            let when = d.read_i64().map_err(|_| BAD_VALUE)?;
+            let flags = d.read_i32().map_err(|_| BAD_VALUE)? as u32;
+            let result = self
+                .0
+                .intercept_non_interactive(motion, key_code, down, when, flags);
+            return reply(result.map(|r| {
+                let mut p = Parcel::new();
+                p.write_no_exception();
+                p.write_i32(r);
+                p
+            }));
+        }
         if call.code == ATTACH_AGENT {
             // The agent runs as the system uid.
             if call.sender_euid != 1000 {
@@ -6067,6 +6113,12 @@ impl Service for Control {
             // before initializing the user and admitting app starts.
             let host = self.0.clone();
             std::thread::spawn(move || {
+                let power = host
+                    .power_service
+                    .get_or_init(|| Arc::new(power_service::PowerManager::new(host.clone())));
+                if let Err(e) = power.tell_input_interactive() {
+                    eprintln!("app host: input interactive: {}", e.message);
+                }
                 let _ready = boot_ready::BootReady(&host);
                 match package_boot::run(&host) {
                     Ok(()) => eprintln!("app host: package boot: through its construction"),

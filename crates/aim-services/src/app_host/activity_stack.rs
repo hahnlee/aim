@@ -26,7 +26,7 @@
 use super::activity_start::LaunchIntent;
 use crate::package::intent::Intent;
 use crate::package::uri::Uri;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// `Intent.FLAG_ACTIVITY_*`.
 pub const FLAG_ACTIVITY_NO_HISTORY: i32 = 0x4000_0000;
@@ -401,6 +401,14 @@ pub struct Stack {
     removed_from_recents: BTreeSet<i32>,
     /// The task last reported focused.
     front: Option<i32>,
+    /// `DisplayContent.mSleeping`: the display holds sleep tokens
+    /// (`applySleepTokens`).
+    sleeping: bool,
+    /// `TaskFragment.mLastPausedActivity`, by task.
+    last_paused: BTreeMap<i32, u64>,
+    /// `ActivityTaskSupervisor.mNoHistoryActivities`: no-history activities
+    /// paused, which a sleep only stops.
+    no_history: Vec<u64>,
     /// `mTopResumedActivity`, `mLastReportedTopResumedActivity`,
     /// `mTopResumedActivityWaitingForPrev`, and the latest loss.
     top_resumed: Option<u64>,
@@ -543,7 +551,9 @@ impl Stack {
     /// Whether `a` is visible (`EnsureActivitiesVisibleHelper`): in a
     /// visible task, not under an activity of it that occludes it.
     pub fn shown(&self, a: &Activity) -> bool {
-        if a.finishing || self.visibility(a.task) == Visibility::Invisible {
+        // No activity is visible on a sleeping display
+        // (`shouldBeVisibleUnchecked`).
+        if self.sleeping || a.finishing || self.visibility(a.task) == Visibility::Invisible {
             return false;
         }
         for above in self
@@ -1030,6 +1040,10 @@ impl Stack {
         if let Some(task) = d.front {
             self.move_to_front(task);
         }
+        // `setTargetRootTaskIfNeeded`: `clearLastPausedActivity`.
+        if let Some(task) = d.target {
+            self.last_paused.remove(&task);
+        }
         for &t in &d.clear {
             self.finish_one(t, user_leaving, &mut out);
         }
@@ -1223,7 +1237,11 @@ impl Stack {
     fn pause(&mut self, token: u64, user_leaving: bool, out: &mut Vec<Command>) {
         let Some(a) = self.get_mut(token) else { return };
         a.state = State::Pausing;
-        let (finishing, task) = (a.finishing, a.task);
+        let (finishing, task, no_history) = (a.finishing, a.task, a.no_history);
+        self.last_paused.insert(task, token);
+        if !finishing && no_history && !self.no_history.contains(&token) {
+            self.no_history.push(token);
+        }
         self.touch(task);
         self.update_top_resumed(out);
         out.push(Command::Pause {
@@ -1271,6 +1289,10 @@ impl Stack {
         let Some(top) = self.top(task).filter(|a| !a.pending).map(|a| a.token) else {
             return false;
         };
+        // Asleep, a top that paused stays so: "Going to sleep and all paused".
+        if self.sleeping && self.last_paused.get(&task) == Some(&top) {
+            return false;
+        }
         let others: Vec<u64> = self
             .activities
             .iter()
@@ -1282,6 +1304,20 @@ impl Stack {
         }
         if self.activities.iter().any(|a| a.state == State::Pausing) {
             return false;
+        }
+        // A no-history activity a sleep only stopped finishes as another
+        // that occludes it resumes asleep (`finishNoHistoryActivitiesIfNeeded`).
+        if self.sleeping && self.get(top).is_some_and(|a| a.occludes_parent) {
+            let stale: Vec<u64> = self
+                .no_history
+                .iter()
+                .copied()
+                .filter(|&t| t != top && self.get(t).is_some_and(|a| !a.finishing))
+                .collect();
+            self.no_history.retain(|t| *t == top);
+            for t in stale {
+                self.finish_one(t, false, out);
+            }
         }
         if !matches!(
             self.get(top).unwrap().state,
@@ -1329,6 +1365,11 @@ impl Stack {
     /// the stopped activities now visible that are not to be resumed are
     /// started (`makeVisibleIfNeeded`, `shouldStartActivity`).
     fn settle(&mut self, out: &mut Vec<Command>) {
+        // Activities gone are forgotten (`removeFromHistory`,
+        // `cleanUpActivityReferences`).
+        let live = |t: &u64| self.activities.iter().any(|a| a.token == *t);
+        self.last_paused.retain(|_, t| live(t));
+        self.no_history.retain(live);
         // A home that finished is restarted behind the desktop.
         if self.home.is_none_or(|h| self.top(h).is_none()) {
             self.home_front = false;
@@ -1407,7 +1448,8 @@ impl Stack {
             .map(|a| (a.token, a.no_history))
             .collect();
         for (token, no_history) in hidden {
-            if no_history {
+            // "Not finishing noHistory ... because we're just sleeping".
+            if no_history && !self.sleeping {
                 self.finish_one(token, false, out);
                 continue;
             }
@@ -1489,7 +1531,10 @@ impl Stack {
             self.complete_finishing(token, &mut out);
         }
         self.resume_focused(false, &mut out);
-        if self.focused().is_none() || self.get(token).is_some_and(|a| self.behind_desktop(a.task))
+        // Asleep, a paused activity stops (`checkReadyForSleepLocked`).
+        if self.sleeping
+            || self.focused().is_none()
+            || self.get(token).is_some_and(|a| self.behind_desktop(a.task))
         {
             self.stop_hidden(None, &mut out);
         }
@@ -1535,7 +1580,12 @@ impl Stack {
                 out.push(Command::Destroy(a.token));
             }
         }
-        self.stop_hidden(Some(token), &mut out);
+        // `activityIdleInternal`: asleep, `checkReadyForSleepLocked`.
+        if self.sleeping {
+            self.sleep_tasks(&mut out);
+        } else {
+            self.stop_hidden(Some(token), &mut out);
+        }
         self.settle(&mut out);
         out
     }
@@ -1564,6 +1614,44 @@ impl Stack {
         self.stop_hidden(None, &mut out);
         self.settle(&mut out);
         out
+    }
+
+    /// `applySleepTokens` of a display whether it sleeps: asleep, every
+    /// task goes to sleep (`goToSleepIfPossible`); awake, the visible
+    /// tasks' top activities resume and their other visible ones start
+    /// again (`awakeFromSleeping`, `resumeFocusedTasksTopActivities`).
+    pub(super) fn set_sleeping(&mut self, sleeping: bool) -> Vec<Command> {
+        if std::mem::replace(&mut self.sleeping, sleeping) == sleeping {
+            return Vec::new();
+        }
+        if !sleeping {
+            return self.ensure_visible();
+        }
+        let mut out = Vec::new();
+        self.sleep_tasks(&mut out);
+        self.settle(&mut out);
+        out
+    }
+
+    /// Whether the display sleeps (`shouldSleepActivities`).
+    pub(super) fn sleeping(&self) -> bool {
+        self.sleeping
+    }
+
+    /// `TaskFragment.sleepIfPossible` of every task (`putTasksToSleep`,
+    /// `checkReadyForSleepLocked`): a resumed activity pauses, and one no
+    /// longer visible, as none is asleep, stops.
+    fn sleep_tasks(&mut self, out: &mut Vec<Command>) {
+        let resumed: Vec<u64> = self
+            .activities
+            .iter()
+            .filter(|a| a.state == State::Resumed)
+            .map(|a| a.token)
+            .collect();
+        for token in resumed {
+            self.pause(token, false, out);
+        }
+        self.stop_hidden(None, out);
     }
 
     /// `activityStopped` of a stop that saved instance state, or did not:
@@ -2919,6 +3007,129 @@ mod tests {
         );
         assert_eq!(s.paused(1), [Destroy(1)]);
         assert_eq!(s.destroyed(1), [TaskEmpty(7)]);
+    }
+
+    /// `applySleepTokens`: asleep, the resumed activities of every task
+    /// window pause, then stop; awake, they resume. The focus and the
+    /// tasks stay as they were.
+    #[test]
+    fn a_sleeping_display_pauses_and_stops_every_task_until_it_wakes() {
+        let mut s = Stack {
+            freeform: true,
+            ..Default::default()
+        };
+        launch_new(&mut s, 1, 7, "A", 0);
+        launch_new(&mut s, 2, 8, "B", 0);
+        s.top_resumed_released(None);
+        let tasks = |c: &[Command]| {
+            c.iter()
+                .any(|c| matches!(c, Front(_) | Back(_) | Hide(_) | TaskEmpty(_)))
+        };
+        let out = s.set_sleeping(true);
+        assert!(!tasks(&out));
+        for token in [1, 2] {
+            assert!(out.contains(&Pause {
+                token,
+                finishing: false,
+                user_leaving: false
+            }));
+        }
+        assert!(out.contains(&TopResumed {
+            token: 2,
+            on_top: false
+        }));
+        assert_eq!(s.set_sleeping(true), []);
+        for token in [1, 2] {
+            let out = s.paused(token);
+            assert!(!tasks(&out));
+            assert!(!out.iter().any(|c| matches!(c, Resume { .. })));
+            assert_eq!(
+                out,
+                [
+                    Visible {
+                        token,
+                        visible: false
+                    },
+                    Stop(token)
+                ]
+            );
+            assert!(s.stopped(token, true));
+        }
+        let out = s.set_sleeping(false);
+        assert!(!tasks(&out));
+        for token in [1, 2] {
+            assert!(out.contains(&Resume {
+                token,
+                results: Vec::new(),
+                new_intents: Vec::new()
+            }));
+        }
+        assert_eq!(s.focused(), Some(8));
+    }
+
+    /// Asleep, a start launches and resumes its activity as awake
+    /// (`resumeTopActivity`), and its idle puts it to sleep
+    /// (`checkReadyForSleepLocked`): it pauses, then stops. A paused top
+    /// is not resumed again while asleep.
+    #[test]
+    fn a_start_while_asleep_launches_then_sleeps() {
+        let mut s = Stack {
+            freeform: true,
+            ..Default::default()
+        };
+        launch_new(&mut s, 1, 7, "A", 0);
+        s.top_resumed_released(None);
+        s.set_sleeping(true);
+        assert!(!s.paused(1).iter().any(|c| matches!(c, Resume { .. })));
+        assert!(s.stopped(1, true));
+        let out = launch_new(&mut s, 2, 8, "B", 0);
+        assert!(out.contains(&Launch(2)));
+        assert!(out.contains(&Front(8)));
+        assert_eq!(s.get(2).unwrap().state, State::Resumed);
+        assert!(s.idle(2).contains(&Pause {
+            token: 2,
+            finishing: false,
+            user_leaving: false
+        }));
+        assert_eq!(
+            s.paused(2),
+            [
+                Visible {
+                    token: 2,
+                    visible: false
+                },
+                Stop(2)
+            ]
+        );
+    }
+
+    /// A sleep stops a no-history activity rather than finishing it
+    /// (`stopIfPossible`); one stopped so finishes when another that
+    /// occludes it resumes while asleep (`finishNoHistoryActivitiesIfNeeded`).
+    #[test]
+    fn a_sleep_only_stops_a_no_history_activity() {
+        let mut s = Stack {
+            freeform: true,
+            ..Default::default()
+        };
+        launch_new(&mut s, 1, 7, "A", 0);
+        s.get_mut(1).unwrap().no_history = true;
+        s.top_resumed_released(None);
+        s.set_sleeping(true);
+        let out = s.paused(1);
+        assert!(!out.iter().any(|c| matches!(
+            c,
+            Pause {
+                finishing: true,
+                ..
+            } | Destroy(_)
+        )));
+        assert!(out.contains(&Stop(1)));
+        assert!(!s.get(1).unwrap().finishing);
+        assert!(s.stopped(1, true));
+        let out = launch_new(&mut s, 2, 8, "B", 0);
+        assert!(out.contains(&Launch(2)));
+        assert!(s.get(1).unwrap().finishing);
     }
 
     #[test]

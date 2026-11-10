@@ -250,3 +250,89 @@ fn work_chains_keep_identity_and_only_first_nodes_are_charged() {
         );
     }
 }
+
+/// `PhoneWindowManager`'s policy of input while not interactive: a motion
+/// of `POLICY_FLAG_WAKE` wakes the device (`WAKE_REASON_WAKE_MOTION`) and
+/// goes on; a wake key's down wakes it (`WAKE_REASON_WAKE_KEY`) and is
+/// kept, its up to be dropped; other input is consumed.
+#[test]
+fn input_wakes_the_device_as_the_window_policy_has_it() {
+    use super::super::input_policy::{ACTION_PASS_TO_USER, PENDING_WAKE_KEY};
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        super::super::activity_start_tests::permissions(host);
+        let power = Arc::new(PowerManager::new(host.clone()));
+        assert!(host.power_service.set(power.clone()).is_ok());
+        let sleep = || power.state.lock().unwrap().asleep = true;
+        let woke = || {
+            let state = power.state.lock().unwrap();
+            (!state.asleep)
+                .then(|| {
+                    state
+                        .last_wake
+                        .as_ref()
+                        .map(|w| (w.reason, w.details.clone()))
+                })
+                .flatten()
+        };
+        sleep();
+        let intercept = |motion, key, down, flags| {
+            host.intercept_non_interactive(motion, key, down, 5_000_000, flags)
+                .unwrap()
+        };
+        assert_eq!(intercept(true, 0, true, 0), 0);
+        assert_eq!(woke(), None);
+        assert_eq!(intercept(true, 0, true, 1), ACTION_PASS_TO_USER);
+        assert_eq!(woke(), Some((7, Some("android.policy:MOTION".into()))));
+        // Interactive again, all input goes on.
+        assert_eq!(intercept(false, 29, true, 0), ACTION_PASS_TO_USER);
+        sleep();
+        // `A`, of no wake flag; `WAKEUP`'s up, then its down.
+        assert_eq!(intercept(false, 29, true, 0), 0);
+        assert_eq!(intercept(false, 224, false, 0), 0);
+        assert_eq!(woke(), None);
+        assert_eq!(intercept(false, 224, true, 0), PENDING_WAKE_KEY);
+        assert_eq!(woke(), Some((6, Some("android.policy:KEY".into()))));
+    });
+}
+
+/// The app host agent, taking what its dispatcher hears of interactivity.
+struct InputAgent(std::sync::mpsc::Sender<bool>);
+impl Service for InputAgent {
+    fn descriptor(&self) -> &str {
+        super::super::AGENT_DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        call.data.enforce_interface(self.descriptor())?;
+        assert_eq!(call.code, super::super::SET_INTERACTIVE);
+        self.0.send(call.data.read_bool()?).unwrap();
+        let mut reply = Parcel::new();
+        reply.write_no_exception();
+        Ok(reply)
+    }
+}
+
+/// An agent attaching hears whether the device is interactive after a
+/// transition under way, never the state it replaces.
+#[test]
+fn an_attaching_agent_hears_interactivity_after_a_transition() {
+    crate::system::with_discovery_binders(|host, _, _, export| {
+        let power = Arc::new(PowerManager::new(host.clone()));
+        let (heard, hearing) = std::sync::mpsc::channel();
+        host.attach_agent(export(Arc::new(InputAgent(heard))));
+        let transition = power.transition.lock().unwrap();
+        let attaching = power.clone();
+        let attach = std::thread::spawn(move || attaching.tell_input_interactive().unwrap());
+        assert!(
+            hearing
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err()
+        );
+        power.state.lock().unwrap().asleep = true;
+        host.set_input_interactive(false).unwrap();
+        drop(transition);
+        attach.join().unwrap();
+        let timeout = std::time::Duration::from_secs(2);
+        assert_eq!(hearing.recv_timeout(timeout), Ok(false));
+        assert_eq!(hearing.recv_timeout(timeout), Ok(false));
+    });
+}

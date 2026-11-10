@@ -75,6 +75,7 @@ pub const ACTION_UP: i32 = 1;
 /// `AKEY_EVENT_FLAG_*`.
 const FLAG_KEEP_TOUCH_MODE: i32 = 0x4;
 pub const FLAG_FROM_SYSTEM: i32 = 0x8;
+const FLAG_CANCELED: i32 = 0x20;
 const FLAG_VIRTUAL_HARD_KEY: i32 = 0x40;
 const FLAG_LONG_PRESS: i32 = 0x80;
 /// `KeyboardType` (`InputDevice.KEYBOARD_TYPE_*`).
@@ -189,6 +190,18 @@ impl KeyEvent {
         m.extend_from_slice(&[0; 4]); // empty2
         m.extend_from_slice(&self.down_time.to_ne_bytes());
         m
+    }
+
+    /// The up at `time` that cancels this down, as
+    /// `InputState::synthesizeCancelationEvents` makes it from its memento.
+    pub fn canceled(&self, time: i64) -> KeyEvent {
+        KeyEvent {
+            action: ACTION_UP,
+            flags: self.flags | FLAG_CANCELED,
+            repeat_count: 0,
+            event_time: time,
+            ..self.clone()
+        }
     }
 }
 
@@ -604,8 +617,9 @@ impl Mapper {
     }
 
     /// `processKey` of an `EV_KEY` of `scan_code` (and the HID usage
-    /// before it) at `when`: the key event, or none for an up of a key not
-    /// down. A key of no mapping is `AKEYCODE_UNKNOWN`.
+    /// before it) at `when`: the key event and its key layout's policy
+    /// flags, or none for an up of a key not down. A key of no mapping is
+    /// `AKEYCODE_UNKNOWN`.
     pub fn process_key(
         &mut self,
         map: &KeyMap,
@@ -613,7 +627,7 @@ impl Mapper {
         down: bool,
         scan_code: i32,
         usage_code: i32,
-    ) -> Option<KeyEvent> {
+    ) -> Option<(KeyEvent, u32)> {
         let mut flags = FLAG_FROM_SYSTEM;
         // `EventHub::mapKey`.
         let mapped = map
@@ -674,7 +688,7 @@ impl Mapper {
         if policy & POLICY_FLAG_FUNCTION != 0 {
             key_meta |= AMETA_FUNCTION_ON;
         }
-        Some(KeyEvent {
+        let event = KeyEvent {
             device: self.device,
             source: self.sources & (SOURCE_KEYBOARD | SOURCE_DPAD | SOURCE_GAMEPAD),
             display: DISPLAY_INVALID,
@@ -686,8 +700,25 @@ impl Mapper {
             repeat_count: 0,
             down_time,
             event_time: when,
-        })
+        };
+        Some((event, policy))
     }
+}
+
+/// `KeyboardInputMapper`'s `isMediaKey`: keys an external non-alphabetic
+/// keyboard does not wake the device with.
+pub fn is_media_key(key_code: i32) -> bool {
+    matches!(
+        key_code,
+        24 | 25 // VOLUME_UP, VOLUME_DOWN
+            | 79 // HEADSETHOOK
+            | 85..=91 // MEDIA_PLAY_PAUSE, STOP, NEXT, PREVIOUS, REWIND, FAST_FORWARD, MUTE
+            | 126 | 127 | 130 // MEDIA_PLAY, MEDIA_PAUSE, MEDIA_RECORD
+            | 164 // VOLUME_MUTE
+            | 222 // MEDIA_AUDIO_TRACK
+            | 252..=254 // TV_AUDIO_DESCRIPTION, _MIX_UP, _MIX_DOWN
+            | 272..=275 // MEDIA_SKIP_FORWARD, _BACKWARD, MEDIA_STEP_FORWARD, _BACKWARD
+    )
 }
 
 /// `setKeyRepeatConfiguration`: the time a key is held before it repeats,
@@ -799,31 +830,31 @@ mod tests {
     fn keys_map_with_their_meta_state() {
         let map = map();
         let mut m = Mapper::new(0, SOURCE_KEYBOARD | SOURCE_DPAD);
-        let shift = m.process_key(&map, 1, true, 42, 0).unwrap();
+        let shift = m.process_key(&map, 1, true, 42, 0).unwrap().0;
         assert_eq!(
             (shift.key_code, shift.meta_state),
             (59, AMETA_SHIFT_ON | AMETA_SHIFT_LEFT_ON)
         );
-        let a = m.process_key(&map, 2, true, 30, 0).unwrap();
+        let a = m.process_key(&map, 2, true, 30, 0).unwrap().0;
         assert_eq!(
             (a.key_code, a.meta_state, a.flags, a.source, a.display),
             (29, 0x41, FLAG_FROM_SYSTEM, 0x301, DISPLAY_INVALID)
         );
-        let up = m.process_key(&map, 3, false, 30, 0).unwrap();
+        let up = m.process_key(&map, 3, false, 30, 0).unwrap().0;
         assert_eq!((up.action, up.down_time), (ACTION_UP, 2));
         // An up of a key not down is dropped.
         assert!(m.process_key(&map, 4, false, 30, 0).is_none());
-        let shift_up = m.process_key(&map, 5, false, 42, 0).unwrap();
+        let shift_up = m.process_key(&map, 5, false, 42, 0).unwrap().0;
         assert_eq!(shift_up.meta_state, 0);
         // Caps Lock toggles on its up.
         m.process_key(&map, 6, true, 58, 0);
-        let caps = m.process_key(&map, 7, false, 58, 0).unwrap();
+        let caps = m.process_key(&map, 7, false, 58, 0).unwrap().0;
         assert_eq!(caps.meta_state, AMETA_CAPS_LOCK_ON);
         // A function key carries the function modifier.
-        let f = m.process_key(&map, 8, true, 464, 0).unwrap();
+        let f = m.process_key(&map, 8, true, 464, 0).unwrap().0;
         assert_eq!(f.meta_state & AMETA_FUNCTION_ON, AMETA_FUNCTION_ON);
         // An unmapped key is unknown.
-        assert_eq!(m.process_key(&map, 9, true, 2, 0).unwrap().key_code, 0);
+        assert_eq!(m.process_key(&map, 9, true, 2, 0).unwrap().0.key_code, 0);
     }
 
     #[test]
@@ -899,7 +930,7 @@ mod tests {
         let mut r = Repeat::default();
         let mut m = Mapper::new(0, SOURCE_KEYBOARD);
         let map = map();
-        let down = m.process_key(&map, 1_000, true, 30, 0).unwrap();
+        let down = m.process_key(&map, 1_000, true, 30, 0).unwrap().0;
         let first = r.dispatch(config, down);
         assert_eq!(first.repeat_count, 0);
         assert_eq!(r.next(), Some(1_000 + 400_000_000));
@@ -911,7 +942,7 @@ mod tests {
         );
         let again = r.synthesize(config, 450_001_000).unwrap();
         assert_eq!((again.repeat_count, again.flags & FLAG_LONG_PRESS), (2, 0));
-        let up = m.process_key(&map, 460_000_000, false, 30, 0).unwrap();
+        let up = m.process_key(&map, 460_000_000, false, 30, 0).unwrap().0;
         r.dispatch(config, up);
         assert_eq!(r.next(), None);
     }

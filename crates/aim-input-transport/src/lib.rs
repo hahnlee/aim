@@ -27,6 +27,8 @@ const ACTION_OUTSIDE: i32 = 4;
 const ACTION_POINTER_DOWN: i32 = 5;
 const ACTION_POINTER_UP: i32 = 6;
 const POINTER_INDEX_SHIFT: i32 = 8;
+/// `AMOTION_EVENT_FLAG_CANCELED`.
+const FLAG_CANCELED: i32 = 0x20;
 /// `AMOTION_EVENT_AXIS_X`, `_Y`, `_PRESSURE`, `_SIZE`.
 const AXIS_X: u32 = 0;
 const AXIS_Y: u32 = 1;
@@ -116,8 +118,10 @@ pub struct Touch {
 }
 
 /// A motion to publish.
+#[derive(Clone)]
 pub struct Motion {
     action: i32,
+    flags: i32,
     time: i64,
     down_time: i64,
     pointers: Vec<(u32, f32, f32)>,
@@ -251,10 +255,21 @@ impl Touch {
 }
 
 impl Motion {
+    /// Whether it is a gesture's first touch (`ACTION_DOWN`).
+    pub fn initial_down(&self) -> bool {
+        self.action == ACTION_DOWN
+    }
+
+    /// Its event time (ns, the input clock).
+    pub fn time(&self) -> i64 {
+        self.time
+    }
+
     /// A motion of the touchscreen, its pointers pressed.
     fn touched(action: i32, time: i64, down_time: i64, pointers: Vec<(u32, f32, f32)>) -> Motion {
         Motion {
             action,
+            flags: 0,
             time,
             down_time,
             pointers,
@@ -278,6 +293,7 @@ impl Motion {
     ) -> Option<Motion> {
         matches!(action, ACTION_DOWN | ACTION_MOVE | ACTION_UP).then(|| Motion {
             action,
+            flags: 0,
             time,
             down_time,
             pointers: vec![(0, x, y)],
@@ -302,6 +318,28 @@ impl Motion {
         Motion {
             action: ACTION_OUTSIDE,
             pointers: vec![(id, x, y)],
+            ..*self
+        }
+    }
+
+    /// Its device's id.
+    pub fn device(&self) -> i32 {
+        self.device
+    }
+
+    /// The `ACTION_CANCEL` at `time` of the gesture this was the last
+    /// motion of, as `InputState::synthesizeCancelationEvents` makes it
+    /// from its memento: the pointers still down, `FLAG_CANCELED`.
+    pub fn canceled(&self, time: i64) -> Motion {
+        let mut pointers = self.pointers.clone();
+        if self.action & 0xff == ACTION_POINTER_UP {
+            pointers.remove((self.action >> POINTER_INDEX_SHIFT) as usize);
+        }
+        Motion {
+            action: ACTION_CANCEL,
+            flags: self.flags | FLAG_CANCELED,
+            time,
+            pointers,
             ..*self
         }
     }
@@ -335,7 +373,7 @@ impl Motion {
         m.extend_from_slice(&self.time.to_ne_bytes());
         i32s(&mut m, &[self.device, SOURCE_TOUCHSCREEN, 0]); // display 0
         m.extend_from_slice(&[0; 32]); // no HMAC
-        i32s(&mut m, &[self.action, 0, 0, 0, 0]); // action, button, flags, meta, buttons
+        i32s(&mut m, &[self.action, 0, self.flags, 0, 0]); // action, button, flags, meta, buttons
         m.extend_from_slice(&[0; 4]); // classification NONE
         i32s(&mut m, &[0]); // no edge flags
         m.extend_from_slice(&self.down_time.to_ne_bytes());

@@ -119,6 +119,13 @@ const WRITE_EVENT: u32 = 17;
 /// `IAppHostAgent.syncInputWindows(int[] liveChannels)`: input commit barrier.
 const SYNC_INPUT_WINDOWS: u32 = 18;
 const INJECT_INPUT_EVENT_TO_TARGET: u32 = 19;
+/// `IAppHostAgent.setInteractive(boolean interactive)`
+/// (`InputManagerInternal.setInteractive`).
+const SET_INTERACTIVE: u32 = 22;
+/// The app host's `interceptBeforeQueueingNonInteractive(boolean motion,
+/// int keyCode, boolean down, long whenNanos, int policyFlags)`: the
+/// window policy's result for input while the device is not interactive.
+const INTERCEPT_NON_INTERACTIVE: u32 = 3;
 /// `InputTransport.cpp`'s `SOCKET_BUFFER_SIZE`.
 const SOCKET_BUFFER_SIZE: libc::c_int = 32 * 1024;
 
@@ -448,6 +455,12 @@ fn on_transact(
                     Status::new_exception_str(binder::ExceptionCode::ILLEGAL_STATE, Some(error))
                 }
             })?;
+            Ok(())
+        }
+        SET_INTERACTIVE => {
+            let dispatcher = agent.dispatcher().ok_or(StatusCode::UNKNOWN_TRANSACTION)?;
+            dispatcher.set_interactive(data.read()?);
+            reply.write(&Status::ok())?;
             Ok(())
         }
         20 => input_filter::set(agent, data, reply),
@@ -798,9 +811,10 @@ impl IAppHostAgent for Agent {
 
 /// Attaches the agent to the app host, which waits for it.
 fn attach() {
+    let input = input::Dispatcher::new(power::key);
     let agent = BnAppHostAgent::new_binder(
         Agent {
-            input: input::Dispatcher::new(power::key),
+            input: input.clone(),
             channels: Default::default(),
             effects: Default::default(),
         },
@@ -823,6 +837,28 @@ fn attach() {
         Ok(()) => log::info!("attached to {APP_HOST}"),
         Err(error) => log::error!("attach to {APP_HOST}: {error}"),
     }
+    input.set_policy(Box::new(move |motion, key_code, down, when, flags| {
+        let result = (|| -> Result<i32, Status> {
+            let mut data = host.prepare_transact()?;
+            data.write(&motion)?;
+            data.write(&key_code)?;
+            data.write(&down)?;
+            data.write(&when)?;
+            data.write(&(flags as i32))?;
+            let reply = host.submit_transact(INTERCEPT_NON_INTERACTIVE, data, 0)?;
+            let status: Status = reply.read()?;
+            if !status.is_ok() {
+                return Err(status);
+            }
+            Ok(reply.read()?)
+        })();
+        // An unanswered interception passes the event on, as a policy
+        // that is gone cannot hold it.
+        result.unwrap_or_else(|error| {
+            log::error!("interceptBeforeQueueingNonInteractive: {error}");
+            1
+        })
+    }));
     // The agent lives as long as the process: the host holds it.
     std::mem::forget(agent);
 }

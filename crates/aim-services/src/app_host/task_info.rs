@@ -166,6 +166,8 @@ pub struct RunningTaskInfo {
     pub is_focused: bool,
     pub is_visible: bool,
     pub is_top_activity_no_display: bool,
+    /// `shouldSleepActivities`: its display sleeps.
+    pub is_sleeping: bool,
     pub is_top_activity_transparent: bool,
     pub is_activity_stack_transparent: bool,
     pub last_non_fullscreen_bounds: Option<Rect>,
@@ -355,7 +357,7 @@ impl RunningTaskInfo {
         p.write_bool(self.is_visible);
         p.write_bool(self.is_visible); // isVisibleRequested
         p.write_bool(self.is_top_activity_no_display);
-        p.write_bool(false); // isSleeping: the display never sleeps
+        p.write_bool(self.is_sleeping);
         p.write_i32(0); // no LocusId
         p.write_i32(FEATURE_DEFAULT_TASK_CONTAINER);
         p.write_bool(self.is_top_activity_transparent);
@@ -907,7 +909,17 @@ impl AppHost {
             c.split_once('/')
                 .map(|(p, c)| (p.to_string(), c.to_string()))
         };
-        let (t, running, top, focused, visibility, translucent, top_occludes, activity_type) = {
+        let (
+            t,
+            running,
+            top,
+            focused,
+            visibility,
+            translucent,
+            top_occludes,
+            activity_type,
+            sleeping,
+        ) = {
             let stack = self.activities.stack.lock().unwrap();
             let t = stack.task(task).ok_or_else(gone)?.clone();
             let running: Vec<u64> = stack
@@ -926,6 +938,7 @@ impl AppHost {
                 stack.translucent(task),
                 top.occludes_parent,
                 stack.activity_type(task),
+                stack.sleeping(),
             )
         };
         let base_token = *running.first().ok_or_else(gone)?;
@@ -1004,6 +1017,7 @@ impl AppHost {
             is_focused: focused,
             is_visible: visibility != Visibility::Invisible,
             is_top_activity_no_display: top_no_display,
+            is_sleeping: sleeping,
             is_top_activity_transparent: !top_occludes,
             is_activity_stack_transparent: translucent,
             last_non_fullscreen_bounds: bounds.filter(|b| b.0 == 5).map(|b| b.1),
@@ -1078,6 +1092,7 @@ impl AppHost {
             is_focused: false,
             is_visible: false,
             is_top_activity_no_display: false,
+            is_sleeping: self.activities.stack.lock().unwrap().sleeping(),
             is_top_activity_transparent: false,
             // `!forAllActivities(occludesParent)` of no activity.
             is_activity_stack_transparent: true,
@@ -1094,6 +1109,7 @@ impl AppHost {
             info.top_activity_info = top.top_activity_info.clone();
             info.is_visible = tasks.iter().any(|t| t.is_visible);
             info.is_top_activity_no_display = top.is_top_activity_no_display;
+            info.is_sleeping = top.is_sleeping;
             info.is_top_activity_transparent = top.is_top_activity_transparent;
             info.is_activity_stack_transparent = top.is_activity_stack_transparent;
             info.last_non_fullscreen_bounds = top.last_non_fullscreen_bounds;
@@ -1899,6 +1915,7 @@ pub(super) mod tests {
             is_focused: true,
             is_visible: true,
             is_top_activity_no_display: false,
+            is_sleeping: true,
             is_top_activity_transparent: true,
             is_activity_stack_transparent: false,
             last_non_fullscreen_bounds: Some(bounds),
@@ -1969,7 +1986,7 @@ pub(super) mod tests {
         // no LocusId, the feature, the transparencies, the bounds.
         assert_eq!(
             ints(&mut r, 9),
-            [1, 1, 1, 0, 0, 0, FEATURE_DEFAULT_TASK_CONTAINER, 1, 0]
+            [1, 1, 1, 0, 1, 0, FEATURE_DEFAULT_TASK_CONTAINER, 1, 0]
         );
         assert_eq!(rect(&mut r), Some([10, 20, 830, 1480]));
         assert_eq!(

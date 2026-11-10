@@ -5515,6 +5515,64 @@ pub(super) mod tests {
         });
     }
 
+    /// In window mode the display-off sleep token pauses then stops every
+    /// task window's activity, and its release resumes them; the Mac
+    /// windows hear nothing of it. The display sleeps while any token is
+    /// held.
+    #[test]
+    fn sleep_tokens_stop_every_task_window_until_released() {
+        use super::super::activity::DISPLAY_OFF_SLEEP_TOKEN;
+        use super::super::activity_stack::State;
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let (_thread, activities, mut receive, _) = wct_tasks(host, export, Rect::default());
+            let states = || {
+                let stack = host.activities.stack.lock().unwrap();
+                activities
+                    .iter()
+                    .map(|&t| stack.get(t).unwrap().state)
+                    .collect::<Vec<_>>()
+            };
+            let quiet = |receive: &mut UnixStream| {
+                let mut bytes = Vec::new();
+                let _ = receive.read_to_end(&mut bytes);
+                let ops: Vec<_> = bytes
+                    .chunks_exact(size_of::<Record>())
+                    // SAFETY: `Record` is plain old data, `c` one's bytes.
+                    .map(|c| unsafe { std::ptr::read_unaligned(c.as_ptr().cast::<Record>()) })
+                    .map(|r| (r.op, r.task))
+                    .collect();
+                assert_eq!(ops, []);
+            };
+            // The fixture's tasks, settled: the focus reported.
+            let commands = host.activities.stack.lock().unwrap().ensure_visible();
+            host.run(commands);
+            let _ = receive.read_to_end(&mut Vec::new());
+            for task in &mut host.activities.stack.lock().unwrap().tasks {
+                task.intent.component = Some(crate::package::intent::ComponentName {
+                    package: "p".into(),
+                    class: "p.Main".into(),
+                });
+            }
+            let sleeping = || host.organizer_task_info(8).unwrap().is_sleeping;
+            assert!(!sleeping());
+            host.set_sleep_token(DISPLAY_OFF_SLEEP_TOKEN, true);
+            assert_eq!(states(), [State::Pausing, State::Pausing]);
+            assert!(sleeping());
+            host.set_sleep_token("other", true);
+            for &t in &activities {
+                let commands = host.activities.stack.lock().unwrap().paused(t);
+                host.run(commands);
+            }
+            assert_eq!(states(), [State::Stopping, State::Stopping]);
+            host.set_sleep_token(DISPLAY_OFF_SLEEP_TOKEN, false);
+            assert_eq!(states(), [State::Stopping, State::Stopping]);
+            host.set_sleep_token("other", false);
+            assert_eq!(states(), [State::Resumed, State::Resumed]);
+            assert!(!sleeping());
+            quiet(&mut receive);
+        });
+    }
+
     /// `p/p.Main` of no orientation and a 600 x 900 window layout at the
     /// top left (`Gravity.TOP | Gravity.LEFT`).
     fn layout_info(host: &AppHost) -> ActivityInfo {

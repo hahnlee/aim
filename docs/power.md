@@ -145,6 +145,21 @@ Mac-owned timeout model, the persisted stay-on setting feeds into that model.
 Mac input does not yet feed Android user activity, so a guest timeout would
 put the guest to sleep while the user is active.
 
+Sleep follows the original's order (#2954). Going to sleep, the display
+owner has SurfaceFlinger power the default display off
+(`SurfaceControl.setDisplayPowerMode`, `POWER_MODE_OFF`, as
+`LocalDisplayAdapter` does for DisplayPowerController's state), its state's
+listeners hear it, and the window policy's `screenTurnedOff` acquires the
+display-off sleep token at the task owner (`DisplayPolicy`,
+`RootWindowContainer.mDisplayOffTokenAcquirer`). A display holding a sleep
+token sleeps (`applySleepTokens`): no activity is visible, so every task's
+resumed activity pauses and then stops, in window mode every task window's,
+as the Mac's own sleep is device-wide; the Mac windows, the focus and the
+tasks' order do not change. Waking, `screenTurningOn` releases the token
+first, the visible tasks' top activities resume and their other visible
+ones start, then SurfaceFlinger powers the display back on
+(`POWER_MODE_NORMAL`).
+
 So a native service would keep: wake lock bookkeeping and their disabled
 states (uid states, device idle allowlists, low power standby), the
 wakefulness state machine per power group, user activity and its

@@ -396,6 +396,14 @@ impl PowerManager {
         !self.state.lock().unwrap().asleep
     }
 
+    /// Tells input whether the device is interactive, as an agent
+    /// attaching hears it: under the transition lock, so a transition's
+    /// own `setInteractive` cannot come before it.
+    pub(super) fn tell_input_interactive(&self) -> Result<(), Exception> {
+        let _transition = self.transition.lock().unwrap();
+        self.host.set_input_interactive(self.interactive())
+    }
+
     /// PMS BinderService / PowerGroup timestamp guards and Notifier's
     /// single-display interactive transition (android-16.0.0_r1).
     #[allow(clippy::too_many_arguments)]
@@ -415,6 +423,45 @@ impl PowerManager {
             ));
         }
         self.enforce("android.permission.DEVICE_POWER", call.sender_euid as i32)?;
+        self.change_interactive(
+            call.sender_euid,
+            time,
+            awake,
+            reason,
+            details,
+            package,
+            flags,
+        );
+        Ok(())
+    }
+
+    /// `PowerManagerInternal`'s wake of the window policy
+    /// (`PhoneWindowManager.wakeUp`, as the system): at `time` (ms of the
+    /// input clock) for `reason`, `details` the policy's.
+    pub(super) fn policy_wake_up(&self, time: i64, reason: i32, details: &str) {
+        self.change_interactive(
+            1000,
+            time,
+            true,
+            reason,
+            Some(format!("android.policy:{details}")),
+            Some("android".into()),
+            0,
+        );
+    }
+
+    /// The interactive transition of `set_interactive`, for `uid`.
+    #[allow(clippy::too_many_arguments)]
+    fn change_interactive(
+        &self,
+        uid: u32,
+        time: i64,
+        awake: bool,
+        reason: i32,
+        details: Option<String>,
+        package: Option<String>,
+        flags: i32,
+    ) {
         let _transition = self.transition.lock().unwrap();
         {
             let mut state = self.state.lock().unwrap();
@@ -424,21 +471,21 @@ impl PowerManager {
                 state.last_wake.as_ref().map_or(0, |a| a.time)
             };
             if time < last || awake == !state.asleep {
-                return Ok(());
+                return;
             }
             // SOFT_SLEEP, without fold grace: a screen wake lock vetoes sleep.
             if !awake
                 && flags & GO_TO_SLEEP_FLAG_SOFT_SLEEP != 0
                 && (state.window_holds_screen || state.locks.iter().any(WakeLock::keeps_screen))
             {
-                return Ok(());
+                return;
             }
             self.battery().wake_screen(awake);
             state.asleep = !awake;
             if awake {
                 eprintln!(
                     "app host: power: waking uid={} reason={reason} details={details:?} package={package:?}",
-                    call.sender_euid
+                    uid
                 );
                 state.last_wake = Some(pm::WakeUp {
                     time,
@@ -458,8 +505,23 @@ impl PowerManager {
             }
             self.update_blockers(&mut state);
         }
+        // Notifier's early interactive change: InputManagerInternal's
+        // `setInteractive`, which the input policy reads.
+        if let Err(e) = self.host.set_input_interactive(awake) {
+            eprintln!("app host: power: input interactive: {}", e.message);
+        }
+        // DisplayPowerController: the window policy's `screenTurningOn`
+        // before the display powers on, its `screenTurnedOff` once it is
+        // off, which release and acquire the display-off sleep token.
         if let Some(display) = self.host.display_manager.get() {
-            display.power_changed();
+            use super::activity::DISPLAY_OFF_SLEEP_TOKEN;
+            if awake {
+                self.host.set_sleep_token(DISPLAY_OFF_SLEEP_TOKEN, false);
+            }
+            display.set_power(awake);
+            if !awake {
+                self.host.set_sleep_token(DISPLAY_OFF_SLEEP_TOKEN, true);
+            }
         }
         // Notifier's early interactive change: the policy's
         // `startedWakingUp` or `startedGoingToSleep`, which the keyguard
@@ -483,7 +545,6 @@ impl PowerManager {
         if awake {
             self.host.keyguard_screen_on();
         }
-        Ok(())
     }
 
     fn set_stay_on(&self, uid: i32, value: i32) -> Result<(), Exception> {

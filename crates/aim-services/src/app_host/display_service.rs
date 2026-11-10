@@ -307,7 +307,18 @@ impl DisplayManager {
         }
     }
 
-    pub(super) fn power_changed(&self) {
+    /// `DisplayPowerController`'s screen state of the default display, `on`
+    /// or off: SurfaceFlinger powers it (`LocalDisplayAdapter`), which
+    /// failing is logged as there, and the display state's listeners hear
+    /// it.
+    pub(super) fn set_power(&self, on: bool) {
+        if let Err(e) = super::display::Display::set_power_mode(&self.host.process, on) {
+            eprintln!("app host: display power mode: {e}");
+        }
+        self.power_changed();
+    }
+
+    fn power_changed(&self) {
         use aim_service_aidl::android_hardware_display_idisplaymanagercallback as cb;
         let callbacks = self.callbacks.lock().unwrap().clone();
         for (binder, mask, _strong) in callbacks {

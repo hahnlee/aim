@@ -29,6 +29,7 @@ use aim_input_transport::keyboard::{
     self, ConfigFile, ConfigFiles, Identifier, KeyEvent, KeyMap, Keyboard, Mapper, Repeat,
     RepeatConfiguration,
 };
+use aim_input_transport::keylayout::POLICY_FLAG_WAKE;
 use aim_input_transport::{
     ABS_MT_POSITION_X, ABS_MT_POSITION_Y, Motion, Touch, focus, touch_mode, touched,
 };
@@ -97,8 +98,13 @@ impl Target {
 struct Windows {
     stack: Vec<Target>,
     display: (f32, f32),
-    /// The window of the gesture under way.
+    /// The window of the gesture under way, and the last motion it was
+    /// sent of a device's gesture (`InputState`'s motion memento).
     gesture: Option<i32>,
+    gesture_motion: Option<Motion>,
+    /// The keys down in each window, as it was sent them (`InputState`'s
+    /// key mementos).
+    keys: Vec<(i32, KeyEvent)>,
     /// The windows the last key or motion went to, but for its outside
     /// targets (`mInteractionConnectionTokens`).
     interactions: Vec<i32>,
@@ -115,6 +121,8 @@ pub struct KeyboardInfo {
     pub sources: i32,
     pub keyboard_type: i32,
     pub is_external: bool,
+    /// Whether its downs wake the device by default.
+    pub wakes: bool,
     pub key_character_map: String,
     pub supported_keys: Option<Vec<i32>>,
 }
@@ -131,8 +139,25 @@ pub type InputFilter = Arc<dyn Fn(&[u8], i32) + Send + Sync>;
 /// it consumes a keyboard key instead of passing it to the user.
 pub type KeyPolicy = fn(&KeyEvent) -> bool;
 
+/// The window policy's interception of what the devices give while the
+/// device is not interactive (`interceptKeyBeforeQueueing`,
+/// `interceptMotionBeforeQueueingNonInteractive`): whether it is a motion,
+/// the key code, whether a down, its time and policy flags; its result.
+pub type InputPolicy = Box<dyn Fn(bool, i32, bool, i64, u32) -> i32 + Send + Sync>;
+
+/// `WindowManagerPolicy.ACTION_PASS_TO_USER`, and the app host's mark of a
+/// wake key's down (`mPendingWakeKey`).
+const ACTION_PASS_TO_USER: i32 = 1;
+const PENDING_WAKE_KEY: i32 = 2;
+
 pub struct Dispatcher {
     filter: Mutex<Option<InputFilter>>,
+    /// `NativeInputManager`'s `mInteractive`, and the window policy.
+    interactive: std::sync::atomic::AtomicBool,
+    policy: Mutex<Option<InputPolicy>>,
+    /// `PhoneWindowManager.mPendingWakeKey`: the key whose down woke the
+    /// device, its up not dispatched.
+    pending_wake_key: Mutex<Option<i32>>,
     windows: Mutex<Windows>,
     next_seq: Mutex<(u32, i32)>,
     keyboard: Option<KeyboardInfo>,
@@ -176,8 +201,10 @@ impl Dispatcher {
         let previous = windows.stack.last().map(|t| t.index);
         windows.stack.retain(|t| live.contains(&t.index));
         windows.interactions.retain(|i| live.contains(i));
+        windows.keys.retain(|(i, _)| live.contains(i));
         if windows.gesture.is_some_and(|i| !live.contains(&i)) {
             windows.gesture = None;
+            windows.gesture_motion = None;
         }
         self.refocus(&mut windows, previous);
     }
@@ -203,6 +230,9 @@ impl Dispatcher {
             repeat_changed: Condvar::new(),
             injections,
             filter: Mutex::new(None),
+            interactive: std::sync::atomic::AtomicBool::new(true),
+            policy: Mutex::new(None),
+            pending_wake_key: Mutex::new(None),
         });
         let injector = dispatcher.clone();
         std::thread::spawn(move || injector.inject_queue(jobs));
@@ -215,6 +245,68 @@ impl Dispatcher {
             std::thread::spawn(move || repeater.repeat_keys());
         }
         dispatcher
+    }
+
+    /// `setInteractive`.
+    pub fn set_interactive(&self, interactive: bool) {
+        self.interactive
+            .store(interactive, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The window policy, once the agent attached to the app host.
+    pub fn set_policy(&self, policy: InputPolicy) {
+        *self.policy.lock().unwrap() = Some(policy);
+    }
+
+    /// `interceptKeyBeforeQueueing` of a device's key of `policy_flags`:
+    /// whether it is dispatched. Interactive, all are but the up of the key
+    /// that woke the device; else the window policy decides.
+    fn intercept_key(&self, event: &KeyEvent, policy_flags: u32) -> bool {
+        let down = event.action != keyboard::ACTION_UP;
+        let mut pending = self.pending_wake_key.lock().unwrap();
+        if self.interactive.load(std::sync::atomic::Ordering::Relaxed) {
+            let woke = pending.take() == Some(event.key_code) && !down;
+            return !woke;
+        }
+        let Some(policy) = &*self.policy.lock().unwrap() else {
+            return true;
+        };
+        let result = policy(false, event.key_code, down, event.event_time, policy_flags);
+        *pending = (result & PENDING_WAKE_KEY != 0).then_some(event.key_code);
+        result & ACTION_PASS_TO_USER != 0
+    }
+
+    /// A device's key of `policy_flags`: dispatched, unless the policy
+    /// consumes it.
+    fn key_from_device(&self, key: KeyEvent, policy_flags: u32) {
+        if self.intercept_key(&key, policy_flags) {
+            self.dispatch_key(key);
+        } else {
+            self.drop_key(&key);
+        }
+    }
+
+    /// A touchscreen motion, waking if `wake`: dispatched unless the
+    /// policy consumes it or the input filter takes it.
+    fn motion_from_device(&self, motion: &Motion, wake: bool) {
+        if !self.intercept_motion(motion, wake) {
+            self.drop_motion(motion);
+        } else if !self.filter_input(&motion.message(0, self.ids().1, (0., 0.))) {
+            self.dispatch(&mut self.windows.lock().unwrap(), motion);
+        }
+    }
+
+    /// `interceptMotionBeforeQueueing` of a touchscreen motion, waking if
+    /// `wake` (`POLICY_FLAG_WAKE`): whether it is dispatched.
+    fn intercept_motion(&self, motion: &Motion, wake: bool) -> bool {
+        if self.interactive.load(std::sync::atomic::Ordering::Relaxed) {
+            return true;
+        }
+        let Some(policy) = &*self.policy.lock().unwrap() else {
+            return true;
+        };
+        let flags = if wake { POLICY_FLAG_WAKE } else { 0 };
+        policy(true, 0, motion.initial_down(), motion.time(), flags) & ACTION_PASS_TO_USER != 0
     }
 
     /// The built-in keyboard, if there is one.
@@ -244,25 +336,82 @@ impl Dispatcher {
         self.dispatch_unfiltered_key(event);
     }
 
+    /// The repeat state is kept until the key is sent, so a repeat due
+    /// meanwhile cannot follow its up or cancellation.
     fn dispatch_unfiltered_key(&self, event: KeyEvent) {
-        let event = {
-            let mut repeat = self.repeat.lock().unwrap();
-            let config = repeat.1;
-            repeat.0.dispatch(config, event)
-        };
+        let mut repeat = self.repeat.lock().unwrap();
+        let config = repeat.1;
+        let event = repeat.0.dispatch(config, event);
         self.repeat_changed.notify_all();
         self.send_key(&event);
     }
 
-    /// Publishes `event` to the focused window, if any.
+    /// Publishes `event` to the focused window, if any, which holds a
+    /// key's down until its up (`InputState::trackKey`).
     fn send_key(&self, event: &KeyEvent) {
         let windows = &mut *self.windows.lock().unwrap();
-        if let Some(target) = windows.stack.last() {
-            if event.action != keyboard::ACTION_UP {
-                windows.interactions = vec![target.index];
+        let Some(target) = windows.stack.last() else {
+            return;
+        };
+        let index = target.index;
+        let (seq, id) = self.ids();
+        send(&target.channel, &event.message(seq, id));
+        windows.keys.retain(|(i, k)| {
+            !(*i == index
+                && (k.device, k.source, k.display, k.key_code, k.scan_code)
+                    == (
+                        event.device,
+                        event.source,
+                        event.display,
+                        event.key_code,
+                        event.scan_code,
+                    ))
+        });
+        if event.action != keyboard::ACTION_UP {
+            windows.keys.push((index, event.clone()));
+            windows.interactions = vec![index];
+        }
+    }
+
+    /// `dropInboundEventLocked` of a device's key the policy consumed: the
+    /// key repeat is reset, and the keys of its device and display down in
+    /// a window are canceled (`CANCEL_NON_POINTER_EVENTS`).
+    fn drop_key(&self, event: &KeyEvent) {
+        let mut repeat = self.repeat.lock().unwrap();
+        repeat.0.reset();
+        self.repeat_changed.notify_all();
+        let windows = &mut *self.windows.lock().unwrap();
+        let (canceled, kept) = std::mem::take(&mut windows.keys)
+            .into_iter()
+            .partition(|(_, k)| (k.device, k.display) == (event.device, event.display));
+        windows.keys = kept;
+        let now = monotonic_ns();
+        for (index, key) in canceled {
+            if let Some(target) = windows.stack.iter().find(|t| t.index == index) {
+                let (seq, id) = self.ids();
+                send(&target.channel, &key.canceled(now).message(seq, id));
             }
+        }
+    }
+
+    /// `dropInboundEventLocked` of a touchscreen motion the policy
+    /// consumed: the gesture of its device under way is canceled
+    /// (`CANCEL_POINTER_EVENTS`).
+    fn drop_motion(&self, motion: &Motion) {
+        let windows = &mut *self.windows.lock().unwrap();
+        if windows
+            .gesture_motion
+            .as_ref()
+            .is_none_or(|m| m.device() != motion.device())
+        {
+            return;
+        }
+        let last = windows.gesture_motion.take().unwrap();
+        let gesture = windows.gesture.take();
+        if let Some(target) = windows.stack.iter().find(|t| Some(t.index) == gesture) {
             let (seq, id) = self.ids();
-            send(&target.channel, &event.message(seq, id));
+            let cancel = last.canceled(monotonic_ns());
+            send(&target.channel, &cancel.message(seq, id, target.origin()));
         }
     }
 
@@ -274,9 +423,7 @@ impl Dispatcher {
             let now = monotonic_ns();
             let config = repeat.1;
             if let Some(event) = repeat.0.synthesize(config, now) {
-                drop(repeat);
                 self.send_key(&event);
-                repeat = self.repeat.lock().unwrap();
                 continue;
             }
             repeat = match repeat.0.next() {
@@ -314,11 +461,21 @@ impl Dispatcher {
                 EV_KEY if value != 2 && keyboard::supported_scan_code(code) => {
                     let time = sec * 1_000_000_000 + usec * 1_000;
                     let usage_code = std::mem::take(&mut usage);
-                    if let Some(key) =
+                    if let Some((key, layout_flags)) =
                         mapper.process_key(&map, time, value != 0, code.into(), usage_code)
                         && !policy(&key)
                     {
-                        self.dispatch_key(key);
+                        // `KeyboardInputMapper::processKey`'s `POLICY_FLAG_WAKE`.
+                        let down = value != 0;
+                        let mut flags = layout_flags & POLICY_FLAG_WAKE;
+                        if down
+                            && info.wakes
+                            && !(info.keyboard_type != keyboard::KEYBOARD_TYPE_ALPHABETIC
+                                && keyboard::is_media_key(key.key_code))
+                        {
+                            flags |= POLICY_FLAG_WAKE;
+                        }
+                        self.key_from_device(key, flags);
                     }
                 }
                 _ => {}
@@ -390,8 +547,10 @@ impl Dispatcher {
         let previous = windows.stack.last().map(|t| t.index);
         windows.stack.retain(|t| t.index != index);
         windows.interactions.retain(|&i| i != index);
+        windows.keys.retain(|&(i, _)| i != index);
         if windows.gesture == Some(index) {
             windows.gesture = None;
+            windows.gesture_motion = None;
         }
         if previous == Some(index) {
             self.refocus(&mut windows, None);
@@ -451,8 +610,10 @@ impl Dispatcher {
                 windows.interactions = vec![target.index];
             }
         }
+        windows.gesture_motion = windows.gesture.map(|_| motion.clone());
         if motion.ends_gesture() {
             windows.gesture = None;
+            windows.gesture_motion = None;
         }
     }
 
@@ -496,7 +657,7 @@ impl Dispatcher {
 
     /// Reads the touchscreen, as long as the agent runs.
     fn read_touchscreen(&self) {
-        let (mut device, x_axis, y_axis) = match open_touchscreen() {
+        let (mut device, x_axis, y_axis, wake) = match open_touchscreen() {
             Ok(Some(found)) => found,
             Ok(None) => return log::info!("no touchscreen: no touch input"),
             Err(error) => return log::error!("touchscreen: {error}"),
@@ -520,15 +681,13 @@ impl Dispatcher {
                 (EV_SYN, SYN_REPORT) => {
                     if !std::mem::take(&mut dropped) {
                         let time = sec * 1_000_000_000 + usec * 1_000;
-                        let mut windows = self.windows.lock().unwrap();
-                        let scale = (
-                            windows.display.0 / x_axis.1 as f32,
-                            windows.display.1 / y_axis.1 as f32,
-                        );
+                        let display = self.windows.lock().unwrap().display;
+                        let scale = (display.0 / x_axis.1 as f32, display.1 / y_axis.1 as f32);
                         for motion in touch.report(time, x_axis.0, y_axis.0, scale) {
-                            if !self.filter_input(&motion.message(0, self.ids().1, (0., 0.))) {
-                                self.dispatch(&mut windows, &motion);
-                            }
+                            // `TouchInputMapper`: an initial down wakes. The
+                            // policy is asked without the windows' lock, as
+                            // waking changes them.
+                            self.motion_from_device(&motion, wake && motion.initial_down());
                         }
                     }
                 }
@@ -540,9 +699,10 @@ impl Dispatcher {
 }
 
 /// The first direct device with multitouch positions (as EventHub
-/// classifies a touchscreen), on the touchscreen's clock, and its x and y
-/// axes' minimum and extent.
-fn open_touchscreen() -> std::io::Result<Option<(File, (i32, i32), (i32, i32))>> {
+/// classifies a touchscreen), on the touchscreen's clock, its x and y
+/// axes' minimum and extent, and whether its initial downs wake the
+/// device (`TouchInputMapper`'s `touch.wake`, by default if external).
+fn open_touchscreen() -> std::io::Result<Option<(File, (i32, i32), (i32, i32), bool)>> {
     let mut paths: Vec<_> = std::fs::read_dir("/dev/input")?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
@@ -552,6 +712,8 @@ fn open_touchscreen() -> std::io::Result<Option<(File, (i32, i32), (i32, i32))>>
         })
         .collect();
     paths.sort();
+    let readable = |path: &str| std::fs::metadata(path).is_ok_and(|m| m.is_file());
+    let files = config_files(&readable);
     for path in paths {
         let device = File::open(&path)?;
         let fd = device.as_raw_fd();
@@ -577,11 +739,15 @@ fn open_touchscreen() -> std::io::Result<Option<(File, (i32, i32), (i32, i32))>>
         if unsafe { libc::ioctl(fd, EVIOCSCLOCKID as _, &clock) } < 0 {
             return Err(std::io::Error::last_os_error());
         }
+        let (identifier, config) = identify(fd, &files);
+        let wake = keyboard::property_bool(&config, "touch.wake")
+            .unwrap_or_else(|| is_external(&identifier, &config));
         log::info!("touchscreen {}", path.display());
         return Ok(Some((
             device,
             axis(ABS_MT_POSITION_X)?,
             axis(ABS_MT_POSITION_Y)?,
+            wake,
         )));
     }
     Ok(None)
@@ -621,6 +787,54 @@ fn property(name: &std::ffi::CStr) -> String {
     String::from_utf8_lossy(&value[..n.max(0) as usize]).into_owned()
 }
 
+/// The input device configuration files' places (`getInputDeviceConfigurationFilePath*`).
+fn config_files(readable: &dyn Fn(&str) -> bool) -> ConfigFiles<'_> {
+    let apex = property(c"input_device.config_file.apex");
+    let root = std::env::var("ANDROID_ROOT").ok();
+    let data = std::env::var("ANDROID_DATA").unwrap_or_default();
+    ConfigFiles {
+        prefixes: ConfigFiles::prefixes(Some(&apex), root.as_deref(), &data),
+        readable,
+    }
+}
+
+/// A device's identifier and its input device configuration (`.idc`),
+/// as EventHub reads them (`openDeviceLocked`, `loadConfigurationLocked`).
+fn identify(fd: libc::c_int, files: &ConfigFiles<'_>) -> (Identifier, Vec<(String, String)>) {
+    let mut ids = [0u16; 4];
+    // SAFETY: `struct input_id`, four shorts.
+    unsafe { libc::ioctl(fd, EVIOCGID as _, ids.as_mut_ptr()) };
+    let identifier = Identifier {
+        name: ioctl_string(fd, EVIOCGNAME),
+        bus: ids[0],
+        vendor: ids[1],
+        product: ids[2],
+        version: ids[3],
+        unique_id: ioctl_string(fd, EVIOCGUNIQ),
+    };
+    let config = match files.by_identifier(&identifier, ConfigFile::Configuration, "") {
+        Some(idc) => match std::fs::read(&idc).map(|c| keyboard::property_map(&c)) {
+            Ok(Ok(config)) => config,
+            Ok(Err(error)) => {
+                log::error!("{idc}: {error}");
+                Vec::new()
+            }
+            Err(_) => Vec::new(),
+        },
+        None => Vec::new(),
+    };
+    (identifier, config)
+}
+
+/// `isExternalDeviceLocked`: the configuration's `device.internal`, else
+/// a USB or Bluetooth bus.
+fn is_external(identifier: &Identifier, config: &[(String, String)]) -> bool {
+    match keyboard::property_bool(config, "device.internal") {
+        Some(internal) => !internal,
+        None => matches!(identifier.bus, BUS_USB | BUS_BLUETOOTH),
+    }
+}
+
 /// The built-in keyboard as EventHub opens it (`openDeviceLocked`): the
 /// first device of the `KEYBOARD` class, its identifier read, its
 /// configuration, key layout and key character map found by its name
@@ -637,14 +851,8 @@ fn open_keyboard() -> std::io::Result<Option<OpenKeyboard>> {
         })
         .collect();
     paths.sort();
-    let apex = property(c"input_device.config_file.apex");
-    let root = std::env::var("ANDROID_ROOT").ok();
-    let data = std::env::var("ANDROID_DATA").unwrap_or_default();
     let readable = |path: &str| std::fs::metadata(path).is_ok_and(|m| m.is_file());
-    let files = ConfigFiles {
-        prefixes: ConfigFiles::prefixes(Some(&apex), root.as_deref(), &data),
-        readable: &readable,
-    };
+    let files = config_files(&readable);
     let read = |path: &str| std::fs::read(path).ok();
     for path in paths {
         let device = File::open(&path)?;
@@ -658,28 +866,7 @@ fn open_keyboard() -> std::io::Result<Option<OpenKeyboard>> {
         unsafe { libc::ioctl(fd, EVIOCGBIT_MSC as _, msc.as_mut_ptr()) };
         let has_key = |code: u16| keys[code as usize / 8] & (1 << (code % 8)) != 0;
         let has_msc_scan = msc[0] & (1 << MSC_SCAN) != 0;
-        let mut ids = [0u16; 4];
-        // SAFETY: `struct input_id`, four shorts.
-        unsafe { libc::ioctl(fd, EVIOCGID as _, ids.as_mut_ptr()) };
-        let identifier = Identifier {
-            name: ioctl_string(fd, EVIOCGNAME),
-            bus: ids[0],
-            vendor: ids[1],
-            product: ids[2],
-            version: ids[3],
-            unique_id: ioctl_string(fd, EVIOCGUNIQ),
-        };
-        let config = match files.by_identifier(&identifier, ConfigFile::Configuration, "") {
-            Some(idc) => match read(&idc).map(|c| keyboard::property_map(&c)) {
-                Some(Ok(config)) => config,
-                Some(Err(error)) => {
-                    log::error!("{idc}: {error}");
-                    Vec::new()
-                }
-                None => Vec::new(),
-            },
-            None => Vec::new(),
-        };
+        let (identifier, config) = identify(fd, &files);
         if !keyboard::has_keys(&has_key) {
             continue;
         }
@@ -704,11 +891,11 @@ fn open_keyboard() -> std::io::Result<Option<OpenKeyboard>> {
             );
             continue;
         }
-        // `isExternalDeviceLocked`.
-        let is_external = match keyboard::property_bool(&config, "device.internal") {
-            Some(internal) => !internal,
-            None => matches!(identifier.bus, BUS_USB | BUS_BLUETOOTH),
-        };
+        let is_external = is_external(&identifier, &config);
+        // `KeyboardInputMapper`: an external keyboard's downs wake the
+        // device unless it says not to (`keyboard.doNotWakeByDefault`).
+        let wakes = is_external
+            && !keyboard::property_bool(&config, "keyboard.doNotWakeByDefault").unwrap_or(false);
         let clock = libc::CLOCK_MONOTONIC as libc::c_int;
         // SAFETY: an int argument.
         if unsafe { libc::ioctl(fd, EVIOCSCLOCKID as _, &clock) } < 0 {
@@ -732,6 +919,7 @@ fn open_keyboard() -> std::io::Result<Option<OpenKeyboard>> {
                 sources: classes.sources(),
                 keyboard_type: classes.keyboard_type(),
                 is_external,
+                wakes,
                 key_character_map,
                 supported_keys,
             },
@@ -799,4 +987,119 @@ pub(crate) fn isolated_test() -> bool {
     );
     assert!(stdout.contains(&format!("test {name} ... ok")), "{stdout}");
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aim_input_transport::{ABS_MT_SLOT, ABS_MT_TRACKING_ID};
+    use std::os::unix::net::UnixDatagram;
+
+    /// A dispatcher whose window policy consumes all input, and the client
+    /// end of its one window.
+    fn window() -> (Arc<Dispatcher>, UnixDatagram) {
+        let dispatcher = Dispatcher::new(|_| false);
+        dispatcher.set_policy(Box::new(|_, _, _, _, _| 0));
+        let (server, client) = UnixDatagram::pair().unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let frame = [0, 0, 100, 100];
+        let region = Region {
+            frame,
+            touchable: frame,
+            watch_outside: false,
+            owner: 10001,
+            owner_pid: 42,
+        };
+        dispatcher.add_window(0, server.into(), (100, 100), region);
+        recv(&client); // focus
+        (dispatcher, client)
+    }
+
+    fn recv(client: &UnixDatagram) -> Vec<u8> {
+        let mut bytes = [0; 512];
+        let n = client.recv(&mut bytes).unwrap();
+        bytes[..n].to_vec()
+    }
+
+    /// A message's sequence number, event id and event time.
+    fn header(m: &[u8]) -> (u32, i32, i64) {
+        (
+            u32::from_ne_bytes(m[4..8].try_into().unwrap()),
+            i32::from_ne_bytes(m[8..12].try_into().unwrap()),
+            i64::from_ne_bytes(m[16..24].try_into().unwrap()),
+        )
+    }
+
+    fn nothing(client: &UnixDatagram) {
+        client.set_nonblocking(true).unwrap();
+        let error = client.recv(&mut [0; 512]).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    /// A key held while the device goes to sleep: its dropped up cancels
+    /// it in the window that has it, and its repeat stops.
+    #[test]
+    fn a_dropped_key_cancels_the_keys_held_and_their_repeat() {
+        let (dispatcher, client) = window();
+        let key = |action, time| KeyEvent {
+            device: keyboard::BUILT_IN_KEYBOARD_ID,
+            source: keyboard::SOURCE_KEYBOARD,
+            display: keyboard::DISPLAY_INVALID,
+            action,
+            flags: keyboard::FLAG_FROM_SYSTEM,
+            key_code: 29,
+            scan_code: 30,
+            meta_state: 0,
+            repeat_count: 0,
+            down_time: 1,
+            event_time: time,
+        };
+        let down = key(keyboard::ACTION_DOWN, 1);
+        dispatcher.key_from_device(down.clone(), 0);
+        let (seq, id, _) = header(&recv(&client));
+        assert!(dispatcher.repeat.lock().unwrap().0.next().is_some());
+        dispatcher.set_interactive(false);
+        dispatcher.key_from_device(key(keyboard::ACTION_UP, 2), 0);
+        let canceled = recv(&client);
+        let (seq, id, time) = (seq + 1, id + 1, header(&canceled).2);
+        assert_eq!(canceled, down.canceled(time).message(seq, id));
+        assert!(dispatcher.repeat.lock().unwrap().0.next().is_none());
+        dispatcher.key_from_device(key(keyboard::ACTION_DOWN, 3), 0);
+        nothing(&client);
+    }
+
+    /// A touch under way while the device goes to sleep: its dropped move
+    /// cancels the gesture, and the rest of it is dropped.
+    #[test]
+    fn a_dropped_motion_cancels_the_gesture_under_way() {
+        let (dispatcher, client) = window();
+        let mut touch = Touch::default();
+        let mut report = |time, x| {
+            for (code, value) in [
+                (ABS_MT_SLOT, 0),
+                (ABS_MT_TRACKING_ID, 1),
+                (ABS_MT_POSITION_X, x),
+                (ABS_MT_POSITION_Y, 10),
+            ] {
+                touch.abs(code, value);
+            }
+            touch.report(time, 0, 0, (1., 1.)).remove(0)
+        };
+        let down = report(1, 10);
+        dispatcher.motion_from_device(&down, false);
+        let (seq, id, _) = header(&recv(&client));
+        dispatcher.set_interactive(false);
+        dispatcher.motion_from_device(&report(2, 20), false);
+        let canceled = recv(&client);
+        let (seq, id, time) = (seq + 1, id + 1, header(&canceled).2);
+        assert_eq!(canceled, down.canceled(time).message(seq, id, (0., 0.)));
+        assert!(dispatcher.windows.lock().unwrap().gesture.is_none());
+        touch.abs(ABS_MT_TRACKING_ID, -1);
+        for up in touch.report(3, 0, 0, (1., 1.)) {
+            dispatcher.motion_from_device(&up, false);
+        }
+        nothing(&client);
+    }
 }
