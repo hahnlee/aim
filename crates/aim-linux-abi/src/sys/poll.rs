@@ -256,11 +256,7 @@ fn guest_revents(fd: i32, pin: Option<&super::fdtab::Pinned>, h: &libc::pollfd, 
     // readable, writable or not at all; readable only with data queued or
     // at EOF. Darwin's queued count includes each datagram's address, so a
     // zero-length one counts.
-    if pin.is_some()
-        && (h.revents != 0
-            || h.events & (POLLIN | libc::POLLOUT) == 0
-            || super::net::kept_error(h.fd))
-    {
+    if pin.is_some() && (h.revents != 0 || h.events & (POLLIN | libc::POLLOUT) == 0) {
         if let Some(queued) = super::net::pending_error(h.fd) {
             revents |= POLLERR;
             if queued == 0 && h.revents & POLLHUP == 0 {
@@ -617,7 +613,6 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
                 && super::net::pending_error(h.fd).is_some())
                 || kept(pin.as_ref(), h.fd)
                     .is_some_and(|kept| kept.events as i16 & (g.events | POLLHUP | POLLERR) != 0)
-                || super::net::kept_error(h.fd)
         });
         let n = host_poll(&mut host, if invalid || errored { 0 } else { left }, mask);
         if n < 0 {
@@ -782,11 +777,11 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
         let unconnected = host.iter().zip(&pins).any(|(h, pin)| {
             let read = h.events & libc::POLLIN != 0;
             let write = h.events & libc::POLLOUT != 0;
-            (read || write) && super::net::kept_error(h.fd)
-                || kept(pin.as_ref(), h.fd).is_some_and(|kept| {
-                    let events = kept.events as i16;
-                    read && events & (POLLIN | POLLHUP) != 0 || write && events & POLLOUT != 0
-                })
+            kept(pin.as_ref(), h.fd).is_some_and(|kept| {
+                let events = kept.events as i16;
+                read && events & (POLLIN | POLLHUP | POLLERR) != 0
+                    || write && events & (POLLOUT | POLLERR) != 0
+            })
         });
         let n = host_poll(&mut host, if unconnected { 0 } else { left }, mask);
         if n < 0 {
@@ -1737,12 +1732,74 @@ mod reportable_tests {
         }
         assert_eq!(receiver.join().unwrap(), 1);
         assert_eq!(polled(fd, POLLIN), (1, POLLERR));
+        // A level-triggered interest re-polls the socket each wait; an
+        // edge-triggered one has no wakeup to report.
+        let level = watching(fd, 0x1);
+        let edge = watching(fd, 0x1 | 1 << 31);
+        assert_eq!(waited(level, 0), (1, 0x8));
+        assert_eq!(waited(level, 0), (1, 0x8));
+        assert_eq!(waited(edge, 0).0, 0);
         let mut buffer = [0u8; 4];
         assert_eq!(
             fs::read([fd as u64, buffer.as_mut_ptr() as u64, 4, 0, 0, 0]),
             -111
         );
         assert_eq!(polled(fd, POLLIN), (0, 0));
+        assert_eq!(waited(level, 0).0, 0);
+        close(&[fd, level, edge]);
+    }
+
+    /// recvmmsg keeps any socket's error after the messages it received
+    /// (`do_recvmmsg`), a reset TCP connection's included: the next
+    /// receive returns ECONNRESET, where Darwin's read end of file.
+    #[test]
+    fn recvmmsg_keeps_a_tcp_reset_after_the_data() {
+        let _view = crate::vfs::test_view();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (fd, connected) = connected_to(1, listener.local_addr().unwrap().port());
+        assert_eq!(connected, -115);
+        let (peer, _) = listener.accept().unwrap();
+        use std::io::Write;
+        (&peer).write_all(b"x").unwrap();
+        let linger = libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        // SAFETY: setting SO_LINGER on our own socket.
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    peer.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_LINGER,
+                    (&linger as *const libc::linger).cast(),
+                    std::mem::size_of::<libc::linger>() as u32,
+                )
+            },
+            0
+        );
+        drop(peer);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while polled(fd, POLLIN).1 & POLLHUP == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let mut buffers = [[0u8; 4]; 2];
+        let iovs: Vec<[u64; 2]> = buffers
+            .iter_mut()
+            .map(|b| [b.as_mut_ptr() as u64, b.len() as u64])
+            .collect();
+        let mut headers = [[0u64; 8]; 2];
+        for (header, iov) in headers.iter_mut().zip(&iovs) {
+            header[2] = iov.as_ptr() as u64;
+            header[3] = 1;
+        }
+        assert_eq!(
+            crate::sys::net::recvmmsg([fd as u64, headers.as_mut_ptr() as u64, 2, 0, 0, 0]),
+            1
+        );
+        let mut buffer = [0u8; 4];
+        assert_eq!(received(fd, &mut buffer), -104);
+        assert_eq!(received(fd, &mut buffer), 0);
         close(&[fd]);
     }
 

@@ -753,6 +753,17 @@ fn signal_interests(ep: &Epoll) -> Vec<(i32, Arc<super::signalfd::SignalFd>, u64
         .collect()
 }
 
+/// What interest `i` reports of `kept`: no EPOLLERR of a kept error to
+/// an edge-triggered one, which no wakeup queued.
+fn kept_bits(kept: &super::net::Kept, i: &Interest) -> u32 {
+    let ignored = if i.events & EPOLLET != 0 && kept.events & EPOLLERR != 0 {
+        EPOLLERR
+    } else {
+        0
+    };
+    kept.events & (i.events | EPOLLHUP | EPOLLERR) & !ignored
+}
+
 /// The armed interests of `ep` in a socket with events this layer keeps
 /// ([`super::net::kept`]), which no knote fires for, that are to be
 /// reported.
@@ -772,9 +783,7 @@ fn kept_interests(ep: &Epoll) -> Vec<(i32, super::net::Kept)> {
                 Some(Kind::Sock(s)) => super::net::kept(&s, fd)?,
                 _ => return None,
             };
-            (kept.events & (i.events | EPOLLHUP | EPOLLERR) != 0
-                && !i.edge_reported(kept.generation))
-            .then_some((fd, kept))
+            (kept_bits(&kept, &i) != 0 && !i.edge_reported(kept.generation)).then_some((fd, kept))
         })
         .collect()
 }
@@ -1056,7 +1065,7 @@ fn ready(
         let Some(i) = interest.get_mut(&fd) else {
             continue;
         };
-        let b = kept.events & (i.events | EPOLLHUP | EPOLLERR);
+        let b = kept_bits(kept, i);
         if let Some(e) = out.iter_mut().find(|e| e.0 == fd) {
             e.1 |= b;
             continue;

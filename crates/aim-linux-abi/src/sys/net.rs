@@ -169,9 +169,9 @@ pub struct Sock {
     /// none: Linux's `sk_shutdown` how in the low two bits, above them a
     /// count of the calls, each of which wakes its waiters.
     shutdown: std::sync::atomic::AtomicU32,
-    /// The error, a Linux errno, of a datagram socket's recvmmsg that had
-    /// received datagrams already: `do_recvmmsg` writes it back to
-    /// `sk_err`, for the next receive, send, SO_ERROR or poll to report.
+    /// The error, a Linux errno, of a recvmmsg that had received messages
+    /// already: `do_recvmmsg` writes it back to `sk_err`, for the next
+    /// receive, send, SO_ERROR or poll to report.
     kept_error: std::sync::atomic::AtomicI32,
     /// Linux sockaddr of the local and peer names, when known.
     local: Mutex<Option<Vec<u8>>>,
@@ -2868,6 +2868,17 @@ fn recv(
     if let Some(s) = socket.as_ref().filter(|s| s.datagram()) {
         take_error(s, input.fd())?;
     }
+    // `tcp_recvmsg` and `unix_stream_read_generic` return `sk_err` once
+    // nothing is queued to read.
+    if let Some(s) = socket.as_ref().filter(|s| !s.datagram())
+        && s.kept_error.load(Ordering::Relaxed) != 0
+        && socket_info(input.fd()).is_some_and(|info| {
+            u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap()) == 0
+        })
+        && let kept @ 1.. = s.kept_error.swap(0, Ordering::Relaxed)
+    {
+        return Err(-(kept as i64));
+    }
     let end = || Received {
         n: 0,
         flags: 0,
@@ -3317,7 +3328,7 @@ pub fn recvmmsg(a: [u64; 6]) -> i64 {
                     return r;
                 }
                 if r != -(crate::errno::EAGAIN as i64)
-                    && let Some(s) = any_sock(&input).filter(|s| s.datagram())
+                    && let Some(s) = any_sock(&input)
                 {
                     s.kept_error.store(-r as i32, Ordering::Relaxed);
                 }
@@ -4016,14 +4027,9 @@ fn socket_info(fd: i32) -> Option<[u8; SOCKET_FDINFO]> {
 /// SO_ERROR returns once. None without one, or for any other fd.
 pub(super) fn pending_error(fd: i32) -> Option<u32> {
     let info = socket_info(fd)?;
-    (u16::from_ne_bytes(info[SOI_ERROR..SOI_ERROR + 2].try_into().unwrap()) != 0 || kept_error(fd))
+    (u16::from_ne_bytes(info[SOI_ERROR..SOI_ERROR + 2].try_into().unwrap()) != 0
+        || matches!(fdtab::get(fd), Some(Kind::Sock(s)) if s.kept_error.load(Ordering::Relaxed) != 0))
         .then(|| u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap()))
-}
-
-/// Whether guest socket `fd` has an error a recvmmsg kept, which no host
-/// readiness reports.
-pub(super) fn kept_error(fd: i32) -> bool {
-    matches!(fdtab::get(fd), Some(Kind::Sock(s)) if s.kept_error.load(Ordering::Relaxed) != 0)
 }
 
 /// The directions shut on guest socket `fd` (its `soi_state`'s
@@ -4085,16 +4091,22 @@ pub(super) struct Kept {
 }
 
 /// [`Kept`] of `s` on host socket `fd`, if any: an unconnected socket's
-/// readiness, and the shutdowns recorded where Darwin's failed with
-/// ENOTCONN (`RCV_SHUTDOWN` readable, both hung up).
+/// readiness, the shutdowns recorded where Darwin's failed with ENOTCONN
+/// (`RCV_SHUTDOWN` readable, both hung up), and the error a recvmmsg kept
+/// (EPOLLERR, for no wakeup: only a level-triggered interest reports it,
+/// as `ep_send_events` keeps one on the ready list).
 pub(super) fn kept(s: &Sock, fd: i32) -> Option<Kept> {
     const IN: u32 = 0x1 | 0x40 | 0x2000;
     const OUT: u32 = 0x4 | 0x100;
     const WRBAND: u32 = 0x200;
     const HUP: u32 = 0x10;
+    const ERR: u32 = 0x8;
     let unconnected = unconnected(s, fd);
     let generation = unconnected.unwrap_or_else(|| s.shutdown.load(Ordering::Relaxed));
     let mut events = 0;
+    if s.kept_error.load(Ordering::Relaxed) != 0 {
+        events |= ERR;
+    }
     if unconnected.is_some() {
         events |= HUP | OUT | if s.tcp() { 0 } else { WRBAND };
     }
