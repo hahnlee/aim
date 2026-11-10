@@ -522,6 +522,18 @@ impl AppHost {
             _ => None,
         };
         let requested = (windowing_mode == 5).then_some(bounds).or(launch_bounds);
+        // Task.resolveLeafTaskOnlyOverrideConfigs: multi-window launch bounds
+        // resolve at least the task's minimal size
+        // (adjustForMinimalTaskDimensions), pinned ones as they are.
+        let launch_bounds = match (windowing_mode, launch_bounds) {
+            (6, Some(b)) => {
+                let min = self
+                    .minimal_size(activity.min_size)
+                    .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+                Some(minimal_dimensions(b, None, min).map_err(Exception::illegal_argument)?)
+            }
+            (_, b) => b,
+        };
         let bounds = launch_bounds.unwrap_or(bounds);
         let id = {
             let mut next = self.tasks.next.lock().unwrap();
@@ -555,7 +567,7 @@ impl AppHost {
             requested_mode: windowing_mode,
             parent: None,
             requested_bounds: requested,
-            resolved_bounds: requested,
+            resolved_bounds: launch_bounds.or(requested),
             restore_bounds: (windowing_mode == 5)
                 .then_some(bounds)
                 .or(options.bounds)
@@ -621,12 +633,15 @@ impl AppHost {
         if let Some(root) = self.tasks.parent(id) {
             return self.layout_task_in_root(id, root, options, info, area);
         }
-        // A multi-window root task of the display area: launch bounds are
-        // requested (`initial_launch_bounds`), else it keeps its requested
-        // ones, as a WCT `setWindowingMode` leaves them.
-        if valid == 6 {
+        // A multi-window root task of the display area, made so or kept so
+        // (TaskLaunchParamsModifier takes the task's mode for one the
+        // options leave undefined): launch bounds are requested
+        // (`initial_launch_bounds`, `LaunchParamsController.layoutTask`),
+        // else it keeps its requested ones, as a WCT `setWindowingMode`
+        // leaves them.
+        if valid == 6 || (valid == 0 && self.tasks.windowing_mode(id) == Some(6)) {
             let change = self
-                .task_change(id, Some(6), options.bounds.map(Some))
+                .task_change(id, (valid == 6).then_some(6), options.bounds.map(Some))
                 .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
             return self
                 .apply_task_change(id, change)
@@ -1400,6 +1415,21 @@ impl AppHost {
         Ok(())
     }
 
+    /// The minimal size of a task of minimal size `min_size` (`mMinWidth`,
+    /// `mMinHeight`), unset ones the default
+    /// (`default_minimal_size_resizable_task`).
+    fn minimal_size(&self, min_size: (i32, i32)) -> Result<(i32, i32), String> {
+        let min_dp = self
+            .framework()
+            .ok()
+            .and_then(|i| i.framework_dimension_dp("default_minimal_size_resizable_task"))
+            .ok_or("no default_minimal_size_resizable_task")? as i32;
+        let display = self.display().map_err(|e| format!("{e:?}"))?;
+        let default_min = (min_dp as f32 * display.0.density_dpi() as f32 / 160.0) as i32;
+        let or_default = |m: i32| if m < 0 { default_min } else { m };
+        Ok((or_default(min_size.0), or_default(min_size.1)))
+    }
+
     /// `SET_BOUNDS` (`resizeTask`): the task takes `requested` bounds, as
     /// its windowing mode resolves them; its activities and windows are
     /// told, as `ActivityRecord.updateReportedConfigurationAndSend` and
@@ -1415,13 +1445,7 @@ impl AppHost {
         requested: Option<Rect>,
         mover: Mover,
     ) -> Result<Rect, String> {
-        let min_dp = self
-            .framework()
-            .ok()
-            .and_then(|i| i.framework_dimension_dp("default_minimal_size_resizable_task"))
-            .ok_or("no default_minimal_size_resizable_task")? as i32;
         let display = self.display().map_err(|e| format!("{e:?}"))?;
-        let density = display.0.density_dpi() as f32 / 160.0;
         let area = Rect {
             left: 0,
             top: 0,
@@ -1445,43 +1469,14 @@ impl AppHost {
             _ => {}
         }
         let previous = task.resolved_bounds;
-        let default_min = (min_dp as f32 * density) as i32;
-        let min = (
-            if task.min_size.0 < 0 {
-                default_min
-            } else {
-                task.min_size.0
-            },
-            if task.min_size.1 < 0 {
-                default_min
-            } else {
-                task.min_size.1
-            },
-        );
+        let min = self.minimal_size(task.min_size)?;
         let bounds = match requested {
             Some(b) => b,
             // Inheriting bounds of its minimal size.
             None if parent.width() >= min.0 && parent.height() >= min.1 => return Ok(parent),
             None => parent,
         };
-        for (start, end, old_end, minimum) in [
-            (bounds.left, bounds.right, previous.map(|p| p.right), min.0),
-            (bounds.top, bounds.bottom, previous.map(|p| p.bottom), min.1),
-        ] {
-            let size = end.checked_sub(start).ok_or("task bounds overflow")?;
-            if size <= 0 {
-                return Err("empty task bounds".into());
-            }
-            if size < minimum {
-                if Some(end) == old_end {
-                    end.checked_sub(minimum)
-                } else {
-                    start.checked_add(minimum)
-                }
-                .ok_or("minimum task bounds overflow")?;
-            }
-        }
-        let bounds = minimal_dimensions(bounds, previous, min);
+        let bounds = minimal_dimensions(bounds, previous, min)?;
         if mode != 5 || mover == Mover::Mac {
             return Ok(bounds);
         }
@@ -1758,8 +1753,31 @@ fn parent_of(tasks: &[Task], task: &Task) -> Option<(i32, Rect)> {
 
 /// `Task.adjustForMinimalTaskDimensions`: `bounds` at least `min` wide and
 /// high, grown away from the edge that stayed where it was in `previous`,
-/// else to the right and bottom.
-fn minimal_dimensions(mut bounds: Rect, previous: Option<Rect>, min: (i32, i32)) -> Rect {
+/// else to the right and bottom. Empty bounds, or bounds whose growth
+/// overflows, are an error.
+fn minimal_dimensions(
+    bounds: Rect,
+    previous: Option<Rect>,
+    min: (i32, i32),
+) -> Result<Rect, String> {
+    for (start, end, old_end, minimum) in [
+        (bounds.left, bounds.right, previous.map(|p| p.right), min.0),
+        (bounds.top, bounds.bottom, previous.map(|p| p.bottom), min.1),
+    ] {
+        let size = end.checked_sub(start).ok_or("task bounds overflow")?;
+        if size <= 0 {
+            return Err("empty task bounds".into());
+        }
+        if size < minimum {
+            if Some(end) == old_end {
+                end.checked_sub(minimum)
+            } else {
+                start.checked_add(minimum)
+            }
+            .ok_or("minimum task bounds overflow")?;
+        }
+    }
+    let mut bounds = bounds;
     if bounds.width() < min.0 {
         if previous.is_some_and(|p| bounds.right == p.right) {
             bounds.left = bounds.right - min.0;
@@ -1774,7 +1792,7 @@ fn minimal_dimensions(mut bounds: Rect, previous: Option<Rect>, min: (i32, i32))
             bounds.bottom = bounds.top + min.1;
         }
     }
-    bounds
+    Ok(bounds)
 }
 
 /// A connection to the task bridge of the display server at `socket`, and
@@ -2437,32 +2455,37 @@ pub(super) mod tests {
                         .set(surface::Composer::for_test(&host.process, endpoint.handle))
                         .is_ok()
                 );
-                let start = |info: &ActivityInfo, mode: i32, source: Option<i32>| {
-                    let mut request =
-                        super::super::activity_start::StartRequest::launcher("p.Main");
-                    request.launch_options = LaunchOptions {
-                        mode,
-                        ..Default::default()
+                let start_at =
+                    |info: &ActivityInfo, mode: i32, source: Option<i32>, bounds: Option<Rect>| {
+                        let mut request =
+                            super::super::activity_start::StartRequest::launcher("p.Main");
+                        request.launch_options = LaunchOptions {
+                            mode,
+                            bounds,
+                            ..Default::default()
+                        };
+                        request.source_task = source;
+                        let token = host.start_in_process(
+                            0,
+                            10100,
+                            "p",
+                            info.clone(),
+                            request,
+                            &Default::default(),
+                            None,
+                        )?;
+                        let task = host
+                            .activities
+                            .stack
+                            .lock()
+                            .unwrap()
+                            .get(token)
+                            .unwrap()
+                            .task;
+                        Ok::<_, Exception>((task, host.tasks.windowing_mode(task).unwrap()))
                     };
-                    request.source_task = source;
-                    let token = host.start_in_process(
-                        0,
-                        10100,
-                        "p",
-                        info.clone(),
-                        request,
-                        &Default::default(),
-                        None,
-                    )?;
-                    let task = host
-                        .activities
-                        .stack
-                        .lock()
-                        .unwrap()
-                        .get(token)
-                        .unwrap()
-                        .task;
-                    Ok::<_, Exception>((task, host.tasks.windowing_mode(task).unwrap()))
+                let start = |info: &ActivityInfo, mode: i32, source: Option<i32>| {
+                    start_at(info, mode, source, None)
                 };
                 let area = if windows { 5 } else { 1 };
                 // Fullscreen is taken; undefined and pinned inherit the display
@@ -2510,17 +2533,20 @@ pub(super) mod tests {
                 }
                 // A reused root task takes a mode it supports and keeps its own
                 // for one it does not.
-                let apply = |task: i32, info: &ActivityInfo, mode: i32| {
+                let apply_at = |task: i32, info: &ActivityInfo, mode: i32, bounds| {
                     host.apply_task_launch_options(
                         task,
                         LaunchOptions {
                             mode,
+                            bounds,
                             ..Default::default()
                         },
                         info,
                     )
                     .map(|()| host.tasks.windowing_mode(task).unwrap())
                 };
+                let apply =
+                    |task: i32, info: &ActivityInfo, mode: i32| apply_at(task, info, mode, None);
                 let (task, _) = start(&resizeable, 1, None).unwrap();
                 assert_eq!(apply(task, &resizeable, 2).unwrap(), 1);
                 let free = if freeform { 5 } else { 1 };
@@ -2530,6 +2556,20 @@ pub(super) mod tests {
                 // leaves it again.
                 assert_eq!(apply(task, &resizeable, 6).unwrap(), 6);
                 assert_eq!(apply(task, &resizeable, 1).unwrap(), 1);
+                // Multi-window launch bounds grow to the task's minimal size
+                // (`default_minimal_size_resizable_task`, 220dp at 320 dpi), and
+                // a reused multi-window task takes later ones in its own mode.
+                let r = |left, top, right, bottom| Rect {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                };
+                let (task, _) = start_at(&resizeable, 6, None, Some(r(0, 0, 100, 100))).unwrap();
+                assert_eq!(host.tasks.own_bounds(task), Some((6, r(0, 0, 440, 440))));
+                let later = r(100, 200, 700, 1000);
+                assert_eq!(apply_at(task, &resizeable, 0, Some(later)).unwrap(), 6);
+                assert_eq!(host.tasks.own_bounds(task), Some((6, later)));
                 let (task, _) = start(&fixed, 1, None).unwrap();
                 for mode in [5, 6] {
                     assert_eq!(apply(task, &fixed, mode).unwrap(), 1);
@@ -2717,7 +2757,7 @@ pub(super) mod tests {
             bottom: 1500,
         };
         assert_eq!(
-            minimal_dimensions(from_left, Some(previous), (440, 440)),
+            minimal_dimensions(from_left, Some(previous), (440, 440)).unwrap(),
             Rect {
                 left: 460,
                 top: 100,
@@ -2733,7 +2773,7 @@ pub(super) mod tests {
             bottom: 200,
         };
         assert_eq!(
-            minimal_dimensions(from_bottom, Some(previous), (440, 440)),
+            minimal_dimensions(from_bottom, Some(previous), (440, 440)).unwrap(),
             Rect {
                 left: 100,
                 top: 100,
@@ -2742,12 +2782,12 @@ pub(super) mod tests {
             }
         );
         assert_eq!(
-            minimal_dimensions(previous, Some(previous), (440, 440)),
+            minimal_dimensions(previous, Some(previous), (440, 440)).unwrap(),
             previous
         );
         // Bounds that filled their parent grow to the right and bottom.
         assert_eq!(
-            minimal_dimensions(from_left, None, (440, 440)),
+            minimal_dimensions(from_left, None, (440, 440)).unwrap(),
             Rect {
                 left: 800,
                 top: 100,
