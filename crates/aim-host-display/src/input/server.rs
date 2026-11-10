@@ -52,18 +52,15 @@ struct Inner {
     next_client: u64,
     /// Scan code and key, in the keymap's order; empty: no keymap.
     keymap: Vec<(u32, u16)>,
+    /// The key (by scan code) pressed and released for each reader that
+    /// opens the device, if any: [`Devices::set_open_key`].
+    open_key: Option<u32>,
 }
 
 struct Device {
     index: u32,
     inner: Mutex<Inner>,
-    /// The key (by scan code) the device taps for each reader it is opened
-    /// by, if any: [`Devices::on_open`].
-    on_open: Mutex<Option<OnOpen>>,
 }
-
-/// [`Devices::on_open`]'s question: the scan code to tap now, if any.
-pub type OnOpen = Arc<dyn Fn() -> Option<u32> + Send + Sync>;
 
 /// The devices of one display server.
 pub struct Devices {
@@ -153,6 +150,23 @@ impl Inner {
             .iter()
             .find(|&&(sc, _)| sc == scancode)
             .map(|&(_, k)| k)
+    }
+
+    /// Press and release key `usage` (by scan code) at `time_ns`.
+    fn tap(&mut self, usage: u32, time_ns: i64) {
+        let Some(code) = self.key_of(usage) else {
+            return;
+        };
+        for value in [1, 0] {
+            let r = Record {
+                time_ns,
+                kind: EV_KEY,
+                code,
+                value,
+            };
+            self.event(r, time_ns);
+            flush(self, time_ns);
+        }
     }
 }
 
@@ -291,23 +305,13 @@ impl Device {
                 masks: Mutex::new(vec![None; EV_CNT]),
             });
             inner.clients.push(client.clone());
+            // Under the same lock: a change of the open key and its press
+            // reach this reader either as this tap or as that press.
+            if let Some(usage) = inner.open_key {
+                inner.tap(usage, crate::monotonic_ns());
+            }
             client
         };
-        let tap = self.on_open.lock().unwrap().clone().and_then(|f| f());
-        if let Some(code) = tap.and_then(|usage| self.inner.lock().unwrap().key_of(usage)) {
-            let now = crate::monotonic_ns();
-            let mut inner = self.inner.lock().unwrap();
-            for value in [1, 0] {
-                let r = Record {
-                    time_ns: now,
-                    kind: EV_KEY,
-                    code,
-                    value,
-                };
-                inner.event(r, now);
-                flush(&mut inner, now);
-            }
-        }
         // What the client writes is injected into the device.
         let mut buf = [Record::default(); 64];
         let mut have = 0usize;
@@ -564,8 +568,8 @@ impl Devices {
                     grab: None,
                     next_client: 1,
                     keymap,
+                    open_key: None,
                 }),
-                on_open: Mutex::new(None),
             });
             let d = device.clone();
             std::thread::spawn(move || {
@@ -632,12 +636,21 @@ impl Devices {
         flush(&mut inner, time_ns);
     }
 
-    /// Ask `f`, each time a reader opens device `index`, for a key (by scan
-    /// code) to press and release then: a level the device reports as a
-    /// key, which a reader that was not there would have missed.
-    pub fn on_open(&self, index: u32, f: OnOpen) {
-        if let Some(d) = self.device(index) {
-            *d.on_open.lock().unwrap() = Some(f);
+    /// Have device `index` press and release `key` (by scan code), if any,
+    /// for each reader that opens it from now on: a level the device
+    /// reports as a key, which a reader that was not there would have
+    /// missed. `press` (scan code, time) is pressed and released for the
+    /// readers it has, at once with the change, so a reader opening
+    /// meanwhile gets the old level's key and then `press`, or the new
+    /// level's key alone.
+    pub fn set_open_key(&self, index: u32, key: Option<u32>, press: Option<(u32, i64)>) {
+        let Some(d) = self.device(index) else {
+            return;
+        };
+        let mut inner = d.inner.lock().unwrap();
+        inner.open_key = key;
+        if let Some((usage, time_ns)) = press {
+            inner.tap(usage, time_ns);
         }
     }
 
