@@ -393,6 +393,7 @@ mod tests {
                     windowing_mode: 5,
                     ..Default::default()
                 },
+                true,
             )
             .unwrap();
         params.flush();

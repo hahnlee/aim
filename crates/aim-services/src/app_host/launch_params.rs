@@ -104,8 +104,6 @@ type Records = BTreeMap<ComponentName, Params>;
 struct State {
     users: BTreeMap<i32, Records>,
     loading: BTreeMap<i32, JoinHandle<Result<Option<Records>, String>>>,
-    /// The users unlocked, whose CE storage holds their folders.
-    unlocked: BTreeSet<i32>,
 }
 
 impl State {
@@ -163,7 +161,6 @@ impl Persister {
             eprintln!("app host: launch params duplicate unlock for {user}");
             return Ok(());
         }
-        state.unlocked.insert(user);
         let folder = folder(&self.data, user);
         let queue = self.queue.shared.clone();
         let task = std::thread::Builder::new()
@@ -174,7 +171,15 @@ impl Persister {
         Ok(())
     }
 
-    pub fn save(&self, user: i32, name: &ComponentName, params: Params) -> Result<(), String> {
+    /// `saveTask`: `ce_unlocked` tells whether the user's CE storage is
+    /// prepared and unlocked, so the writer can make the user's folder.
+    pub fn save(
+        &self,
+        user: i32,
+        name: &ComponentName,
+        params: Params,
+        ce_unlocked: bool,
+    ) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         state.finish_loading(user)?;
         let records = state.users.entry(user).or_default();
@@ -185,9 +190,9 @@ impl Persister {
             || previous.bounds != params.bounds
             || previous.window_layout_affinity == params.window_layout_affinity;
         *previous = params.clone();
-        // A locked user's CE storage is not prepared, or not readable: the
-        // writer cannot make its folder.
-        if !state.unlocked.contains(&user) {
+        // `LaunchParamsWriteQueueItem.process`: a locked user's CE storage
+        // is not prepared, or not writable, so the folder cannot be made.
+        if !ce_unlocked {
             eprintln!("app host: launch params: Failed to create folder for {user}");
             return Ok(());
         }
