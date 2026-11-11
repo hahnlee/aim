@@ -281,8 +281,8 @@ impl NativeServices {
     }
 
     /// The app host's inputs (`app_host::AppHost::configure`), when
-    /// `activity` is native. Starts the native package boot; each consumer
-    /// waits for the init inputs it needs.
+    /// `activity` is native. Reads nothing under `data`: the package boot
+    /// starts with [`Self::start_app_host_package_boot`].
     #[allow(clippy::too_many_arguments)]
     pub fn configure_app_host(
         &self,
@@ -318,13 +318,21 @@ impl NativeServices {
             host.connect_display(display);
             host.connect_text_input(display);
         }
-        let host = host.clone();
+        Ok(())
+    }
+
+    /// Starts the app host's native package boot, once `data` (of
+    /// [`Self::configure_app_host`]) is mounted; each consumer waits for the
+    /// init inputs it needs.
+    pub fn start_app_host_package_boot(&self) {
+        let Some(host) = self.app_host.clone() else {
+            return;
+        };
         std::thread::spawn(move || {
             if let Err(e) = app_host::package_boot::run(&host) {
                 eprintln!("app host: early package boot: {e:?}");
             }
         });
-        Ok(())
     }
 
     /// Compares the original services `names` with their native models
