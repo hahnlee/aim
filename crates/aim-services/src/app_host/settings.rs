@@ -15,7 +15,9 @@
 use std::collections::HashMap;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use aim_android_xml::{Element, Node, Value};
@@ -627,12 +629,15 @@ struct Shared {
     tables: Mutex<HashMap<Table, State>>,
     /// Signalled when a write is scheduled.
     scheduled: Condvar,
+    /// Set under `tables` at shutdown: every pending write is due, and
+    /// the writer exits once none is left.
+    stopped: AtomicBool,
 }
 
 #[derive(Default)]
 pub struct Settings {
     shared: Arc<Shared>,
-    writer: OnceLock<()>,
+    writer: Mutex<Option<JoinHandle<()>>>,
     /// The config table's aconfig defaults.
     aconfig: AconfigDefaults,
 }
@@ -670,8 +675,9 @@ impl Settings {
                 data: data.to_path_buf(),
                 tables: Mutex::new(tables),
                 scheduled: Condvar::new(),
+                stopped: AtomicBool::new(false),
             }),
-            writer: OnceLock::new(),
+            writer: Mutex::new(None),
             aconfig: AconfigDefaults::load(root),
         })
     }
@@ -1146,37 +1152,68 @@ impl Settings {
         Ok(changed)
     }
 
-    /// Wakes the writer, started with the first change.
+    /// Wakes the writer, started with the first change before shutdown.
     fn writes_scheduled(&self) {
-        self.writer.get_or_init(|| {
+        let mut writer = self.writer.lock().unwrap();
+        if writer.is_none() && !self.shared.stopped.load(Ordering::Relaxed) {
             let shared = self.shared.clone();
-            if let Err(e) = std::thread::Builder::new()
+            match std::thread::Builder::new()
                 .name("settings writer".into())
                 .spawn(move || shared.write_when_due())
             {
-                eprintln!("app host: settings writer: {e}");
+                Ok(thread) => *writer = Some(thread),
+                Err(e) => eprintln!("app host: settings writer: {e}"),
             }
-        });
+        }
         self.shared.scheduled.notify_one();
+    }
+
+    /// The pending writes made now and the writer stopped, so nothing
+    /// writes below `/data` after shutdown; later changes stay in memory.
+    pub fn shutdown(&self) {
+        let writer = {
+            let mut writer = self.writer.lock().unwrap();
+            let _tables = self.shared.tables.lock().unwrap();
+            self.shared.stopped.store(true, Ordering::Relaxed);
+            self.shared.scheduled.notify_one();
+            writer.take()
+        };
+        if let Some(writer) = writer
+            && writer.join().is_err()
+        {
+            eprintln!("app host: settings writer panicked");
+        }
+        // Without a writer, the writes scheduled before shutdown.
+        self.shared.write_when_due();
+    }
+}
+
+impl Drop for Settings {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
 impl Shared {
     /// `MSG_PERSIST_SETTINGS`: each table's state written when its write
-    /// is due (`doWriteState`), one at a time.
+    /// is due (`doWriteState`), one at a time, until shutdown leaves none.
     fn write_when_due(&self) {
         let mut tables = self.tables.lock().unwrap();
         loop {
             let now = Instant::now();
+            let stopped = self.stopped.load(Ordering::Relaxed);
             let mut due = Vec::new();
             for (table, state) in tables.iter_mut() {
-                if state.write_at.is_some_and(|at| at <= now) {
+                if state.write_at.is_some_and(|at| stopped || at <= now) {
                     state.dirty = false;
                     state.write_at = None;
                     due.push((*table, state.document(*table)));
                 }
             }
             if due.is_empty() {
+                if stopped {
+                    return;
+                }
                 tables = match tables.values().filter_map(|s| s.write_at).min() {
                     Some(at) => self.scheduled.wait_timeout(tables, at - now).unwrap().0,
                     None => self.scheduled.wait(tables).unwrap(),
@@ -1708,6 +1745,37 @@ mod tests {
         assert!(!users.join("settings_secure.xml.new").exists());
         let again = Settings::load(&dir, &dir).unwrap();
         assert_eq!(again.get(Table::Secure, "b").as_deref(), Some("x\u{1}"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Shutdown makes the pending writes before it returns and stops the
+    /// writer, so nothing writes below `/data` afterwards (#2890).
+    #[test]
+    fn shutdown_writes_pending_settings_and_stops_the_writer() {
+        let dir = crate::app_host::test_temp_dir("settings-shutdown");
+        let users = dir.join("system/users/0");
+        let s = Settings::load(&dir, &dir).unwrap();
+        assert!(
+            s.insert(Table::Secure, "a", &change(Some("1"), "app"), false)
+                .unwrap()
+        );
+        s.shutdown();
+        assert!(s.writer.lock().unwrap().is_none());
+        assert_eq!(
+            Settings::load(&dir, &dir)
+                .unwrap()
+                .get(Table::Secure, "a")
+                .as_deref(),
+            Some("1")
+        );
+        std::fs::remove_dir_all(&users).unwrap();
+        assert!(
+            s.insert(Table::Secure, "b", &change(Some("2"), "app"), false)
+                .unwrap()
+        );
+        assert!(s.writer.lock().unwrap().is_none());
+        std::thread::sleep(WRITE_SETTINGS_DELAY * 2);
+        assert!(!users.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

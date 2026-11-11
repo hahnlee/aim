@@ -778,6 +778,12 @@ impl AppHost {
         let jobs = self.job_scheduler.get().map_or(Ok(()), |jobs| jobs.flush());
         self.shutdown_restriction_persistence();
         let standby = self.shutdown_standby();
+        if let Some(platform) = self.platform.get() {
+            platform.settings.shutdown();
+        }
+        if let Some(control) = self.background_install_control.get() {
+            control.shutdown()?;
+        }
         if let Some(owner) = self.permission_manager.get() {
             owner.shutdown()?;
         }

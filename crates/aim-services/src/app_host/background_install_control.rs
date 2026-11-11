@@ -194,6 +194,8 @@ enum Message {
     Usage(i32, Event),
     Added(i32, String),
     Removed(i32, String),
+    /// Shutdown: the handler exits after the messages before it.
+    Stop,
     #[cfg(test)]
     Barrier(mpsc::Sender<()>),
 }
@@ -202,6 +204,8 @@ pub(super) struct BackgroundInstallControl {
     host: Weak<AppHost>,
     state: Mutex<State>,
     handler: mpsc::Sender<Message>,
+    /// The handler's thread, until shutdown.
+    handler_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     notifications: mpsc::Sender<InstallEvent>,
     callbacks: Mutex<BTreeMap<u32, (Arc<Strong>, u64)>>,
 }
@@ -237,14 +241,18 @@ impl BackgroundInstallControl {
             host: Arc::downgrade(host),
             state: Mutex::default(),
             handler,
+            handler_thread: Mutex::default(),
             notifications,
             callbacks: Mutex::default(),
         });
         let weak = Arc::downgrade(&me);
-        std::thread::Builder::new()
+        let handler = std::thread::Builder::new()
             .name("background_install_control".into())
             .spawn(move || {
                 for message in messages {
+                    if matches!(message, Message::Stop) {
+                        break;
+                    }
                     let Some(me) = weak.upgrade() else { break };
                     if let Err(e) = me.handle(message) {
                         eprintln!("{}", e.message);
@@ -252,6 +260,7 @@ impl BackgroundInstallControl {
                 }
             })
             .expect("background install handler");
+        *me.handler_thread.lock().unwrap() = Some(handler);
         let weak = Arc::downgrade(&me);
         std::thread::Builder::new()
             .name("background_install_callbacks".into())
@@ -280,6 +289,18 @@ impl BackgroundInstallControl {
 
     fn post(&self, message: Message) -> Result<(), Exception> {
         self.handler.send(message).map_err(error)
+    }
+
+    /// The messages posted so far handled and the handler stopped, so
+    /// nothing persists below `/data` after shutdown.
+    pub(super) fn shutdown(&self) -> Result<(), Exception> {
+        let Some(handler) = self.handler_thread.lock().unwrap().take() else {
+            return Ok(());
+        };
+        self.post(Message::Stop)?;
+        handler
+            .join()
+            .map_err(|_| error("background install handler panicked"))
     }
 
     pub(super) fn usage(&self, user: i32, event: Event) -> Result<(), Exception> {
@@ -340,6 +361,7 @@ impl BackgroundInstallControl {
                 }
                 state.persist(&file)
             }
+            Message::Stop => unreachable!("the handler stops at Stop"),
             #[cfg(test)]
             Message::Barrier(done) => done.send(()).map_err(error),
         }
