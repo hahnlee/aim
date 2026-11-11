@@ -34,8 +34,8 @@ const AT_FDCWD: i32 = -100;
 
 /// A file named by path (following symlinks or not) or by descriptor.
 enum Target {
-    /// Host path, whether a final symlink is followed, guest path.
-    Path(CString, bool, String),
+    /// The resolved path, whether a final symlink is followed.
+    Path(vfs::Resolved, bool),
     Fd(i32),
 }
 
@@ -48,19 +48,9 @@ const CAP_SYS_ADMIN: u64 = 1 << 21;
 fn target_stat(t: &Target) -> Result<libc::stat, i64> {
     match t {
         Target::Fd(fd) => super::fs::stat_fd_kernel(*fd),
-        Target::Path(host, follow, guest) => {
-            if !follow {
-                let mut st: libc::stat = unsafe { std::mem::zeroed() };
-                // SAFETY: host path, local buffer.
-                if unsafe { libc::lstat(host.as_ptr(), &mut st) } < 0 {
-                    return Err(-(errno::last() as i64));
-                }
-                if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
-                    return Ok(st);
-                }
-            }
-            super::attrs::path_stat(guest).map_err(|error| -(error as i64))
-        }
+        // The resolved host path, not the guest path looked up again: a
+        // locked directory's entries are reached by their no-key names.
+        Target::Path(r, follow) => super::fs::stat_resolved(r, *follow),
     }
 }
 
@@ -123,12 +113,12 @@ fn path_target(path: u64, follow: bool, write: bool) -> Result<Target, i64> {
     if write {
         check_writable(&r)?;
     }
-    Ok(Target::Path(r.host, follow, r.guest))
+    Ok(Target::Path(r, follow))
 }
 
 fn options(t: &Target) -> libc::c_int {
     match t {
-        Target::Path(_, false, _) => libc::XATTR_NOFOLLOW,
+        Target::Path(_, false) => libc::XATTR_NOFOLLOW,
         _ => 0,
     }
 }
@@ -142,9 +132,14 @@ fn host_get(t: &Target, name: &CStr, buf: *mut u8, size: usize) -> i64 {
     // SAFETY: host path or fd, guest buffer of `size` bytes.
     let n = unsafe {
         match t {
-            Target::Path(p, _, _) => {
-                libc::getxattr(p.as_ptr(), name.as_ptr(), buf.cast(), size, 0, options(t))
-            }
+            Target::Path(r, _) => libc::getxattr(
+                r.host.as_ptr(),
+                name.as_ptr(),
+                buf.cast(),
+                size,
+                0,
+                options(t),
+            ),
             Target::Fd(fd) => libc::fgetxattr(*fd, name.as_ptr(), buf.cast(), size, 0, 0),
         }
     };
@@ -161,8 +156,8 @@ fn exists(t: &Target) -> Result<(), i64> {
     // SAFETY: host path or fd, local buffer.
     let r = unsafe {
         match t {
-            Target::Path(p, true, _) => libc::stat(p.as_ptr(), &mut st),
-            Target::Path(p, false, _) => libc::lstat(p.as_ptr(), &mut st),
+            Target::Path(r, true) => libc::stat(r.host.as_ptr(), &mut st),
+            Target::Path(r, false) => libc::lstat(r.host.as_ptr(), &mut st),
             Target::Fd(fd) => libc::fstat(*fd, &mut st),
         }
     };
@@ -198,7 +193,7 @@ fn get(t: Target, name: u64, value: u64, size: u64) -> i64 {
         return e;
     }
     let guest = match &t {
-        Target::Path(_, _, g) => Some(g.clone()),
+        Target::Path(r, _) => Some(r.guest.clone()),
         Target::Fd(fd) => procfs::fd_guest_path(*fd).ok(),
     };
     let label = match guest.and_then(|g| genfs::label(&g)) {
@@ -256,8 +251,8 @@ fn set(t: Target, name: u64, value: u64, size: u64, flags: u64) -> i64 {
     // SAFETY: host path or fd, guest value of `size` bytes.
     let r = unsafe {
         match &t {
-            Target::Path(p, _, _) => libc::setxattr(
-                p.as_ptr(),
+            Target::Path(r, _) => libc::setxattr(
+                r.host.as_ptr(),
                 hname.as_ptr(),
                 value as *const _,
                 size as usize,
@@ -293,7 +288,7 @@ fn list(t: Target, buf: u64, size: u64) -> i64 {
     // SAFETY: host path or fd; a size query, then a read into a local buffer.
     let query = |b: *mut libc::c_char, n: usize| unsafe {
         match &t {
-            Target::Path(p, _, _) => libc::listxattr(p.as_ptr(), b, n, options(&t)),
+            Target::Path(r, _) => libc::listxattr(r.host.as_ptr(), b, n, options(&t)),
             Target::Fd(fd) => libc::flistxattr(*fd, b, n, 0),
         }
     };
@@ -353,7 +348,7 @@ fn remove(t: Target, name: u64) -> i64 {
     // SAFETY: host path or fd.
     let r = unsafe {
         match &t {
-            Target::Path(p, _, _) => libc::removexattr(p.as_ptr(), hname.as_ptr(), options(&t)),
+            Target::Path(r, _) => libc::removexattr(r.host.as_ptr(), hname.as_ptr(), options(&t)),
             Target::Fd(fd) => libc::fremovexattr(*fd, hname.as_ptr(), 0),
         }
     };

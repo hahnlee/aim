@@ -572,28 +572,66 @@ fn host_stat(host: Host) -> Result<libc::stat, crate::errno::Errno> {
     }
 }
 
-/// Serialize metadata on the actual inode across guest processes and bind aliases.
-/// Same-thread nested recording shares the already-held lock.
-/// `<runtime>/inode-locks`, made and opened once per process: an inode
-/// lock opens its file relative to it. A failed open (no free descriptor,
-/// say) is tried again by the next lock.
-fn inode_locks() -> Result<&'static aim_storage::private_fd::PrivateFile, crate::errno::Errno> {
-    static DIRECTORY: OnceLock<aim_storage::private_fd::PrivateFile> = OnceLock::new();
-    if let Some(directory) = DIRECTORY.get() {
-        return Ok(directory);
+/// The inode locks this process holds, by (device, inode): a lock byte is
+/// held by the process's one open lock file, so its threads exclude each
+/// other here.
+static LOCKED: Mutex<Vec<(i32, u64)>> = Mutex::new(Vec::new());
+static UNLOCKED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// `<runtime>/inode-locks/<device>`, made and opened once per process and
+/// device: an inode's lock is the byte at its inode number, an
+/// open-file-description lock, so another process's excludes this one's
+/// and goes with that process. A failed open (no free descriptor, say) is
+/// tried again by the next lock.
+fn inode_lock_file(
+    device: i32,
+) -> Result<std::sync::Arc<aim_storage::private_fd::PrivateFile>, crate::errno::Errno> {
+    use std::sync::Arc;
+    static FILES: Mutex<Vec<(i32, Arc<aim_storage::private_fd::PrivateFile>)>> =
+        Mutex::new(Vec::new());
+    let mut files = FILES.lock().unwrap();
+    if let Some((_, file)) = files.iter().find(|(known, _)| *known == device) {
+        return Ok(file.clone());
     }
-    let path = vfs::runtime_dir()
+    let directory = vfs::runtime_dir()
         .ok_or(crate::errno::EIO)?
         .join("inode-locks");
-    let opened = aim_storage::private_fd::PrivateFile::allocate(|| {
-        std::fs::create_dir_all(&path)?;
-        std::fs::File::open(&path)
+    let file = aim_storage::private_fd::PrivateFile::allocate(|| {
+        std::fs::create_dir_all(&directory)?;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(directory.join(format!("{:x}", device as u32)))
     })
     .map_err(|error| crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
-    // Another thread's may have come first: this one is closed.
-    Ok(DIRECTORY.get_or_init(|| opened))
+    let file = Arc::new(file);
+    files.push((device, file.clone()));
+    Ok(file)
 }
 
+/// Takes (F_WRLCK) or drops (F_UNLCK) the lock byte of inode `inode`.
+fn inode_lock_byte(fd: i32, inode: u64, kind: i16) -> Result<(), crate::errno::Errno> {
+    let mut range: libc::flock = unsafe { std::mem::zeroed() };
+    range.l_type = kind;
+    range.l_whence = libc::SEEK_SET as i16;
+    range.l_start = i64::try_from(inode).map_err(|_| crate::errno::from_darwin(libc::EOVERFLOW))?;
+    range.l_len = 1;
+    loop {
+        // SAFETY: fcntl with a flock on our stack.
+        if unsafe { libc::fcntl(fd, super::fs::DARWIN_F_OFD_SETLKW, &range) } == 0 {
+            return Ok(());
+        }
+        let error = crate::errno::last();
+        if error != crate::errno::EINTR {
+            return Err(error);
+        }
+    }
+}
+
+/// Serialize metadata on the actual inode across guest processes and bind aliases.
+/// Same-thread nested recording shares the already-held lock.
 pub fn with_inode_lock<T>(
     host: Host,
     stat: &libc::stat,
@@ -612,53 +650,38 @@ pub fn with_inode_lock<T>(
     }
     let _own = super::fork::spawn::own_fds();
     use std::os::fd::AsRawFd;
-    use std::os::fd::{FromRawFd, IntoRawFd};
-    let name = std::ffi::CString::new(format!("{:x}-{:x}", key.0 as u32, key.1))
-        .map_err(|_| crate::errno::EINVAL)?;
-    // SAFETY: a name relative to this process's open lock directory.
-    let fd = unsafe {
-        libc::openat(
-            inode_locks()?.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC,
-            0o644,
-        )
-    };
-    if fd < 0 {
-        return Err(crate::errno::last());
-    }
-    // SAFETY: the descriptor just opened, owned here.
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    struct PrivateLock(std::fs::File);
-    impl Drop for PrivateLock {
-        fn drop(&mut self) {
-            super::fdtab::unhide(self.0.as_raw_fd());
+    let file = inode_lock_file(key.0)?;
+    {
+        let mut locked = LOCKED.lock().unwrap();
+        while locked.contains(&key) {
+            locked = UNLOCKED.wait(locked).unwrap();
         }
+        locked.push(key);
     }
-    let file =
-        PrivateLock(unsafe { std::fs::File::from_raw_fd(super::fdtab::hide(file.into_raw_fd())) });
-    loop {
-        if unsafe { libc::flock(file.0.as_raw_fd(), libc::LOCK_EX) } == 0 {
-            break;
-        }
-        let error = crate::errno::last();
-        if error != crate::errno::EINTR {
-            return Err(error);
-        }
-    }
-    struct Held((i32, u64));
-    impl Drop for Held {
+    struct Held<'a>((i32, u64), &'a aim_storage::private_fd::PrivateFile, bool);
+    impl Drop for Held<'_> {
         fn drop(&mut self) {
             HELD_INODE_LOCKS.with(|held| held.borrow_mut().retain(|key| *key != self.0));
+            if self.2
+                && let Err(error) = inode_lock_byte(self.1.as_raw_fd(), self.0.1, libc::F_UNLCK)
+            {
+                crate::diag!("inode unlock: errno {error}");
+            }
+            LOCKED.lock().unwrap().retain(|key| *key != self.0);
+            UNLOCKED.notify_all();
         }
     }
+    let mut held = Held(key, &file, false);
+    inode_lock_byte(file.as_raw_fd(), key.1, libc::F_WRLCK)?;
+    held.2 = true;
     let actual = host_stat(host)?;
     if (actual.st_dev, actual.st_ino) != key {
         return Err(crate::errno::from_darwin(libc::ESTALE));
     }
     HELD_INODE_LOCKS.with(|held| held.borrow_mut().push(key));
-    let _held = Held(key);
-    action()
+    let result = action();
+    drop(held);
+    result
 }
 
 /// Record a guest chown/chmod of `host` (only under a path map): on the
@@ -667,6 +690,17 @@ pub fn record_checked(
     host: Host,
     guest: impl FnOnce() -> String,
     a: Attr,
+) -> Result<(), crate::errno::Errno> {
+    record_inode(host, guest, a, true)
+}
+
+/// [`record_checked`]: `a` over what the inode has recorded, or with
+/// `merge` false, as all it has (a new inode has nothing to keep).
+fn record_inode(
+    host: Host,
+    guest: impl FnOnce() -> String,
+    a: Attr,
+    merge: bool,
 ) -> Result<(), crate::errno::Errno> {
     if !recording() {
         return Ok(());
@@ -680,7 +714,12 @@ pub fn record_checked(
                 return table_record_key(&device_key(&stat), a.over(previous));
             }
         }
-        if set_guest(host, a)? {
+        let stored = if merge {
+            set_guest(host, a)?
+        } else {
+            set(host, GUEST, &encode(a))?
+        };
+        if stored {
             return Ok(());
         }
         table_record(&guest(), a)
@@ -801,8 +840,14 @@ pub fn absent(host: &CStr) -> bool {
 }
 
 /// The guest created `host`: it belongs to the guest's identity, as on
-/// Linux (only under a path map).
-pub fn created(host: Host, guest: impl FnOnce() -> String) -> Result<(), crate::errno::Errno> {
+/// Linux, with `mode` where its creator gives one (else the host's), and
+/// an inherited S_ISGID (only under a path map). All of it is recorded at
+/// once.
+pub fn created(
+    host: Host,
+    guest: impl FnOnce() -> String,
+    mode: Option<u32>,
+) -> Result<(), crate::errno::Errno> {
     if !recording() {
         return Ok(());
     }
@@ -823,24 +868,15 @@ pub fn created(host: Host, guest: impl FnOnce() -> String) -> Result<(), crate::
         &mut parent_stat,
     );
     super::fscrypt::inherit(Host::Path(&parent.host), parent_stat.st_dev, host)?;
-    let mut mode = None;
+    let mut mode = mode;
     if parent_stat.st_mode & libc::S_ISGID != 0 {
         gid = parent_stat.st_gid;
-        let mut child: libc::stat = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            match host {
-                Host::Fd(fd) => libc::fstat(fd, &mut child),
-                Host::Path(path) | Host::Image(path) => libc::lstat(path.as_ptr(), &mut child),
-            }
-        };
-        if result < 0 {
-            return Err(crate::errno::last());
-        }
+        let child = host_stat(host)?;
         if child.st_mode & libc::S_IFMT == libc::S_IFDIR {
-            mode = Some((child.st_mode as u32 & 0o7777) | libc::S_ISGID as u32);
+            mode = Some(mode.unwrap_or(child.st_mode as u32 & 0o7777) | libc::S_ISGID as u32);
         }
     }
-    record_checked(
+    record_inode(
         host,
         || guest,
         Attr {
@@ -848,6 +884,7 @@ pub fn created(host: Host, guest: impl FnOnce() -> String) -> Result<(), crate::
             gid: Some(gid),
             mode,
         },
+        false,
     )
 }
 
@@ -935,6 +972,27 @@ pub(super) fn search(
     kind: usize,
     known: Option<&libc::stat>,
 ) -> Result<(), crate::errno::Errno> {
+    search_with(guest, id, kind, || path_stat_known(guest, known))
+}
+
+/// [`search`] of a resolved directory, stat'ed by its host path: a locked
+/// directory's guest path has no-key names, which only a walk maps.
+pub(super) fn search_resolved(
+    r: &vfs::Resolved,
+    id: &super::cred::Identity,
+    kind: usize,
+) -> Result<(), crate::errno::Errno> {
+    search_with(&r.guest, id, kind, || {
+        super::fs::stat_resolved(r, true).map_err(|error| (-error) as crate::errno::Errno)
+    })
+}
+
+fn search_with(
+    guest: &str,
+    id: &super::cred::Identity,
+    kind: usize,
+    stat: impl FnOnce() -> Result<libc::stat, crate::errno::Errno>,
+) -> Result<(), crate::errno::Errno> {
     if !recording() {
         return Ok(());
     }
@@ -942,7 +1000,7 @@ pub(super) fn search(
     if vfs::fuse_route(guest).is_some_and(|route| !route.default_permissions) {
         return Ok(());
     }
-    let stat = path_stat_known(guest, known)?;
+    let stat = stat()?;
     if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
         return Err(crate::errno::ENOTDIR);
     }
@@ -1199,6 +1257,99 @@ mod tests {
         assert_eq!(table_lookup_key("/table-generation").uid, Some(1234));
         advance();
         assert_eq!(table_lookup_key("/table-generation").uid, Some(4321));
+    }
+
+    /// A creation records its owner and its mode in one attribute write,
+    /// with an inherited S_ISGID on a directory.
+    #[test]
+    fn a_creation_records_owner_and_mode_at_once() {
+        let (_guard, root) = crate::vfs::test_view();
+        let at = crate::vfs::LINUX_AT_FDCWD as u64;
+        let guest = |name: &str| std::ffi::CString::new(format!("/data/{name}")).unwrap();
+        let host = |name: &str| {
+            std::ffi::CString::new(root.join("data").join(name).as_os_str().as_encoded_bytes())
+                .unwrap()
+        };
+        let _ = std::fs::remove_dir_all(root.join("data/created-once"));
+        let parent = guest("created-once");
+        assert_eq!(
+            super::super::fsops::mkdirat([at, parent.as_ptr() as u64, 0o2770, 0, 0, 0]),
+            0
+        );
+        record_checked(
+            Host::Path(&host("created-once")),
+            || "/data/created-once".into(),
+            Attr {
+                gid: Some(1077),
+                mode: Some(0o2770),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (uid, _) = ids(FS);
+        let dir = guest("created-once/dir");
+        assert_eq!(
+            super::super::fsops::mkdirat([at, dir.as_ptr() as u64, 0o751, 0, 0, 0]),
+            0
+        );
+        let umask = super::super::pstate::current_umask();
+        assert_eq!(
+            guest_attr(Host::Path(&host("created-once/dir"))),
+            Some(Attr {
+                uid: Some(uid),
+                gid: Some(1077),
+                mode: Some(0o2000 | (0o751 & !umask)),
+            })
+        );
+        let file = guest("created-once/file");
+        let fd = super::super::fs::openat([at, file.as_ptr() as u64, 0o101, 0o640, 0, 0]);
+        assert!(fd >= 0, "{fd}");
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(
+            guest_attr(Host::Path(&host("created-once/file"))),
+            Some(Attr {
+                uid: Some(uid),
+                gid: Some(1077),
+                mode: Some(0o640 & !umask),
+            })
+        );
+        std::fs::remove_dir_all(root.join("data/created-once")).unwrap();
+    }
+
+    /// A process's threads share its lock file, so they exclude each other
+    /// on the same inode and not on another one.
+    #[test]
+    fn inode_locks_exclude_this_process_s_threads_by_inode() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (_guard, root) = crate::vfs::test_view();
+        let paths = ["inode-lock-thread-a", "inode-lock-thread-b"].map(|name| {
+            let path = root.join(name);
+            std::fs::write(&path, b"").unwrap();
+            std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap()
+        });
+        let lock = |path: std::ffi::CString, done: mpsc::Sender<()>| {
+            std::thread::spawn(move || {
+                let stat = host_stat(Host::Path(&path)).unwrap();
+                with_inode_lock(Host::Path(&path), &stat, || Ok(done.send(()).unwrap())).unwrap();
+            })
+        };
+        let first = host_stat(Host::Path(&paths[0])).unwrap();
+        let (done, finished) = mpsc::channel();
+        let (same, other) = with_inode_lock(Host::Path(&paths[0]), &first, || {
+            let same = lock(paths[0].clone(), done.clone());
+            let other = lock(paths[1].clone(), done.clone());
+            finished.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(finished.recv_timeout(Duration::from_millis(50)).is_err());
+            Ok((same, other))
+        })
+        .unwrap();
+        finished.recv_timeout(Duration::from_secs(5)).unwrap();
+        same.join().unwrap();
+        other.join().unwrap();
+        for path in paths {
+            std::fs::remove_file(path.to_str().unwrap()).unwrap();
+        }
     }
 
     #[test]

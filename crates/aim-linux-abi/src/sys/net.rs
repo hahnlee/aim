@@ -812,13 +812,15 @@ fn path_socket_permission(
     if !super::attrs::recording() {
         return Ok(());
     }
-    let (guest, want) = if bind {
-        let parent = Path::new(&r.guest).parent().ok_or(errno::ENOENT)?;
-        (parent.to_str().ok_or(EINVAL)?.to_owned(), 3)
+    let (stat, want) = if bind {
+        (super::fs::stat_resolved_parent(r), 3)
     } else {
-        (r.guest.clone(), 2)
+        (
+            super::fs::stat_resolved(r, true).map_err(|error| (-error) as errno::Errno),
+            2,
+        )
     };
-    let stat = match super::attrs::path_stat(&guest) {
+    let stat = match stat {
         Ok(stat) => stat,
         // A missing socket file is the connect's own ENOENT.
         Err(errno::ENOENT) if !bind => return Ok(()),
@@ -844,14 +846,10 @@ fn record_bound(name: &[u8]) -> Result<(), errno::Errno> {
         return Ok(());
     };
     let r = vfs::resolve(vfs::LINUX_AT_FDCWD, guest.as_bytes(), false)?;
-    super::attrs::created(super::attrs::Host::Path(&r.host), || r.guest.clone())?;
-    super::attrs::record_checked(
+    super::attrs::created(
         super::attrs::Host::Path(&r.host),
         || r.guest.clone(),
-        super::attrs::Attr {
-            mode: Some(0o777 & !super::pstate::current_umask()),
-            ..Default::default()
-        },
+        Some(0o777 & !super::pstate::current_umask()),
     )
 }
 

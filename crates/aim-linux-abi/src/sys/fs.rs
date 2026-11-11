@@ -185,9 +185,9 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
                         .unwrap_or_else(|error| -(error as i64));
                 }
                 if attrs::recording() {
-                    let stat = match attrs::path_stat(&r.guest) {
+                    let stat = match stat_resolved(&r, true) {
                         Ok(stat) => stat,
-                        Err(error) => return -(error as i64),
+                        Err(error) => return error,
                     };
                     // O_DIRECTORY's lookup fails before any permission check.
                     if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
@@ -394,7 +394,7 @@ fn openat_host(r: &vfs::Resolved, flags: u64, mode: u64, id: &super::cred::Ident
     }
     // A file the guest creates keeps its owner's access on the host, as
     // mkdirat's does (fsops::host_mode), so its recorded metadata stays
-    // readable; the guest's mode is recorded when the host's differs.
+    // readable; the guest's mode is recorded with its owner.
     let host_create_mode = if creating && attrs::recording() {
         mode | 0o600
     } else {
@@ -420,13 +420,10 @@ fn openat_host(r: &vfs::Resolved, flags: u64, mode: u64, id: &super::cred::Ident
         }
     }
     if creating {
-        if let Err(error) = attrs::created(attrs::Host::Fd(fd), || r.guest.clone()) {
-            unsafe {
-                libc::close(fd);
-            }
-            return -(error as i64);
-        }
-        if let Err(error) = record_created_mode(attrs::Host::Fd(fd), &r.guest, mode as u32) {
+        let host = attrs::Host::Fd(fd);
+        if let Err(error) = created_mode(host, mode as u32)
+            .and_then(|mode| attrs::created(host, || r.guest.clone(), mode))
+        {
             unsafe {
                 libc::close(fd);
             }
@@ -550,13 +547,12 @@ fn openat_host(r: &vfs::Resolved, flags: u64, mode: u64, id: &super::cred::Ident
 
 /// The mode of a file the guest created with `want`, under the umask,
 /// recorded when the host's (which keeps its owner's access) differs.
-pub(super) fn record_created_mode(
-    host: attrs::Host,
-    guest: &str,
-    want: u32,
-) -> Result<(), errno::Errno> {
+/// The guest mode of a file just created at `host` with mode `want`: the
+/// host's, whose owner bits keep the owner's access (fsops::host_mode),
+/// with the owner bits `want` gives under the umask.
+pub(super) fn created_mode(host: attrs::Host, want: u32) -> Result<Option<u32>, errno::Errno> {
     if !attrs::recording() {
-        return Ok(());
+        return Ok(None);
     }
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     let got = unsafe {
@@ -568,21 +564,9 @@ pub(super) fn record_created_mode(
     if got < 0 {
         return Err(errno::last());
     }
-    attrs::apply(host, || guest.into(), &mut st);
     let made = st.st_mode as u32 & 0o7777;
     let wanted = want & 0o7777 & !super::pstate::current_umask();
-    let mode = (made & !0o700) | (wanted & 0o700);
-    if mode == made {
-        return Ok(());
-    }
-    attrs::record_checked(
-        host,
-        || guest.into(),
-        attrs::Attr {
-            mode: Some(mode),
-            ..Default::default()
-        },
-    )
+    Ok(Some((made & !0o700) | (wanted & 0o700)))
 }
 
 fn open_permissions(
@@ -592,10 +576,7 @@ fn open_permissions(
     id: &super::cred::Identity,
 ) -> Result<(), errno::Errno> {
     if creating {
-        let parent = std::path::Path::new(&r.guest)
-            .parent()
-            .ok_or(errno::ENOENT)?;
-        let stat = attrs::path_stat(parent.to_str().ok_or(errno::EINVAL)?)?;
+        let stat = stat_resolved_parent(r)?;
         return if attrs::permits(&stat, 3, id, attrs::FS) {
             Ok(())
         } else {
@@ -1807,6 +1788,37 @@ fn stat_at_as(
         return Ok(st);
     }
     let r = resolve_as(dirfd, path, follow, id, attrs::FS).map_err(|e| -(e as i64))?;
+    stat_resolved(&r, follow)
+}
+
+/// stat of the directory a resolved path is in, with the guest's
+/// ownership view: by its host path, as a locked directory's guest path
+/// has no-key names, which only a walk maps.
+pub(super) fn stat_resolved_parent(r: &vfs::Resolved) -> Result<libc::stat, errno::Errno> {
+    let parent = |path: &[u8]| -> Result<Vec<u8>, errno::Errno> {
+        match path.iter().rposition(|&byte| byte == b'/') {
+            Some(0) => Ok(b"/".to_vec()),
+            Some(end) => Ok(path[..end].to_vec()),
+            None => Err(errno::ENOENT),
+        }
+    };
+    let guest = String::from_utf8(parent(r.guest.as_bytes())?).map_err(|_| errno::EINVAL)?;
+    if vfs::fuse_route(&guest).is_some() || procfs::stat(&guest, true).is_some() {
+        return attrs::path_stat(&guest);
+    }
+    let host = CString::new(parent(r.host.as_bytes())?).map_err(|_| errno::EINVAL)?;
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: host path and local stat buffer.
+    if unsafe { libc::stat(host.as_ptr(), &mut st) } < 0 {
+        return Err(errno::last());
+    }
+    attrs::apply(attrs::Host::Path(&host), || guest.clone(), &mut st);
+    Ok(st)
+}
+
+/// stat of a resolved path (`follow` as it was resolved), with the
+/// guest's ownership view.
+pub(super) fn stat_resolved(r: &vfs::Resolved, follow: bool) -> Result<libc::stat, i64> {
     if r.guest == "/dev/fuse" {
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         st.st_mode = libc::S_IFCHR | 0o666;
@@ -1824,12 +1836,13 @@ fn stat_at_as(
     if let Some(s) = super::ashmem::stat(&r.guest).or_else(|| super::dma_heap::stat(&r.guest)) {
         return Ok(s);
     }
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: host path and local stat buffer.
     if unsafe { libc::lstat(r.host.as_ptr(), &mut st) } < 0 {
         return Err(-(errno::last() as i64));
     }
-    attrs::apply(attrs_host(&r), || r.guest.clone(), &mut st);
-    super::evdev::stat(&r, &mut st);
+    attrs::apply(attrs_host(r), || r.guest.clone(), &mut st);
+    super::evdev::stat(r, &mut st);
     Ok(st)
 }
 
@@ -2283,7 +2296,7 @@ pub fn chdir(a: [u64; 6]) -> i64 {
     let p = p.as_slice();
     let id = super::cred::current();
     match resolve_as(vfs::LINUX_AT_FDCWD, p, true, &id, attrs::FS) {
-        Ok(r) => match attrs::search(&r.guest, &id, attrs::FS, None) {
+        Ok(r) => match attrs::search_resolved(&r, &id, attrs::FS) {
             Ok(()) => set_cwd_checked(r),
             Err(error) => -(error as i64),
         },
@@ -2477,7 +2490,7 @@ const F_GET_SEALS: u64 = 1034;
 
 // Darwin's open-file-description locks (sys/fcntl.h, private).
 const DARWIN_F_OFD_SETLK: i32 = 90;
-const DARWIN_F_OFD_SETLKW: i32 = 91;
+pub(super) const DARWIN_F_OFD_SETLKW: i32 = 91;
 const DARWIN_F_OFD_GETLK: i32 = 92;
 
 /// Linux arm64 `struct flock` { short type, whence; off_t start, len;
@@ -3332,9 +3345,11 @@ mod dac_tests {
             ready.recv_timeout(Duration::from_secs(5)).unwrap();
             ready.recv_timeout(Duration::from_secs(5)).unwrap();
             let early = received.recv_timeout(Duration::from_millis(100)).ok();
-            attrs::created(attrs::Host::Fd(file.as_raw_fd()), || {
-                "/data/create-publication/database".into()
-            })?;
+            attrs::created(
+                attrs::Host::Fd(file.as_raw_fd()),
+                || "/data/create-publication/database".into(),
+                None,
+            )?;
             Ok(early)
         })
         .unwrap();
