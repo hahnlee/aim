@@ -518,7 +518,11 @@ open returning EACCES while the creator's host inode still appeared root-owned;
 SQLite's succeeding `O_RDONLY` retry made the connection read-only. The Rust
 publication test and 200 fresh-database rounds (direct and in-memory/attached
 connections, including a directory alias) pass after the fix. No guest boot was
-run (2026-10-28).
+run (2026-10-28). An open that neither creates nor truncates goes without that
+lock while no creation is in progress in the directory (a creation counter per
+directory inode slot, shared by every process), and again under it if one began
+meanwhile (#3007): a warm boot takes the lock for about 240 of its 2,700 such
+opens, against all 3,100 before (2026-11-11).
 
 Socket-layer traffic accounting now fills netd's guest-only interface counters
 and interface name map alongside its per-UID counters (#224, #1720). Focused
