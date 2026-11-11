@@ -572,28 +572,66 @@ fn host_stat(host: Host) -> Result<libc::stat, crate::errno::Errno> {
     }
 }
 
-/// Serialize metadata on the actual inode across guest processes and bind aliases.
-/// Same-thread nested recording shares the already-held lock.
-/// `<runtime>/inode-locks`, made and opened once per process: an inode
-/// lock opens its file relative to it. A failed open (no free descriptor,
-/// say) is tried again by the next lock.
-fn inode_locks() -> Result<&'static aim_storage::private_fd::PrivateFile, crate::errno::Errno> {
-    static DIRECTORY: OnceLock<aim_storage::private_fd::PrivateFile> = OnceLock::new();
-    if let Some(directory) = DIRECTORY.get() {
-        return Ok(directory);
+/// The inode locks this process holds, by (device, inode): a lock byte is
+/// held by the process's one open lock file, so its threads exclude each
+/// other here.
+static LOCKED: Mutex<Vec<(i32, u64)>> = Mutex::new(Vec::new());
+static UNLOCKED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// `<runtime>/inode-locks/<device>`, made and opened once per process and
+/// device: an inode's lock is the byte at its inode number, an
+/// open-file-description lock, so another process's excludes this one's
+/// and goes with that process. A failed open (no free descriptor, say) is
+/// tried again by the next lock.
+fn inode_lock_file(
+    device: i32,
+) -> Result<std::sync::Arc<aim_storage::private_fd::PrivateFile>, crate::errno::Errno> {
+    use std::sync::Arc;
+    static FILES: Mutex<Vec<(i32, Arc<aim_storage::private_fd::PrivateFile>)>> =
+        Mutex::new(Vec::new());
+    let mut files = FILES.lock().unwrap();
+    if let Some((_, file)) = files.iter().find(|(known, _)| *known == device) {
+        return Ok(file.clone());
     }
-    let path = vfs::runtime_dir()
+    let directory = vfs::runtime_dir()
         .ok_or(crate::errno::EIO)?
         .join("inode-locks");
-    let opened = aim_storage::private_fd::PrivateFile::allocate(|| {
-        std::fs::create_dir_all(&path)?;
-        std::fs::File::open(&path)
+    let file = aim_storage::private_fd::PrivateFile::allocate(|| {
+        std::fs::create_dir_all(&directory)?;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(directory.join(format!("{:x}", device as u32)))
     })
     .map_err(|error| crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
-    // Another thread's may have come first: this one is closed.
-    Ok(DIRECTORY.get_or_init(|| opened))
+    let file = Arc::new(file);
+    files.push((device, file.clone()));
+    Ok(file)
 }
 
+/// Takes (F_WRLCK) or drops (F_UNLCK) the lock byte of inode `inode`.
+fn inode_lock_byte(fd: i32, inode: u64, kind: i16) -> Result<(), crate::errno::Errno> {
+    let mut range: libc::flock = unsafe { std::mem::zeroed() };
+    range.l_type = kind;
+    range.l_whence = libc::SEEK_SET as i16;
+    range.l_start = i64::try_from(inode).map_err(|_| crate::errno::from_darwin(libc::EOVERFLOW))?;
+    range.l_len = 1;
+    loop {
+        // SAFETY: fcntl with a flock on our stack.
+        if unsafe { libc::fcntl(fd, super::fs::DARWIN_F_OFD_SETLKW, &range) } == 0 {
+            return Ok(());
+        }
+        let error = crate::errno::last();
+        if error != crate::errno::EINTR {
+            return Err(error);
+        }
+    }
+}
+
+/// Serialize metadata on the actual inode across guest processes and bind aliases.
+/// Same-thread nested recording shares the already-held lock.
 pub fn with_inode_lock<T>(
     host: Host,
     stat: &libc::stat,
@@ -612,53 +650,38 @@ pub fn with_inode_lock<T>(
     }
     let _own = super::fork::spawn::own_fds();
     use std::os::fd::AsRawFd;
-    use std::os::fd::{FromRawFd, IntoRawFd};
-    let name = std::ffi::CString::new(format!("{:x}-{:x}", key.0 as u32, key.1))
-        .map_err(|_| crate::errno::EINVAL)?;
-    // SAFETY: a name relative to this process's open lock directory.
-    let fd = unsafe {
-        libc::openat(
-            inode_locks()?.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC,
-            0o644,
-        )
-    };
-    if fd < 0 {
-        return Err(crate::errno::last());
-    }
-    // SAFETY: the descriptor just opened, owned here.
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    struct PrivateLock(std::fs::File);
-    impl Drop for PrivateLock {
-        fn drop(&mut self) {
-            super::fdtab::unhide(self.0.as_raw_fd());
+    let file = inode_lock_file(key.0)?;
+    {
+        let mut locked = LOCKED.lock().unwrap();
+        while locked.contains(&key) {
+            locked = UNLOCKED.wait(locked).unwrap();
         }
+        locked.push(key);
     }
-    let file =
-        PrivateLock(unsafe { std::fs::File::from_raw_fd(super::fdtab::hide(file.into_raw_fd())) });
-    loop {
-        if unsafe { libc::flock(file.0.as_raw_fd(), libc::LOCK_EX) } == 0 {
-            break;
-        }
-        let error = crate::errno::last();
-        if error != crate::errno::EINTR {
-            return Err(error);
-        }
-    }
-    struct Held((i32, u64));
-    impl Drop for Held {
+    struct Held<'a>((i32, u64), &'a aim_storage::private_fd::PrivateFile, bool);
+    impl Drop for Held<'_> {
         fn drop(&mut self) {
             HELD_INODE_LOCKS.with(|held| held.borrow_mut().retain(|key| *key != self.0));
+            if self.2
+                && let Err(error) = inode_lock_byte(self.1.as_raw_fd(), self.0.1, libc::F_UNLCK)
+            {
+                crate::diag!("inode unlock: errno {error}");
+            }
+            LOCKED.lock().unwrap().retain(|key| *key != self.0);
+            UNLOCKED.notify_all();
         }
     }
+    let mut held = Held(key, &file, false);
+    inode_lock_byte(file.as_raw_fd(), key.1, libc::F_WRLCK)?;
+    held.2 = true;
     let actual = host_stat(host)?;
     if (actual.st_dev, actual.st_ino) != key {
         return Err(crate::errno::from_darwin(libc::ESTALE));
     }
     HELD_INODE_LOCKS.with(|held| held.borrow_mut().push(key));
-    let _held = Held(key);
-    action()
+    let result = action();
+    drop(held);
+    result
 }
 
 /// Record a guest chown/chmod of `host` (only under a path map): on the
@@ -1199,6 +1222,42 @@ mod tests {
         assert_eq!(table_lookup_key("/table-generation").uid, Some(1234));
         advance();
         assert_eq!(table_lookup_key("/table-generation").uid, Some(4321));
+    }
+
+    /// A process's threads share its lock file, so they exclude each other
+    /// on the same inode and not on another one.
+    #[test]
+    fn inode_locks_exclude_this_process_s_threads_by_inode() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (_guard, root) = crate::vfs::test_view();
+        let paths = ["inode-lock-thread-a", "inode-lock-thread-b"].map(|name| {
+            let path = root.join(name);
+            std::fs::write(&path, b"").unwrap();
+            std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap()
+        });
+        let lock = |path: std::ffi::CString, done: mpsc::Sender<()>| {
+            std::thread::spawn(move || {
+                let stat = host_stat(Host::Path(&path)).unwrap();
+                with_inode_lock(Host::Path(&path), &stat, || Ok(done.send(()).unwrap())).unwrap();
+            })
+        };
+        let first = host_stat(Host::Path(&paths[0])).unwrap();
+        let (done, finished) = mpsc::channel();
+        let (same, other) = with_inode_lock(Host::Path(&paths[0]), &first, || {
+            let same = lock(paths[0].clone(), done.clone());
+            let other = lock(paths[1].clone(), done.clone());
+            finished.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(finished.recv_timeout(Duration::from_millis(50)).is_err());
+            Ok((same, other))
+        })
+        .unwrap();
+        finished.recv_timeout(Duration::from_secs(5)).unwrap();
+        same.join().unwrap();
+        other.join().unwrap();
+        for path in paths {
+            std::fs::remove_file(path.to_str().unwrap()).unwrap();
+        }
     }
 
     #[test]

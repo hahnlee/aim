@@ -2484,7 +2484,7 @@ const F_GET_SEALS: u64 = 1034;
 
 // Darwin's open-file-description locks (sys/fcntl.h, private).
 const DARWIN_F_OFD_SETLK: i32 = 90;
-const DARWIN_F_OFD_SETLKW: i32 = 91;
+pub(super) const DARWIN_F_OFD_SETLKW: i32 = 91;
 const DARWIN_F_OFD_GETLK: i32 = 92;
 
 /// Linux arm64 `struct flock` { short type, whence; off_t start, len;
