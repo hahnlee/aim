@@ -676,6 +676,10 @@ fn install_pty_from(fd: i32, carrier: i32) -> Result<(), crate::errno::Errno> {
 
 static LIFECYCLE: Mutex<()> = Mutex::new(());
 thread_local! {static RETIRED:std::cell::RefCell<Option<Vec<Kind>>>=const{std::cell::RefCell::new(None)};}
+// A memfd's last descriptor closed under the lifecycle lock: reclaimed
+// once it is released (`memfd::reclaim_closed` takes the VM epoch, which
+// comes before this lock).
+thread_local! {static RECLAIM_MEMFDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };}
 pub(crate) struct Lifecycle {
     guard: Option<std::sync::MutexGuard<'static, ()>>,
 }
@@ -684,6 +688,9 @@ impl Drop for Lifecycle {
         let retired = RETIRED.with(|owners| owners.borrow_mut().take());
         drop(self.guard.take());
         drop(retired);
+        if RECLAIM_MEMFDS.take() {
+            memfd::reclaim_closed();
+        }
     }
 }
 pub(crate) fn lifecycle() -> Lifecycle {
@@ -695,8 +702,14 @@ pub(crate) fn lifecycle() -> Lifecycle {
     Lifecycle { guard: Some(guard) }
 }
 fn retire(kind: Option<Kind>) {
-    if let Some(Kind::Memfd(k)) = &kind {
-        memfd::closed(*k);
+    if let Some(Kind::Memfd(k)) = &kind
+        && memfd::closed(*k)
+    {
+        if RETIRED.with(|owners| owners.borrow().is_some()) {
+            RECLAIM_MEMFDS.set(true);
+        } else {
+            memfd::reclaim_closed();
+        }
     }
     let mut kind = kind;
     RETIRED.with(|owners| {
@@ -707,6 +720,10 @@ fn retire(kind: Option<Kind>) {
         }
     });
     drop(kind);
+}
+/// Whether this thread has a memfd reclaim waiting for its lifecycle lock.
+pub(super) fn reclaim_pending() -> bool {
+    RECLAIM_MEMFDS.get()
 }
 /// Keep the retired Binder open description through its close flush, without
 /// nesting private allocation or performing IPC under the lifecycle lock.

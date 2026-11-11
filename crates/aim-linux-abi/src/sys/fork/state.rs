@@ -4,7 +4,8 @@
 //! the task and a Darwin fork would have copied with the heap is written
 //! here into one blob and read back in the child before the guest resumes.
 //! Each module saves and restores its own part (`save`/`restore` next to
-//! its state), in the order of [`save`]. What the state names but the child
+//! its state), in the order of [`save_process`] and then [`save_files`].
+//! What the state names but the child
 //! does not inherit (kqueues, the timerfd thread) is then rebuilt by the
 //! module's `after_fork_child`.
 //!
@@ -46,6 +47,10 @@ impl Writer {
     }
     pub fn into_bytes(self) -> Vec<u8> {
         self.0
+    }
+    /// How many bytes have been written so far.
+    pub fn written(&self) -> usize {
+        self.0.len()
     }
 
     pub fn u64(&mut self, v: u64) {
@@ -223,7 +228,12 @@ impl<'a> Reader<'a> {
 }
 
 /// Every module's state, in restore order.
-pub fn save(w: &mut Writer, mounts: &str) {
+/// The process's own state, the records of its memory among it (stub
+/// islands, the program break, file copies, memfd and ashmem views).
+/// Saved once the memory has been copied, so that no record is older
+/// than the memory it describes, as on Linux, where fork copies them
+/// together.
+pub fn save_process(w: &mut Writer) {
     w.u32(0x46444e10);
     crate::xrt::fork_save(w);
     crate::diag::fork_save(w);
@@ -240,6 +250,12 @@ pub fn save(w: &mut Writer, mounts: &str) {
     ashmem::fork_save(w);
     attrs::fork_save(w);
     selinuxfs::fork_save(w);
+}
+
+/// The descriptors and what goes with them, which the child inherits when
+/// it is spawned: saved with the fd table, before the spawn; it follows
+/// [`save_process`] in the blob.
+pub fn save_files(w: &mut Writer, mounts: &str) {
     w.str(mounts);
     fdtab::fork_save(w);
     ptrace::fork_save(w);
@@ -250,7 +266,7 @@ pub fn save(w: &mut Writer, mounts: &str) {
     w.bytes(&aim_host_gpu::fork_state());
 }
 
-/// Restore what [`save`] wrote, then rebuild the host objects the state
+/// Restore what [`save_process`] and [`save_files`] wrote, then rebuild the host objects the state
 /// names; false when the blob is damaged.
 pub fn restore(r: &mut Reader) -> bool {
     r.stage("state-version");
@@ -323,6 +339,7 @@ pub fn restore(r: &mut Reader) -> bool {
     if !restore_descriptors(r) {
         return false;
     }
+    memfd::reclaim();
     super::super::posix_locks::reset_fork();
     r.stage("posix-admission");
     if let Err(error) = super::super::posix_locks::attach_fork() {

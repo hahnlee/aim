@@ -637,15 +637,12 @@ pub fn capable(cap: u32) -> bool {
     read(|id| id.capable(cap))
 }
 
-/// Fork: the identity, the process table, this process's open entry (the
-/// child closes the copy it inherits) and the forking thread's nice value
-/// (the child's main thread has it).
+/// Fork: the identity, the process table and the forking thread's nice
+/// value (the child's main thread has it). The open entry is not
+/// inherited: the child opens its own.
 pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
-    use std::os::fd::AsRawFd as _;
     w.str(&current().to_text());
     w.opt(BY_PID.get(), |w, d| w.path(d));
-    let entry = ENTRY.lock().unwrap().as_ref().map(|e| e.0.as_raw_fd());
-    w.opt(entry, |w, fd| w.i32(fd));
     let tid = super::thread::gettid() as i32;
     w.opt(Some(thread_nice(tid)), |w, n| w.i32(n));
     // The child has the parent's signal struct.
@@ -657,10 +654,6 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
 pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
     let mut id = Identity::parse(&r.str()).unwrap_or_default();
     let by_pid = r.opt(|r| r.path());
-    if let Some(fd) = r.opt(|r| r.i32()) {
-        // SAFETY: the parent's entry fd, inherited and unused here.
-        unsafe { libc::close(fd) };
-    }
     if let Some(nice) = r.opt(|r| r.i32()) {
         id.priority = nice;
     }

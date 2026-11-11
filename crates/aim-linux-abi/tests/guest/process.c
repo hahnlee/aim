@@ -1148,6 +1148,188 @@ static void fork_memory_runs(void) {
   printf("ok fork_memory_runs\n");
 }
 
+#ifndef PR_SET_VMA
+#define PR_SET_VMA 0x53564d41
+#define PR_SET_VMA_ANON_NAME 0
+#endif
+
+enum { RACE_PAGE = 16384, RACE_SIZE = 3 * RACE_PAGE, RACE_KEPT = 8 };
+static char* volatile race_kept[RACE_KEPT];
+static volatile int race_stop;
+
+// Maps, names and then marks memory, and unmaps it again, until stopped.
+static void* race_names(void* arg) {
+  (void)arg;
+  for (unsigned i = 0; !race_stop; i++) {
+    char* old = race_kept[i % RACE_KEPT];
+    race_kept[i % RACE_KEPT] = NULL;
+    if (old) munmap(old, RACE_SIZE);
+    char* p = mmap(NULL, RACE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) continue;
+    if (prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, p, RACE_SIZE, "fork-race") != 0) _exit(2);
+    p[0] = 1;
+    race_kept[i % RACE_KEPT] = p;
+  }
+  return NULL;
+}
+
+// The /proc/self/maps line of the mapping holding `p`, if any.
+static int maps_line(const char* p, char* line, size_t size) {
+  FILE* f = fopen("/proc/self/maps", "r");
+  if (!f) return 0;
+  int found = 0;
+  while (!found && fgets(line, size, f)) {
+    unsigned long lo, hi;
+    found = sscanf(line, "%lx-%lx", &lo, &hi) == 2 && lo <= (unsigned long)p &&
+            (unsigned long)p < hi;
+  }
+  fclose(f);
+  return found;
+}
+
+// While another thread maps and names memory, a fork child that has a
+// mapping of it also has the mapping's name: the records of the memory
+// (names, the program break, stub islands, ...) are never older than the
+// memory the child holds, as on Linux, where fork copies them together.
+static void fork_records_follow_memory(void) {
+  race_stop = 0;
+  pthread_t t;
+  CHECK(pthread_create(&t, NULL, race_names, NULL) == 0, "thread");
+  int checked = 0;
+  for (int n = 0; n < 100; n++) {
+    int p[2];
+    CHECK(pipe(p) == 0, "pipe");
+    pid_t pid = fork();
+    CHECK(pid >= 0, "fork");
+    if (pid == 0) {
+      int marked = 0, bad = 0;
+      for (int i = 0; i < RACE_KEPT; i++) {
+        char* m = race_kept[i];
+        char line[512];
+        if (!m || !maps_line(m, line, sizeof(line)) || !strstr(line, " rw-p ") || m[0] != 1)
+          continue;
+        marked++;
+        bad |= strstr(line, "[anon:fork-race]") == NULL;
+      }
+      if (write(p[1], &marked, sizeof(marked)) != sizeof(marked)) _exit(3);
+      _exit(bad);
+    }
+    close(p[1]);
+    int marked = 0;
+    CHECK(read(p[0], &marked, sizeof(marked)) == sizeof(marked), "child report");
+    close(p[0]);
+    int st;
+    CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st), "child %#x", st);
+    CHECK(WEXITSTATUS(st) == 0, "fork %d: a marked mapping without its name", n);
+    checked += marked;
+  }
+  race_stop = 1;
+  pthread_join(t, NULL);
+  CHECK(checked > 0, "no mapping was checked");
+  printf("ok fork_records_follow_memory\n");
+}
+
+static volatile int race_memfd = -1, race_go = -1, race_ready = -1, race_done = -1;
+
+// For each round the main thread starts: makes an executable-mode memfd
+// (its contents in memory, not the file), writes it, and then closes its
+// last descriptor a varying time later, while the main thread forks.
+static void* race_memfds(void* arg) {
+  (void)arg;
+  for (int n = 0; !race_stop; n++) {
+    while (race_go < n)
+      if (race_stop) return NULL;
+    int fd = memfd_create("fork-race", 0);
+    if (fd < 0 || ftruncate(fd, RACE_PAGE) != 0 || pwrite(fd, "old!", 4, 0) != 4) _exit(2);
+    void* p = mmap(NULL, RACE_PAGE, PROT_READ | PROT_EXEC, MAP_SHARED, fd, 0);
+    if (p == MAP_FAILED || munmap(p, RACE_PAGE) != 0) _exit(3);
+    if (pwrite(fd, "new!", 4, 0) != 4) _exit(4);
+    race_memfd = fd;
+    race_ready = n;
+    usleep(n * 37 % 3000);
+    race_memfd = -1;
+    close(fd);
+    race_done = n;
+  }
+  return NULL;
+}
+
+// While another thread closes the last descriptor of an executable-mode
+// memfd, a fork child that inherits it reads its contents, not the stale
+// file: the memfd's record is saved with the fd table and the memory, and
+// its reclaim waits for the copy. Only the close races the fork.
+static void fork_memfd_close_race(void) {
+  race_stop = 0;
+  pthread_t t;
+  CHECK(pthread_create(&t, NULL, race_memfds, NULL) == 0, "thread");
+  int checked = 0;
+  for (int n = 0; n < 100; n++) {
+    int p[2];
+    CHECK(pipe(p) == 0, "pipe");
+    race_go = n;
+    while (race_ready < n) {
+    }
+    pid_t pid = fork();
+    CHECK(pid >= 0, "fork");
+    if (pid == 0) {
+      int fd = race_memfd, seen = 0, bad = 0;
+      char got[4];
+      if (fd >= 0) {
+        seen = 1;
+        bad = pread(fd, got, 4, 0) != 4 || memcmp(got, "new!", 4) != 0;
+      }
+      if (write(p[1], &seen, sizeof(seen)) != sizeof(seen)) _exit(3);
+      _exit(bad);
+    }
+    close(p[1]);
+    int seen = 0;
+    CHECK(read(p[0], &seen, sizeof(seen)) == sizeof(seen), "child report");
+    close(p[0]);
+    int st;
+    CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st), "child %#x", st);
+    CHECK(WEXITSTATUS(st) == 0, "fork %d: the memfd read its stale file", n);
+    checked += seen;
+    while (race_done < n) {
+    }
+  }
+  race_stop = 1;
+  pthread_join(t, NULL);
+  CHECK(checked > 0, "no memfd was checked");
+  printf("ok fork_memfd_close_race\n");
+}
+
+// Adjacent mappings never touched are allocated afresh in the child as
+// one run (docs/fork.md): each page reads as zeros, keeps its own
+// protection in the child (and in the child's child) and stays private.
+static void fork_untouched_runs(void) {
+  enum { PAGE = 16384, N = 6 };
+  const int rw = PROT_READ | PROT_WRITE;
+  const int prot[N] = {rw, PROT_NONE, PROT_READ, rw, PROT_NONE, rw};
+  char* m = mmap(NULL, N * PAGE, rw, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(m != MAP_FAILED, "mmap");
+  for (int i = 0; i < N; i++) CHECK(mprotect(m + i * PAGE, PAGE, prot[i]) == 0, "mprotect %d", i);
+  pid_t pid = fork();
+  CHECK(pid >= 0, "fork");
+  if (pid == 0) {
+    int bad = 0;
+    for (int i = 0; i < N; i++) {
+      if (prot[i] & PROT_READ) bad |= (m[i * PAGE] != 0) << 0;
+      bad |= (faults(m + i * PAGE, 0) != !(prot[i] & PROT_READ)) << 1;
+      bad |= (faults(m + i * PAGE, 1) != !(prot[i] & PROT_WRITE)) << 2;
+    }
+    bad |= (mprotect(m + PAGE, PAGE, rw) != 0 || m[PAGE] != 0) << 3;
+    m[PAGE] = 1;
+    m[3 * PAGE] = 1;
+    _exit(bad);
+  }
+  int st;
+  CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st), "child %#x", st);
+  CHECK(WEXITSTATUS(st) == 0, "child checks failed: mask %#x", WEXITSTATUS(st));
+  CHECK(m[3 * PAGE] == 0 && faults(m + PAGE, 0) == 1, "the child's changes stay its own");
+  munmap(m, N * PAGE);
+  printf("ok fork_untouched_runs\n");
+}
+
 // A parent that exits right after fork (daemon()'s double fork): the
 // grandchild still starts and runs.
 static void fork_then_exit(void) {
@@ -2419,7 +2601,10 @@ int main(int argc, char** argv) {
       {"kqueue_fd_cloexec_fork", kqueue_fd_cloexec_fork}, {"fasync_fork_once", fasync_fork_once},
       {"fasync_shared_record", fasync_shared_record},
       {"suspend_pending", suspend_pending}, {"vdso_sigreturn", vdso_sigreturn},
-      {"fork_memory", fork_memory}, {"fork_memory_runs", fork_memory_runs}, {"fork_then_exit", fork_then_exit},
+      {"fork_memory", fork_memory}, {"fork_memory_runs", fork_memory_runs},
+      {"fork_untouched_runs", fork_untouched_runs}, {"fork_then_exit", fork_then_exit},
+      {"fork_records_follow_memory", fork_records_follow_memory},
+      {"fork_memfd_close_race", fork_memfd_close_race},
       {"identity", identity},       {"identity_file", identity_file},
       {"seccomp_filter", seccomp_filter},
       {"xattrs", xattrs},           {"pf_key", pf_key},
