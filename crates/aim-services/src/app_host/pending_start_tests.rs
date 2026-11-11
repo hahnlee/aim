@@ -191,8 +191,16 @@ fn run_next_start(relay: &mut BufReader<UnixStream>) -> (String, i64) {
     (name.unwrap().to_string(), seq.parse().unwrap())
 }
 
+/// Waits for the process-start handler to run what was posted to it.
+fn drain_process_starts(host: &Arc<AppHost>) {
+    let (done, drained) = mpsc::channel();
+    host.post_process_start(move |_| done.send(()).unwrap());
+    drained.recv_timeout(Duration::from_secs(5)).unwrap();
+}
+
 /// `mProcessesOnHold`: a start before `mProcessesReady` returns at once and
-/// runs at `finishBooting`, in order; one after readiness runs at once.
+/// is posted at `finishBooting`, in order, which does not wait for the
+/// zygote; one after readiness runs at once.
 #[test]
 fn starts_before_processes_ready_are_held_until_finish_booting() {
     crate::system::with_discovery_binders_flags(
@@ -212,10 +220,10 @@ fn starts_before_processes_ready_are_held_until_finish_booting() {
                 let late = scope.spawn(|| host.start_process_for("p", "p:late", None, false));
                 let mut started = vec![run_next_start(&mut relay)];
                 late.join().unwrap().unwrap();
-                let held = scope.spawn(|| host.start_processes_on_hold());
+                host.start_processes_on_hold();
                 started.push(run_next_start(&mut relay));
                 started.push(run_next_start(&mut relay));
-                held.join().unwrap();
+                drain_process_starts(host);
                 let names: Vec<_> = started.iter().map(|(name, _)| name.as_str()).collect();
                 assert_eq!(names, ["p:late", "p:one", "p:two"]);
                 for (_, seq) in started {
@@ -228,8 +236,9 @@ fn starts_before_processes_ready_are_held_until_finish_booting() {
 }
 
 /// `isAllowedWhileBooting`: a persistent app's start is not held for
-/// `finishBooting`; it runs once forks may (`startPersistentApps`). A boot
-/// that stops fails the held starts.
+/// `finishBooting`; it is posted once forks may (`startPersistentApps`),
+/// and readiness does not wait for the zygote. A boot that stops fails the
+/// held starts.
 #[test]
 fn starts_allowed_while_booting_are_not_held_for_finish_booting() {
     crate::system::with_discovery_binders_flags(
@@ -247,13 +256,11 @@ fn starts_allowed_while_booting_are_not_held_for_finish_booting() {
             let mut relay = BufReader::new(relay);
             host.start_process_for("p", "p", None, false).unwrap();
             host.processes_ready.set(Ok(())).unwrap();
-            std::thread::scope(|scope| {
-                let ready = scope.spawn(|| host.start_held_while_booting());
-                let (name, seq) = run_next_start(&mut relay);
-                ready.join().unwrap();
-                assert_eq!(name, "p");
-                host.process_died(seq, std::process::id() as i32);
-            });
+            host.start_held_while_booting();
+            let (name, seq) = run_next_start(&mut relay);
+            drain_process_starts(host);
+            assert_eq!(name, "p");
+            host.process_died(seq, std::process::id() as i32);
             assert!(host.processes_on_hold.lock().unwrap().is_empty());
         },
     );
