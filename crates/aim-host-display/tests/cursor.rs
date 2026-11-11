@@ -59,7 +59,9 @@ fn a_cursor_buffer_is_the_window_hosts_cursor() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     // sun_path is 104 bytes on Darwin.
-    let socket = std::env::temp_dir().join(format!("dc-{}.sock", std::process::id()));
+    // The display server's input directories go beside its socket.
+    let scratch = aim_paths::Scratch::new("dc");
+    let socket = scratch.join("s");
     let mut server = Command::new(env!("CARGO_BIN_EXE_aim-display"))
         .args(["--mode", "windows", "--socket"])
         .arg(&socket)
@@ -165,6 +167,5 @@ fn a_cursor_buffer_is_the_window_hosts_cursor() {
     assert_eq!(call(FN_CURSOR, &mut none), 0);
     let (r, pixels) = next_cursor(&sock);
     assert_eq!((r.id, pixels.len()), (0, 0));
-    let _ = std::fs::remove_file(&socket);
     let _ = std::fs::remove_dir_all(&dir);
 }

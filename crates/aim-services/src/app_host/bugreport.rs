@@ -1060,30 +1060,17 @@ impl Service for Bugreport {
 mod tests {
     use super::*;
 
-    /// A root of this test's own: the clock's resolution lets two tests
-    /// name the same one, and a killed earlier run's is another run's
-    /// (#1917).
-    fn tmp() -> PathBuf {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        loop {
-            let dir = std::env::temp_dir().join(format!(
-                "aim-bugreport-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-            match std::fs::create_dir(&dir) {
-                Ok(()) => return dir,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => panic!("{}: {e}", dir.display()),
-            }
-        }
+    /// A root of this test's own, removed after it (#1917).
+    fn tmp() -> aim_paths::Scratch {
+        aim_paths::Scratch::new("aim-bugreport")
     }
 
     /// `writeBugreportDataLocked` and `readBugreportMappingLocked`: the
     /// files of each caller and those kept, read back as written.
     #[test]
     fn the_mapping_is_read_as_written() {
-        let path = tmp().join("bugreport-mapping.xml");
+        let scratch = tmp();
+        let path = scratch.join("bugreport-mapping.xml");
         let mut files = Files::default();
         files.add_mapping((10_100, Some("com.a".into())), "a.zip".into());
         files.add_mapping((10_100, Some("com.a".into())), "b.zip".into());
@@ -1118,7 +1105,8 @@ mod tests {
     /// A mapping file that does not read is deleted.
     #[test]
     fn a_bad_mapping_is_deleted() {
-        let path = tmp().join("bugreport-mapping.xml");
+        let scratch = tmp();
+        let path = scratch.join("bugreport-mapping.xml");
         std::fs::write(&path, b"<other />").unwrap();
         let mut files = Files::default();
         files.read_mapping(&path);

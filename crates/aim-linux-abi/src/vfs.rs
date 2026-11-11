@@ -3252,17 +3252,31 @@ fn resolve_inner(
     })
 }
 
+#[cfg(test)]
+static TEST_VIEW: OnceLock<PathBuf> = OnceLock::new();
+
 /// The process-wide view the unit tests share (it is initialized once):
 /// `/data` and the data mirrors as guest-init maps them. The guard keeps
-/// tests that mount from running at the same time.
+/// tests that mount from running at the same time. Its directory goes
+/// when the test process exits.
 #[cfg(test)]
 pub(crate) fn test_view() -> (std::sync::MutexGuard<'static, ()>, &'static Path) {
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
     static LOCK: Mutex<()> = Mutex::new(());
+    // Only the process that made it: a fork child's exit leaves it.
+    extern "C" fn remove_test_view() {
+        if let Some(dir) = TEST_VIEW.get()
+            && dir.ends_with(format!("vfs-view-{}", std::process::id()))
+            && let Err(error) = std::fs::remove_dir_all(dir)
+        {
+            eprintln!("{}: {error}", dir.display());
+        }
+    }
     let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = DIR.get_or_init(|| {
+    let dir = TEST_VIEW.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("vfs-view-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: registering a function of this process for its exit.
+        unsafe { libc::atexit(remove_test_view) };
         let (root, data) = (dir.join("root"), dir.join("data"));
         for d in [&root, &data, &dir.join("run/data_mirror")] {
             std::fs::create_dir_all(d).unwrap();

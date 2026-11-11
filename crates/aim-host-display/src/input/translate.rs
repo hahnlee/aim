@@ -844,8 +844,26 @@ mod tests {
     use std::os::fd::AsFd;
     use std::os::unix::net::UnixStream;
 
-    fn setup(name: &str) -> (Input, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+    /// A test's input directory, removed with its scratch root (which
+    /// also holds the devices' hotplug record) after the test.
+    struct Dir {
+        path: std::path::PathBuf,
+        _root: aim_paths::Scratch,
+    }
+    impl std::ops::Deref for Dir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    /// The input of a test, dropped before its directory.
+    fn setup(name: &str) -> (Dir, Input) {
+        let root = aim_paths::Scratch::new(name);
+        let dir = Dir {
+            path: root.join("in"),
+            _root: root,
+        };
         let input = Input::new(
             Devices::create(&dir, devices(100, 200, 254.0, 254.0)).unwrap(),
             100,
@@ -853,7 +871,7 @@ mod tests {
             254.0,
             320,
         );
-        (input, dir)
+        (dir, input)
     }
 
     fn open(dir: &std::path::Path, index: u32) -> UnixStream {
@@ -897,7 +915,7 @@ mod tests {
 
     #[test]
     fn screens_press_the_keyboard_sleep_and_wake_keys() {
-        let (input, dir) = setup("screens");
+        let (dir, input) = setup("screens");
         let mut k = open(&dir, KEYBOARD);
         input.screen_shown(false, 1);
         input.screen_shown(true, 2);
@@ -918,7 +936,7 @@ mod tests {
     /// a change; while they show windows it gets nothing.
     #[test]
     fn a_reader_opening_while_hidden_gets_sleep() {
-        let (input, dir) = setup("screens-open");
+        let (dir, input) = setup("screens-open");
         input.screen_at_start(false);
         let mut k = open(&dir, KEYBOARD);
         assert_eq!(keys(&mut k, 4), [(KEY_SLEEP, 1), (KEY_SLEEP, 0)]);
@@ -941,7 +959,7 @@ mod tests {
     fn a_reader_opening_as_the_screens_change_gets_them_in_order() {
         for shown in [true, false] {
             for i in 0..20 {
-                let (input, dir) = setup(&format!("screens-race-{shown}-{i}"));
+                let (dir, input) = setup(&format!("screens-race-{shown}-{i}"));
                 input.screen_at_start(shown);
                 let mut k = open(&dir, KEYBOARD);
                 input.screen_shown(!shown, 1);
@@ -963,7 +981,7 @@ mod tests {
 
     #[test]
     fn back_from_the_shortcut_the_button_and_a_swipe() {
-        let (input, dir) = setup("back");
+        let (dir, input) = setup("back");
         let mut k = open(&dir, KEYBOARD);
         // Cmd+[ is Back, pressed and released at its down; [ alone is [.
         input.key(0x21, true, false, COMMAND, 1);
@@ -1022,7 +1040,7 @@ mod tests {
 
     #[test]
     fn command_is_ctrl() {
-        let (input, dir) = setup("cmd");
+        let (dir, input) = setup("cmd");
         let mut k = open(&dir, KEYBOARD);
         // Command alone does not reach Android.
         input.flags_changed(0x37, COMMAND | 0x08, 1);
@@ -1062,7 +1080,7 @@ mod tests {
 
     #[test]
     fn caps_lock_follows_the_lock_flag_not_input_source_switches() {
-        let (input, dir) = setup("caps");
+        let (dir, input) = setup("caps");
         let mut k = open(&dir, KEYBOARD);
         let caps = 1 << 16;
         // A source switch without a lock change must not toggle Android.
@@ -1087,7 +1105,7 @@ mod tests {
 
     #[test]
     fn mac_text_shortcuts() {
-        let (input, dir) = setup("text");
+        let (dir, input) = setup("text");
         let mut k = open(&dir, KEYBOARD);
         let option = OPTION | 0x20;
         let shift = 1 << 17 | 0x02;
@@ -1171,7 +1189,7 @@ mod tests {
 
     #[test]
     fn mouse_hovers_clicks_and_scrolls_where_the_pointer_is() {
-        let (input, dir) = setup("mouse");
+        let (dir, input) = setup("mouse");
         let mut m = open(&dir, MOUSE);
         input.hover(30.4, 40.6, 1);
         // The right button, and the back button, which Android turns into
@@ -1222,7 +1240,7 @@ mod tests {
 
     #[test]
     fn pinch_is_two_fingers_on_the_pointer() {
-        let (input, dir) = setup("pinch");
+        let (dir, input) = setup("pinch");
         let mut t = open(&dir, TOUCHSCREEN);
         let area = input.display();
         input.twist(Twist::Magnify(0.0), Gesture::Began, 50.0, 100.0, area, 1);
@@ -1284,7 +1302,7 @@ mod tests {
 
     #[test]
     fn smart_zoom_is_a_double_tap() {
-        let (input, dir) = setup("zoom");
+        let (dir, input) = setup("zoom");
         let mut t = open(&dir, TOUCHSCREEN);
         let taps = double_tap(1_000_000_000);
         let ms = |i: usize, j: usize| (taps[j].1 - taps[i].1) / 1_000_000;

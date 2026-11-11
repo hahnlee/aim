@@ -31,7 +31,8 @@ fn allowed() -> BTreeSet<String> {
         .collect()
 }
 
-fn fixture(tag: &str) -> (GuestExecutor, std::path::PathBuf) {
+/// The executor of a fresh root, dropped before its root.
+fn fixture(tag: &str) -> (common::TempDir, GuestExecutor) {
     let root = common::temp_dir(tag);
     let image = common::fixture_image(&root);
     let binary = image.join("apex/com.android.art/bin/artd");
@@ -77,7 +78,7 @@ fn fixture(tag: &str) -> (GuestExecutor, std::path::PathBuf) {
     let fs = FsOps::new(layout.path_map(), layout.fs_attrs_file(), false);
     let mut executor = GuestExecutor::new(props, Box::new(launcher), planner, fs, Some(allowed()));
     executor.sync_services(&parsed.services);
-    (executor, root)
+    (root, executor)
 }
 
 fn request(executor: &mut GuestExecutor, interface: &str) -> Effect {
@@ -111,7 +112,7 @@ fn fixture_matches_pinned_original_art_init() {
 
 #[test]
 fn original_artd_spec_is_preserved_without_eager_start() {
-    let (mut executor, root) = fixture("artd-spec");
+    let (_root, mut executor) = fixture("artd-spec");
     let def = &executor.supervisor.record("artd").unwrap().def;
     assert_eq!(def.args, ["/apex/com.android.art/bin/artd"]);
     assert!(def.disabled && def.oneshot);
@@ -133,13 +134,11 @@ fn original_artd_spec_is_preserved_without_eager_start() {
             .is_none()
     );
     drop(executor);
-    common::make_writable(&root);
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn interface_start_obeys_allowlist_and_exclusion() {
-    let (mut executor, root) = fixture("artd-filter");
+    let (_root, mut executor) = fixture("artd-filter");
     executor.only.as_mut().unwrap().remove("artd");
     assert_eq!(
         request(&mut executor, "aidl/artd"),
@@ -180,13 +179,11 @@ fn interface_start_obeys_allowlist_and_exclusion() {
     );
     assert_eq!(executor.launches.len(), 1);
     drop(executor);
-    common::make_writable(&root);
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn oneshot_artd_waits_for_next_request_after_idle_exit_or_death() {
-    let (mut executor, root) = fixture("artd-restart");
+    let (_root, mut executor) = fixture("artd-restart");
     request(&mut executor, "aidl/artd");
     for exit in [Exit::Code(0), Exit::Signal(libc::SIGSEGV)] {
         let previous = executor.launches.last().unwrap().clone();
@@ -224,6 +221,4 @@ fn oneshot_artd_waits_for_next_request_after_idle_exit_or_death() {
         );
     }
     drop(executor);
-    common::make_writable(&root);
-    std::fs::remove_dir_all(root).unwrap();
 }

@@ -1392,7 +1392,9 @@ mod tests {
             return;
         }
         fdtab::install_storage_registrar().unwrap();
-        let dir = std::env::temp_dir().join(format!("ev-query-{}", std::process::id()));
+        // The devices' hotplug record goes beside their directory.
+        let root = aim_paths::Scratch::new("ev-query");
+        let dir = root.join("in");
         std::fs::create_dir_all(&dir).unwrap();
         let listener = UnixListener::bind(dir.join("event0")).unwrap();
         let server = std::thread::spawn(move || {
@@ -1426,13 +1428,14 @@ mod tests {
         drop(query);
         assert_eq!(unsafe { libc::fcntl(raw, libc::F_GETFD) }, -1);
         server.join().unwrap();
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn description_stays_current_and_removal_is_terminal() {
         use aim_host_display::input::{KEYBOARD, MOUSE, devices, server::Devices};
-        let dir = std::env::temp_dir().join(format!("ev-live-{}", std::process::id()));
+        // The devices' hotplug record goes beside their directory.
+        let root = aim_paths::Scratch::new("ev-live");
+        let dir = root.join("in");
         let devs = Devices::create(&dir, devices(100, 200, 160.0, 160.0)).unwrap();
         let mut query = Description::New;
         let start = std::time::Instant::now();
@@ -1467,7 +1470,6 @@ mod tests {
         let _replacement = Devices::create(&dir, devices(100, 200, 160.0, 160.0)).unwrap();
         assert!(matches!(query.query(&dir, MOUSE), Err(r) if r == neg(ENODEV)));
         drop(_replacement);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// `evdev_fasync`: FIOASYNC is the open file's O_ASYNC, events signal
@@ -1485,7 +1487,9 @@ mod tests {
         const SIGRT: i32 = 44;
         fdtab::init();
         super::super::signal::install_host_handlers();
-        let dir = std::env::temp_dir().join(format!("ev-async-{}", std::process::id()));
+        // The devices' hotplug record goes beside their directory.
+        let root = aim_paths::Scratch::new("ev-async");
+        let dir = root.join("in");
         let devs = Devices::create(&dir, devices(100, 200, 160.0, 160.0)).unwrap();
         let node = dir.join(format!("event{MOUSE}"));
         let r = Resolved {
@@ -1527,6 +1531,5 @@ mod tests {
         assert_eq!(codes.last(), Some(&(6, 0x18)));
         fdtab::close_owned_guest(fd, false).unwrap();
         drop(devs);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }
