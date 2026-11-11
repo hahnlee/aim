@@ -9,7 +9,7 @@ Mac's settings are only read.
 | Setting | Mac source | Property | Applied by `init.aim.rc` |
 | --- | --- | --- | --- |
 | Time zone | the IANA name `/etc/localtime` links to, if the image's tzdata (`/apex/com.android.tzdata/etc/tz/tzdata`) has it | `vendor.aim.mac.time_zone` | at boot: `setprop persist.sys.timezone` in `post-fs-data`; while running: `cmd alarm set-timezone` (`AlarmManager.setTimeZone`) |
-| Language and region | `CFLocaleCopyPreferredLanguages`, each language Android can name, with `AppleLocale`'s region when it has none (`ko` + `ko_KR` → `ko-KR`, `zh-Hans` + `zh_CN` → `zh-Hans-CN`) | `vendor.aim.mac.locale` (the first) | at boot: `setprop persist.sys.locale` in `post-fs-data`; the whole list: the service host, through the bridge ("The language list") |
+| Language and region | `CFLocaleCopyPreferredLanguages`, each language Android can name, with `AppleLocale`'s region when it has none (`ko` + `ko_KR` → `ko-KR`, `zh-Hans` + `zh_CN` → `zh-Hans-CN`) | `vendor.aim.mac.locale` (the first) | at boot: `setprop persist.sys.locale` in `early-init` and again in `post-fs-data`; the whole list: the service host, through the bridge ("The language list") |
 | Appearance | `AppleInterfaceStyle` (`Dark`, or absent for Light; "Auto" updates it) | none | not by `init.aim.rc`: the native `uimode` service sets the night mode (`ui_night_mode`) at its start and on `AppleInterfaceThemeChangedNotification` ([system-services.md](system-services.md), "The uimode service"; #655) |
 | Keyboard layout | `AppleCurrentKeyboardLayoutInputSourceID` of `com.apple.HIToolbox` (`com.apple.keylayout.Dvorak`), as the InputDevices layout with its characters, else US English ([input.md](input.md), "Layouts") | `vendor.aim.mac.keyboard_layout` (`keyboard_layout_english_us_dvorak`) | `aim-keyboard layout` (InputManager's layout override for the built-in keyboard), at `sys.boot_completed` and on each change |
 
@@ -20,7 +20,11 @@ Mac's settings are only read.
 - **Boot.** `post-fs-data` in `init.aim.rc` runs after `init.rc`'s, which
   loads the persistent properties, and before `zygote-start`. So
   system_server, bionic and libcore start with the Mac's zone and
-  language, whatever was persisted.
+  language, whatever was persisted. The language is also set at
+  `early-init`, so on data without a persisted one (a new data
+  directory) it holds from persistent property loading on, and the app
+  host's package scan, which reads it then, does not wait for the end of
+  `post-fs-data` (#3071).
 - **While Android runs.** A property trigger runs the original `cmd` as
   `system`. `AlarmManager.setTimeZone` persists the zone, broadcasts
   `ACTION_TIMEZONE_CHANGED`, and the time zone detector reads the device

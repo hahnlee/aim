@@ -55,6 +55,13 @@ on late-fs
 # aim-guest-init sets vendor.aim.mac.* before the first action, and the
 # time zone and appearance again when the Mac changes them.
 
+# The Mac's language is the boot's from the first action: data without a
+# persisted language (a new data directory) keeps it through
+# load_persist_props, so readers of the persistent properties (the app
+# host's package scan) need not wait for post-fs-data's end (#3071).
+on early-init
+    setprop persist.sys.locale ${vendor.aim.mac.locale}
+
 # After init.rc's post-fs-data has loaded the persistent properties, and
 # before zygote-start: the Mac's zone and language replace the persisted
 # ones for this boot.

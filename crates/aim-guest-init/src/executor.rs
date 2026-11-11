@@ -80,6 +80,11 @@ const RECOVERY_WIPE: &str = "reboot,recovery --prompt_and_wipe_data --reason=";
 /// `/data/property/persistent_properties`.
 pub const PERSISTENT_PROPERTY_FILE: &str = "/data/property/persistent_properties";
 
+/// Set once `init_user0` has prepared user 0's DE storage and the data
+/// template's files are in it: the app host's package boot, whose writes
+/// under /data follow them, waits for it.
+const USER0_DE_READY: &str = "vendor.aim.user0.de_ready";
+
 /// How a process launch is reported.
 #[derive(Clone, Debug)]
 pub struct LaunchRecord {
@@ -796,22 +801,24 @@ impl GuestExecutor {
         )))
     }
 
-    /// Places the data template's files (`DataMount::place_template`); a
-    /// failure ends the boot.
+    /// Places the data template's files (`DataMount::place_template`), then
+    /// marks user 0's DE storage ready; a failure ends the boot.
     fn place_template(&mut self) {
-        let Some(data) = &self.data else {
-            return;
+        let placed = match &self.data {
+            Some(data) => data.borrow().place_template(),
+            None => Ok(0),
         };
-        let placed = data.borrow().place_template();
-        match placed {
-            Ok(0) => {}
-            Ok(moved) => self.log.push(format!(
-                "data template: placed {moved} files and directories"
-            )),
-            Err(error) => {
-                self.log.push(format!("FATAL: {error}"));
-                self.fatal.get_or_insert(error);
+        let ready = placed.and_then(|moved| {
+            if moved > 0 {
+                self.log.push(format!(
+                    "data template: placed {moved} files and directories"
+                ));
             }
+            self.set_property(USER0_DE_READY, "true")
+        });
+        if let Err(error) = ready {
+            self.log.push(format!("FATAL: {error}"));
+            self.fatal.get_or_insert(error);
         }
     }
 

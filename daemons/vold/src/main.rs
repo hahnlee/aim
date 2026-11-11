@@ -35,9 +35,6 @@ use vold::key_storage::KeyStorage;
 use vold::storage;
 
 const SERVICE: &str = "vold";
-/// Set once `initUser0` has prepared user 0's DE storage and its views on
-/// this boot: the app host's package boot waits for it.
-const USER0_DE_READY: &std::ffi::CStr = c"vendor.aim.user0.de_ready";
 
 unsafe extern "C" {
     fn __system_property_set(name: *const libc::c_char, value: *const libc::c_char) -> i32;
@@ -612,13 +609,6 @@ impl IVold::IVold for Vold {
             .map_err(|e| io_error("initUser0", e))?;
         drop(crypt);
         fuse::prepare_user_views(0).map_err(|error| io_error("initUser0 storage views", error))?;
-        // SAFETY: NUL-terminated strings.
-        if unsafe { __system_property_set(USER0_DE_READY.as_ptr(), c"true".as_ptr()) } != 0 {
-            return Err(io_error(
-                "initUser0 readiness",
-                std::io::Error::other("property write failed"),
-            ));
-        }
         log::info!("initialized user 0: {} directories", dirs.len());
         Ok(())
     }

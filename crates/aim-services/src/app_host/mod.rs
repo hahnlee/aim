@@ -1394,8 +1394,8 @@ impl AppHost {
         if let Some(platform) = self.platform.get() {
             return Ok(platform);
         }
-        // The vendor post-fs-data action applies the Mac's locale after
-        // persistent property loading, including on fresh data.
+        // init applies the Mac's locale at early-init, and its post-fs-data
+        // action again over a persisted one that loading replaced it with.
         if let Some(locale) = self.property("vendor.aim.mac.locale") {
             package_boot::wait_for("initial locale", |deadline| {
                 self.wait_property("persist.sys.locale", &locale, deadline)
