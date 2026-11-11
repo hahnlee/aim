@@ -157,19 +157,7 @@ fn record_lock(fd: i32, kind: i16) -> Result<(), crate::errno::Errno> {
 
 /// A new unlinked file for a shared count's record lock, hidden.
 fn lock_file() -> Result<i32, crate::errno::Errno> {
-    let mut template = std::env::temp_dir()
-        .join("linux-abi-eventfd.XXXXXX")
-        .into_os_string()
-        .into_encoded_bytes();
-    template.push(0);
-    // SAFETY: mkstemp fills in the template; the name is removed at once.
-    let fd = unsafe { libc::mkstemp(template.as_mut_ptr().cast()) };
-    if fd < 0 {
-        return Err(errno::last());
-    }
-    // SAFETY: removing the name just created.
-    unsafe { libc::unlink(template.as_ptr().cast()) };
-    Ok(fdtab::hide(fd))
+    Ok(fdtab::hide(crate::vfs::unnamed_file("linux-abi-eventfd")?))
 }
 
 fn close_peer(peer: &AtomicI32) {
