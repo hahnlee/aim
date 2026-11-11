@@ -265,7 +265,15 @@ fn mapped(fd: i32) -> Result<Map, i64> {
             if base == libc::MAP_FAILED {
                 return Err(-(errno::last() as i64));
             }
-            let header = (base as usize + h.data_len as usize) as *const Header;
+            let header = (base as usize + len - HEADER) as *const Header;
+            // The layer reaches the elements its header lays out: only
+            // inside the file.
+            // SAFETY: the header at the end of the mapping.
+            if !unsafe { &*header }.fits_map(len) {
+                // SAFETY: the mapping made above.
+                unsafe { libc::munmap(base, len) };
+                return Err(-(EINVAL as i64));
+            }
             // SAFETY: the mapping of the whole checked file, kept for the
             // process.
             e.insert(unsafe { Map::from_raw(base as u64, header) })
@@ -363,44 +371,12 @@ fn map_create(attr: &[u32]) -> i64 {
     for (i, w) in attr[7..11].iter().enumerate() {
         name[i * 4..i * 4 + 4].copy_from_slice(&w.to_ne_bytes());
     }
-    let data_len = match ty {
-        RINGBUF => {
-            // Consumer page, producer page, then the data area (a power of
-            // two, page aligned), as the kernel's mmap layout.
-            if max_entries == 0
-                || !max_entries.is_power_of_two()
-                || key_size != 0
-                || value_size != 0
-            {
-                return -(EINVAL as i64);
-            }
-            2 * 16384 + max_entries as usize
-        }
-        _ if hashed(ty) || arrayed(ty) => {
-            if max_entries == 0
-                || value_size == 0
-                || (key_size == 0)
-                || (!hashed(ty) && key_size != 4)
-            {
-                return -(EINVAL as i64);
-            }
-            let value = if percpu(ty) {
-                round8(value_size) * ncpu()
-            } else {
-                value_size as usize
-            };
-            let per = if hashed(ty) {
-                8 + round8(key_size) + round8(value as u32)
-            } else {
-                round8(value as u32)
-            };
-            per * max_entries as usize
-        }
-        // Other types (program arrays, maps of maps, sockets, ...) hold
-        // kernel objects the programs would use; there are none.
-        _ => return -(EINVAL as i64),
+    // The elements, in whole pages.
+    let Some(data_len) = elements_len(ty, key_size, value_size, max_entries)
+        .and_then(|len| len.checked_next_multiple_of(16384))
+    else {
+        return -(EINVAL as i64);
     };
-    let data_len = data_len.div_ceil(16384) * 16384;
     let header = Header {
         magic: MAGIC,
         kind: KIND_MAP,
@@ -1399,6 +1375,33 @@ mod tests {
         let word = |i: usize| u32::from_ne_bytes(info[i * 4..i * 4 + 4].try_into().unwrap());
         assert_eq!([word(0), word(2), word(3), word(4)], [HASH, 8, 4, 4]);
         // SAFETY: closing the map fd.
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+    }
+
+    /// A map's header lays out its elements inside its file, or the map
+    /// is mapped not at all.
+    #[test]
+    fn a_map_whose_header_overruns_its_file_is_not_mapped() {
+        let mut create = [0u32; 24];
+        create[..5].copy_from_slice(&[ARRAY, 4, 8, 2, 0]);
+        let fd = call(MAP_CREATE, &mut create);
+        assert!(fd >= 0);
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstat(fd as i32, &mut stat) }, 0);
+        let entries =
+            stat.st_size - HEADER as i64 + std::mem::offset_of!(Header, max_entries) as i64;
+        let many = (1u32 << 30).to_ne_bytes();
+        // SAFETY: writing the map's entry count in its header.
+        assert_eq!(
+            unsafe { libc::pwrite(fd as i32, many.as_ptr().cast(), 4, entries) },
+            4
+        );
+        assert_eq!(mapped(fd as i32).err(), Some(-(EINVAL as i64)));
+        let (key, mut value) = ((1u32 << 29).to_ne_bytes(), [0u8; 8]);
+        assert_eq!(
+            elem(fd, MAP_LOOKUP_ELEM, key.as_ptr(), value.as_mut_ptr(), 0),
+            -(EINVAL as i64)
+        );
         assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
     }
 

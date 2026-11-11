@@ -55,6 +55,19 @@ pub struct Header {
 }
 const _: () = assert!(std::mem::size_of::<Header>() == HEADER);
 
+impl Header {
+    /// Whether this is the header of a map whose file is `len` bytes: its
+    /// data before it, and its elements, as its parameters lay them out,
+    /// inside its data.
+    pub fn fits_map(&self, len: usize) -> bool {
+        self.magic == MAGIC
+            && self.kind == KIND_MAP
+            && (self.data_len as usize).checked_add(HEADER) == Some(len)
+            && elements_len(self.ty, self.key_size, self.value_size, self.max_entries)
+                .is_some_and(|n| n <= self.data_len as usize)
+    }
+}
+
 pub fn round8(n: u32) -> usize {
     (n as usize).div_ceil(8) * 8
 }
@@ -84,6 +97,39 @@ pub fn arrayed(ty: u32) -> bool {
 
 pub fn ncpu() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// Bytes of the elements of a map of type `ty` with these parameters, as
+/// `bpf(BPF_MAP_CREATE)` lays them out; None for parameters no map has.
+/// A ring buffer is a consumer page, a producer page, then its data area
+/// (a power of two, page aligned), as the kernel's mmap layout. Other
+/// types (sockets, ...) hold kernel objects the programs would use; there
+/// are none.
+pub fn elements_len(ty: u32, key_size: u32, value_size: u32, max_entries: u32) -> Option<usize> {
+    Some(if ty == RINGBUF {
+        if !max_entries.is_power_of_two() || key_size != 0 || value_size != 0 {
+            return None;
+        }
+        2 * 16384 + max_entries as usize
+    } else if hashed(ty) || arrayed(ty) {
+        if max_entries == 0 || value_size == 0 || key_size == 0 || (!hashed(ty) && key_size != 4) {
+            return None;
+        }
+        let value = if percpu(ty) {
+            round8(value_size).checked_mul(ncpu())?
+        } else {
+            value_size as usize
+        };
+        let value = value.checked_next_multiple_of(8)?;
+        let per = if hashed(ty) {
+            (8 + round8(key_size)).checked_add(value)?
+        } else {
+            value
+        };
+        per.checked_mul(max_entries as usize)?
+    } else {
+        return None;
+    })
 }
 
 /// Why a key has no slot to store it in.
@@ -439,11 +485,7 @@ impl Mapped {
             },
             len,
         };
-        if h.magic != MAGIC
-            || h.kind != KIND_MAP
-            || h.data_len as usize + HEADER != len
-            || h.max_entries == 0
-        {
+        if !h.fits_map(len) {
             return Err(invalid());
         }
         Ok(mapped)
@@ -545,6 +587,22 @@ mod tests {
                 .lookup(&8u32.to_ne_bytes()),
             Some(80u64.to_ne_bytes().to_vec())
         );
+        // A header whose parameters lay out more than its data, or whose
+        // data is not the file's, maps nothing.
+        let backing = objects.join("obj.map");
+        let whole = std::fs::read(&backing).unwrap();
+        let at = whole.len() - HEADER;
+        for (offset, value) in [(24, 3u64), (16, 9), (64, 32)] {
+            let mut bytes = whole.clone();
+            let width = if offset == 64 { 8 } else { 4 };
+            bytes[at + offset..at + offset + width].copy_from_slice(&value.to_ne_bytes()[..width]);
+            std::fs::write(&backing, bytes).unwrap();
+            assert_eq!(
+                Mapped::open(&path, &objects).err().map(|e| e.kind()),
+                Some(io::ErrorKind::InvalidData),
+                "header field at {offset}"
+            );
+        }
         std::fs::write(objects.join("obj.map"), [0u8; 64]).unwrap();
         assert_eq!(
             Mapped::open(&path, &objects).err().map(|e| e.kind()),
