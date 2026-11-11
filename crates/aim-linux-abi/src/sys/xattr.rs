@@ -105,15 +105,33 @@ fn host_name(name: &[u8]) -> Result<CString, i64> {
     CString::new(n).map_err(|_| -(EINVAL as i64))
 }
 
-fn path_target(path: u64, follow: bool, write: bool) -> Result<Target, i64> {
+/// The target of a call `nr` whose descriptor call is `descriptor_call`:
+/// its descriptor, else its path resolved, a final symlink followed by
+/// the call `follow`. A file on a FUSE mount is its server's: the call's
+/// result is the `Err`.
+fn target(
+    nr: u64,
+    descriptor_call: u64,
+    follow: u64,
+    a: [u64; 6],
+    write: bool,
+) -> Result<Target, i64> {
+    if nr == descriptor_call {
+        if let Some(result) = super::fuse_client::xattr_syscall(nr, a, None) {
+            return Err(result);
+        }
+        return Ok(Target::Fd(a[0] as i32));
+    }
     // SAFETY: guest path pointer.
-    let path = guest_cstr(path).map_err(|error| -(error as i64))?;
-    let p = path.as_slice();
-    let r = vfs::resolve(AT_FDCWD, p, follow).map_err(|e| -(e as i64))?;
+    let path = guest_cstr(a[0]).map_err(|error| -(error as i64))?;
+    let r = vfs::resolve(AT_FDCWD, &path, nr == follow).map_err(|e| -(e as i64))?;
+    if let Some(result) = super::fuse_client::xattr_syscall(nr, a, Some(&r.guest)) {
+        return Err(result);
+    }
     if write {
         check_writable(&r)?;
     }
-    Ok(Target::Path(r, follow))
+    Ok(Target::Path(r, nr == follow))
 }
 
 fn options(t: &Target) -> libc::c_int {
@@ -379,15 +397,9 @@ pub fn setxattr(nr: u64, mut a: [u64; 6]) -> i64 {
         Ok(pin) => pin,
         Err(error) => return error,
     };
-    if let Some(result) = super::fuse_client::xattr_syscall(nr, a) {
-        return result;
-    }
-    let t = match nr {
-        7 => Target::Fd(a[0] as i32),
-        _ => match path_target(a[0], nr == 5, true) {
-            Ok(t) => t,
-            Err(e) => return e,
-        },
+    let t = match target(nr, 7, 5, a, true) {
+        Ok(t) => t,
+        Err(result) => return result,
     };
     set(t, a[1], a[2], a[3], a[4])
 }
@@ -398,15 +410,9 @@ pub fn getxattr(nr: u64, mut a: [u64; 6]) -> i64 {
         Ok(pin) => pin,
         Err(error) => return error,
     };
-    if let Some(result) = super::fuse_client::xattr_syscall(nr, a) {
-        return result;
-    }
-    let t = match nr {
-        10 => Target::Fd(a[0] as i32),
-        _ => match path_target(a[0], nr == 8, false) {
-            Ok(t) => t,
-            Err(e) => return e,
-        },
+    let t = match target(nr, 10, 8, a, false) {
+        Ok(t) => t,
+        Err(result) => return result,
     };
     get(t, a[1], a[2], a[3])
 }
@@ -417,15 +423,9 @@ pub fn listxattr(nr: u64, mut a: [u64; 6]) -> i64 {
         Ok(pin) => pin,
         Err(error) => return error,
     };
-    if let Some(result) = super::fuse_client::xattr_syscall(nr, a) {
-        return result;
-    }
-    let t = match nr {
-        13 => Target::Fd(a[0] as i32),
-        _ => match path_target(a[0], nr == 11, false) {
-            Ok(t) => t,
-            Err(e) => return e,
-        },
+    let t = match target(nr, 13, 11, a, false) {
+        Ok(t) => t,
+        Err(result) => return result,
     };
     list(t, a[1], a[2])
 }
@@ -436,15 +436,9 @@ pub fn removexattr(nr: u64, mut a: [u64; 6]) -> i64 {
         Ok(pin) => pin,
         Err(error) => return error,
     };
-    if let Some(result) = super::fuse_client::xattr_syscall(nr, a) {
-        return result;
-    }
-    let t = match nr {
-        16 => Target::Fd(a[0] as i32),
-        _ => match path_target(a[0], nr == 14, true) {
-            Ok(t) => t,
-            Err(e) => return e,
-        },
+    let t = match target(nr, 16, 14, a, true) {
+        Ok(t) => t,
+        Err(result) => return result,
     };
     remove(t, a[1])
 }

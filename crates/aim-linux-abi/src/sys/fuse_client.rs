@@ -959,22 +959,15 @@ pub fn xattr(
     }
     result
 }
-pub fn xattr_syscall(nr: u64, args: [u64; 6]) -> Option<i64> {
-    let fd = matches!(nr, 7 | 10 | 13 | 16);
-    let follow = !matches!(nr, 6 | 9 | 12 | 15);
-    let (route, node) = if fd {
-        let file = get(args[0] as i32)?;
-        (file.route.clone(), Some(file.node))
-    } else {
-        let path = match super::guest_cstr(args[0]) {
-            Ok(bytes) => bytes,
-            Err(error) => return Some(-(error as i64)),
-        };
-        let resolved = match crate::vfs::resolve(crate::vfs::LINUX_AT_FDCWD, &path, follow) {
-            Ok(resolved) => resolved,
-            Err(error) => return Some(-(error as i64)),
-        };
-        (crate::vfs::fuse_route(&resolved.guest)?, None)
+/// An xattr call on a FUSE file: a descriptor's, else the one `path`
+/// resolved to.
+pub fn xattr_syscall(nr: u64, args: [u64; 6], path: Option<&str>) -> Option<i64> {
+    let (route, node) = match path {
+        None => {
+            let file = get(args[0] as i32)?;
+            (file.route.clone(), Some(file.node))
+        }
+        Some(path) => (crate::vfs::fuse_route(path)?, None),
     };
     let opcode = match nr {
         5..=7 => 21,

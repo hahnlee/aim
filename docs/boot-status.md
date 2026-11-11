@@ -618,6 +618,20 @@ rebuilt, so its parse cache was stale) reached `sys.boot_completed` at
 2.88 s: init to vold's start 0.38 s, vold until user 0's DE storage
 0.58 s, the package scan 1.41 s, construction 0.13 s, app data 0.17 s,
 then the app host's user storage, system ready and home 0.21 s.
+The app data is traced in its parts, which match the original
+`fixAppsDataOnBoot` and `onBeforeStartUser`/`onBeforeUnlockUser`, each
+done on every boot: installd's `fixupAppData` (0.14-0.16 s warm) and the
+deferred packages' `reconcileAppsData` (0.10-0.11 s) on the deferring
+thread, which `package app data` waits for, then user 0's
+`prepareUserData` (0.02 s) and DE `reconcileAppsData` (0.10-0.11 s) in
+`user storage`, and the CE ones (0.12-0.13 s) after `sys.boot_completed`.
+Their time is installd's syscalls in the layer (a sampled warm boot:
+`newfstatat` half of it, each component's lstat and fscrypt context, then
+`getxattr`), not the app host's; a path xattr call resolves its path
+once (it resolved it twice, for the FUSE check and the call), which took
+`package app data` from 0.20-0.21 s to 0.18-0.20 s (three alternating
+warm boots a side, load 8-10, 2026-11-11; `sys.boot_completed` 2.32-2.33
+s against 2.34-2.39 s, within noise).
 
 ## How to reproduce
 
