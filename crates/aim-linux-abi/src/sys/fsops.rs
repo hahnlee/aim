@@ -1091,6 +1091,10 @@ fn chmod_fd_private(
     if !magic_link && super::fs::is_path_fd(fd) {
         return -(crate::errno::EBADF as i64);
     }
+    // `anon_inode_setattr`: a bpf object's inode takes no attributes.
+    if matches!(super::fdtab::get(fd), Some(super::fdtab::Kind::Bpf)) {
+        return -(crate::errno::EOPNOTSUPP as i64);
+    }
     if let Some(reference) = super::fdtab::character_reference(fd) {
         return character_mutation(fd, &reference, |host, stat| {
             let mode = match chmod_mode(stat, mode & 0o7777, id) {
@@ -1302,6 +1306,9 @@ fn fchown_fd_private(
     if !allow_path && super::fs::is_path_fd(fd) {
         return -(crate::errno::EBADF as i64);
     }
+    if matches!(super::fdtab::get(fd), Some(super::fdtab::Kind::Bpf)) {
+        return -(crate::errno::EOPNOTSUPP as i64);
+    }
     if let Some(reference) = super::fdtab::character_reference(fd) {
         return character_mutation(fd, &reference, |host, stat| {
             let change = match chown_change(stat, a[1], a[2], id) {
@@ -1480,7 +1487,10 @@ fn ftruncate_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     ftruncate_private(&pinned, a[1] as i64, id)
 }
 fn ftruncate_private(pinned: &super::fdtab::Pinned, len: i64, id: &super::cred::Identity) -> i64 {
-    if matches!(pinned.kind(), Some(super::fdtab::Kind::ProcMem(open)) if open.mode == 0) {
+    // `do_ftruncate`: a bpf object's anon inode is no regular file.
+    if matches!(pinned.kind(), Some(super::fdtab::Kind::ProcMem(open)) if open.mode == 0)
+        || matches!(pinned.kind(), Some(super::fdtab::Kind::Bpf))
+    {
         return -(EINVAL as i64);
     }
     let fd = pinned.descriptor().as_raw_fd();
@@ -1626,6 +1636,10 @@ pub fn fallocate(a: [u64; 6]) -> i64 {
         || matches!(pinned.kind(),Some(super::fdtab::Kind::ProcMem(open))if !matches!(open.mode,1|2))
     {
         return -(crate::errno::EBADF as i64);
+    }
+    // `vfs_fallocate`: nor does it allocate.
+    if matches!(pinned.kind(), Some(super::fdtab::Kind::Bpf)) {
+        return -(crate::errno::ENODEV as i64);
     }
     let stat = match metadata_stat(Host::Fd(fd), &fd_guest(fd).unwrap_or_default(), true) {
         Ok(stat) => stat,

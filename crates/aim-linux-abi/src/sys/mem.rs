@@ -267,6 +267,22 @@ fn mmap_guest(mut a: [u64; 6]) -> i64 {
     if matches!(held.kind(), Some(super::fdtab::Kind::ProcMem(_))) {
         return -(crate::errno::ENODEV as i64);
     }
+    let object = match held.kind() {
+        Some(super::fdtab::Kind::Bpf) if a[1] == 0 || a[5] & (PAGE - 1) != 0 => {
+            return -(EINVAL as i64);
+        }
+        Some(super::fdtab::Kind::Bpf) => match super::bpf::mmap_pieces(
+            held.descriptor().as_raw_fd(),
+            a[5],
+            page_up(a[1]),
+            a[2] & PROT_WRITE != 0,
+            matches!(a[3] & MAP_TYPE, MAP_SHARED | MAP_SHARED_VALIDATE),
+        ) {
+            Ok(pieces) => Some(pieces),
+            Err(error) => return error,
+        },
+        _ => None,
+    };
     let identity = match held.kind() {
         Some(super::fdtab::Kind::Regular(description)) => Some(description.identity),
         _ => None,
@@ -293,7 +309,10 @@ fn mmap_guest(mut a: [u64; 6]) -> i64 {
     }
     let _mapping = super::memfd::mapping_change();
     a[4] = held.descriptor().as_raw_fd() as u64;
-    let result = mmap_pinned(a, &held);
+    let result = match object {
+        Some(pieces) => mmap_object(a, &pieces),
+        None => mmap_pinned(a, &held),
+    };
     if let Some(admission) = admission {
         let finish = if result >= 0 {
             super::verity_pager::publish_membership(identity.unwrap(), admission)
@@ -314,6 +333,53 @@ fn mmap_guest(mut a: [u64; 6]) -> i64 {
         return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64);
     }
     result
+}
+/// mmap of a bpf object (`a[4]`, its host fd): its `pieces`, one after the
+/// other, over a reservation of the whole range. As `bpf_map_mmap` clears
+/// VM_MAYWRITE, a mapping made without write never gains it.
+fn mmap_object(a: [u64; 6], pieces: &[(u64, u64)]) -> i64 {
+    let len = page_up(a[1]);
+    let base = match pieces {
+        [(offset, _)] => mmap_owned([a[0], a[1], a[2], a[3], a[4], *offset]),
+        _ => mmap_owned([
+            a[0],
+            len,
+            0,
+            (a[3] & !MAP_TYPE) | MAP_PRIVATE | MAP_ANONYMOUS,
+            u64::MAX,
+            0,
+        ]),
+    };
+    if base < 0 {
+        return base;
+    }
+    if pieces.len() > 1 {
+        let mut at = base as u64;
+        for &(offset, n) in pieces {
+            let placed = mmap_owned([
+                at,
+                n,
+                a[2],
+                (a[3] & !MAP_FIXED_NOREPLACE) | MAP_FIXED,
+                a[4],
+                offset,
+            ]);
+            if placed < 0 {
+                window::unmap(base as u64, len);
+                return placed;
+            }
+            at += n;
+        }
+    }
+    if a[2] & PROT_WRITE == 0 {
+        let most = (libc::PROT_READ | libc::PROT_EXEC) as i32;
+        // SAFETY: the maximum protection of the mapping made above.
+        if unsafe { mach_vm_protect(task(), base as u64, len, 1, most) } != 0 {
+            window::unmap(base as u64, len);
+            return -(ENOMEM as i64);
+        }
+    }
+    base
 }
 fn mmap_pinned(a: [u64; 6], held: &super::fdtab::Pinned) -> i64 {
     use std::os::fd::AsRawFd;
@@ -1763,7 +1829,11 @@ fn mremap_inner(a: [u64; 6]) -> i64 {
     if flags & MREMAP_DONTUNMAP != 0 && old_len != new_len {
         return -(EINVAL as i64);
     }
-    if vmmap::region_at(old).is_none_or(|r| r.start > old) {
+    let Some(region) = vmmap::region_at(old).filter(|r| r.start <= old) else {
+        return -(libc::EFAULT as i64);
+    };
+    // `vma_to_resize`: a bpf object's mapping (VM_DONTEXPAND) never grows.
+    if new_len > old_len && super::bpf::maps_object(&region) {
         return -(libc::EFAULT as i64);
     }
     let keep_old = flags & MREMAP_DONTUNMAP != 0;

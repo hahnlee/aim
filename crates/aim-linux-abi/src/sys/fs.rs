@@ -1001,7 +1001,8 @@ fn special_read_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> 
         Kind::Cgroup(open) => Some(super::cgroup::read(&open, iov, None)),
         Kind::Sock(_) => net::read_pinned(pin, iov),
         Kind::Dir(_) => Some(-EISDIR),
-        Kind::Epoll(_) | Kind::PidFd(_) | Kind::SyncFile | Kind::Binder(_) => {
+        // `bpf_dummy_read`; type information has no read.
+        Kind::Epoll(_) | Kind::PidFd(_) | Kind::SyncFile | Kind::Binder(_) | Kind::Bpf => {
             Some(-(EINVAL as i64))
         }
         Kind::TracePipe(_) if iov.iter().all(|v| v.iov_len == 0) => Some(0),
@@ -1062,9 +1063,13 @@ fn special_write_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64>
         Kind::Kmsg(open) => Some(super::kmsg::write(&open, iov)),
         Kind::Cgroup(open) => Some(super::cgroup::write(&open, iov, None)),
         Kind::Dir(_) => Some(-(EBADF as i64)),
-        Kind::Epoll(_) | Kind::Inotify(_) | Kind::PidFd(_) | Kind::SyncFile | Kind::Binder(_) => {
-            Some(-(EINVAL as i64))
-        }
+        // `bpf_dummy_write`; type information has no write.
+        Kind::Epoll(_)
+        | Kind::Inotify(_)
+        | Kind::PidFd(_)
+        | Kind::SyncFile
+        | Kind::Binder(_)
+        | Kind::Bpf => Some(-(EINVAL as i64)),
         Kind::TracePipe(_) => Some(-(EBADF as i64)),
         Kind::Content => None,
         Kind::Knob(k) => Some(super::knob::write(fd, &k, iov)),
@@ -1569,6 +1574,10 @@ pub fn lseek(a: [u64; 6]) -> i64 {
         return errno::check(unsafe {
             libc::lseek(pin.descriptor().as_raw_fd(), a[1] as i64, whence)
         });
+    }
+    // A bpf object has no llseek.
+    if let Some(Kind::Bpf) = pin.kind() {
+        return -ESPIPE;
     }
     if let Some(Kind::ProcMem(_)) = pin.kind() {
         return super::proc_mem::seek(pin.descriptor().as_raw_fd(), a[1] as i64, a[2] as i32);

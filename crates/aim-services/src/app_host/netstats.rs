@@ -286,7 +286,7 @@ impl NetworkStats {
     /// identities with which to attribute these to Java history collections.
     fn poll_uid_stats(&self) -> Result<BTreeMap<i32, Entry>, Exception> {
         let map = self.uid_map()?.map();
-        let h = map.h();
+        let h = map.params();
         if !matches!(h.ty, HASH | LRU_HASH)
             || h.key_size as usize != std::mem::size_of::<u32>()
             || h.value_size as usize != Entry::VALUE_SIZE
