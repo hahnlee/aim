@@ -1209,7 +1209,9 @@ Package boot now starts from configured
 inputs (#2431): initial resource size comes from the display server's observer
 hello and density from `ro.sf.lcd_density`; the first full SurfaceFlinger query
 must agree. Persistent properties, the applied initial locale, APEX, user-0 DE
-readiness (published by vold after `initUser0`), restorecon and installd stay
+readiness (published by guest-init once `init_user0` has succeeded and the
+data template's files are placed; the scan waits for it before its first write
+under /data), restorecon and installd stay
 waits at their consumers. Property readiness now blocks on the shared
 `properties_serial` word through guest-init's property owner, and restorecon
 blocks on agent attachment; both keep the named 60-second timeout (#2450).
@@ -1272,7 +1274,15 @@ as many log lines). Instrumented warm boots (three alternating rounds,
 host load 6-15, 2026-11-11): installd's syscall time 0.43-0.55 s against
 0.68-0.97 s; the CE reconciliation 118-276 ms against 316-498 ms. Settings'
 warm median first presented frame was 1.094 s after open (2026-10-30). Raw capture now waits for user-0 DE storage
-about 0.2 s on warm data; fresh data also waits for init to apply the locale.
+about 0.2 s on warm data. guest-init sets `vendor.aim.user0.de_ready` once
+`init_user0` has succeeded and the data template's files are placed, and
+`init.aim.rc` applies the Mac's locale at early-init, so fresh data no longer
+waits for the end of post-fs-data (0.85 s, odsign's key wait among it) for
+the locale (#3071): the scan starts at about 1.1 s instead of 1.7-2.0 s, and
+fresh `sys.boot_completed` is 3.42-3.49 s against 3.60-3.89 s (three
+alternating fresh boots each, host load 8-16, 2026-11-11). The scan then
+parses on the critical path (1.45 s), as the template's parser cache is
+keyed to another guest-init (#3070).
 Full modes, HDR/color/refresh and DisplayManager information still query
 SurfaceFlinger; the app host finds it as libbinder's `waitForService` does
 (SurfaceComposerClient's composer services), waiting for its registration
