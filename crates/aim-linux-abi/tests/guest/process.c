@@ -1148,6 +1148,38 @@ static void fork_memory_runs(void) {
   printf("ok fork_memory_runs\n");
 }
 
+// Adjacent mappings never touched are allocated afresh in the child as
+// one run (docs/fork.md): each page reads as zeros, keeps its own
+// protection in the child (and in the child's child) and stays private.
+static void fork_untouched_runs(void) {
+  enum { PAGE = 16384, N = 6 };
+  const int rw = PROT_READ | PROT_WRITE;
+  const int prot[N] = {rw, PROT_NONE, PROT_READ, rw, PROT_NONE, rw};
+  char* m = mmap(NULL, N * PAGE, rw, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(m != MAP_FAILED, "mmap");
+  for (int i = 0; i < N; i++) CHECK(mprotect(m + i * PAGE, PAGE, prot[i]) == 0, "mprotect %d", i);
+  pid_t pid = fork();
+  CHECK(pid >= 0, "fork");
+  if (pid == 0) {
+    int bad = 0;
+    for (int i = 0; i < N; i++) {
+      if (prot[i] & PROT_READ) bad |= (m[i * PAGE] != 0) << 0;
+      bad |= (faults(m + i * PAGE, 0) != !(prot[i] & PROT_READ)) << 1;
+      bad |= (faults(m + i * PAGE, 1) != !(prot[i] & PROT_WRITE)) << 2;
+    }
+    bad |= (mprotect(m + PAGE, PAGE, rw) != 0 || m[PAGE] != 0) << 3;
+    m[PAGE] = 1;
+    m[3 * PAGE] = 1;
+    _exit(bad);
+  }
+  int st;
+  CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st), "child %#x", st);
+  CHECK(WEXITSTATUS(st) == 0, "child checks failed: mask %#x", WEXITSTATUS(st));
+  CHECK(m[3 * PAGE] == 0 && faults(m + PAGE, 0) == 1, "the child's changes stay its own");
+  munmap(m, N * PAGE);
+  printf("ok fork_untouched_runs\n");
+}
+
 // A parent that exits right after fork (daemon()'s double fork): the
 // grandchild still starts and runs.
 static void fork_then_exit(void) {
@@ -2419,7 +2451,8 @@ int main(int argc, char** argv) {
       {"kqueue_fd_cloexec_fork", kqueue_fd_cloexec_fork}, {"fasync_fork_once", fasync_fork_once},
       {"fasync_shared_record", fasync_shared_record},
       {"suspend_pending", suspend_pending}, {"vdso_sigreturn", vdso_sigreturn},
-      {"fork_memory", fork_memory}, {"fork_memory_runs", fork_memory_runs}, {"fork_then_exit", fork_then_exit},
+      {"fork_memory", fork_memory}, {"fork_memory_runs", fork_memory_runs},
+      {"fork_untouched_runs", fork_untouched_runs}, {"fork_then_exit", fork_then_exit},
       {"identity", identity},       {"identity_file", identity_file},
       {"seccomp_filter", seccomp_filter},
       {"xattrs", xattrs},           {"pf_key", pf_key},

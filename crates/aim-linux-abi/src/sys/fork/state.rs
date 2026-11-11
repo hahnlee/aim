@@ -47,6 +47,10 @@ impl Writer {
     pub fn into_bytes(self) -> Vec<u8> {
         self.0
     }
+    /// How many bytes have been written so far.
+    pub fn written(&self) -> usize {
+        self.0.len()
+    }
 
     pub fn u64(&mut self, v: u64) {
         self.0.extend_from_slice(&v.to_le_bytes());

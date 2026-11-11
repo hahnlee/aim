@@ -38,8 +38,9 @@ The design is the one Cygwin uses on Windows. The parent spawns a fresh
    land there: Darwin places them first-fit from low addresses, and
    libmalloc's regions sit between 0x70_0000_0000 and 0x80_0000_0000.
    A non-fixed guest mapping gets the start of the range as its hint.
-2. **Snapshot.** The parent walks the VM entries of the range and makes a
-   Mach memory entry for each one:
+2. **Snapshot.** Once the child is started (step 4), the parent walks the
+   VM entries of the range and makes a Mach memory entry for each one,
+   while the child execs and sets up its runtime:
    - a copy-on-write copy (`MAP_MEM_VM_COPY`) of private memory. A copy of
      an inaccessible entry is taken after briefly making it readable. The
      stack pages holding the argument strings, which the process maps
@@ -55,6 +56,9 @@ The design is the one Cygwin uses on Windows. The parent spawns a fresh
    memory entry for the run, which the child maps once and then gives
    each part its own protection: the 4,124 entries of
    `fork_latency_with_a_large_address_space` take 10 memory entries.
+   Adjacent untouched entries are likewise allocated as one: zygote's
+   4,900 untouched entries are 350 allocations and 130 protection
+   changes in the child.
 
    Copies are taken before `fork` returns, so what the parent writes
    afterwards stays its own.
@@ -177,4 +181,11 @@ Since adjacent copies are taken as one, a release fork of the 4,124
 entries above spends about 3.7 ms walking them (one `proc_pidinfo` each),
 0.6 ms making memory entries and 2.5 ms in the child mapping and
 protecting them; `fork` in that parent went from 15-18 to 10-14.5 ms
-(2026-11-11, load 9-13).
+(2026-11-11, load 9-13). The walk now runs while the child starts, which
+took that `fork` from 8.6-9.0 to 6.8-7.2 ms (load ~16). A zygote fork in
+an app-host boot (about 7,000 entries, 4,900 of them untouched) took
+29-36 ms with the start, the walk and the child's one allocation per
+untouched entry in sequence, and takes 20-28 ms now (2026-11-11, six
+boots each, load 11-16): the walk 5.5-6.3 ms and the memory entries
+about 1.9 ms in the parent, then mapping 3.3-4.3 ms (was 6.6-8.6) and
+restoring the state 5-8 ms in the child.

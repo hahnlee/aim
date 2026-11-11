@@ -63,6 +63,7 @@ const MAP_MEM_VM_COPY: i32 = 0x20_0000;
 const MAP_MEM_VM_SHARE: i32 = 0x40_0000;
 const VM_PROT_READ: i32 = 1;
 const VM_PROT_EXECUTE: i32 = 4;
+const VM_PROT_DEFAULT: i32 = 3;
 const VM_PROT_ALL: i32 = 7;
 const VM_FLAGS_FIXED: i32 = 0;
 const VM_FLAGS_ANYWHERE: i32 = 1;
@@ -224,9 +225,10 @@ struct Region {
     prot: i32,
     max_prot: i32,
     backing: Backing,
-    /// A copy that the previous region's memory entry covers too: the
-    /// copies of adjacent entries are taken as one, one memory entry and
-    /// one mapping instead of one per VM entry, and each keeps its own
+    /// A copy that the previous region's memory entry covers too, or
+    /// fresh memory allocated with the previous region's: adjacent entries
+    /// of either are taken as one, one memory entry and one mapping (or
+    /// allocation) instead of one per VM entry, and each keeps its own
     /// protection.
     joined: bool,
 }
@@ -251,19 +253,20 @@ fn in_window(addr: u64) -> bool {
     (window::BASE..window::BASE + window::SIZE).contains(&addr)
 }
 
-/// Whether region `r` may be copied with the region before it, `prev`:
-/// adjacent copies, neither of them JIT memory (`map_jit`), both in the
-/// heap window or both outside it.
+/// Whether region `r` may be copied or allocated with the region before
+/// it, `prev`: adjacent copies or adjacent fresh memory, neither of them
+/// JIT memory (`map_jit`), both in the heap window or both outside it.
 fn joins(prev: &Region, r: &Region) -> bool {
-    let copy = |r: &Region| r.backing == Backing::Copy && r.prot != VM_PROT_ALL;
-    copy(prev)
-        && copy(r)
+    prev.backing == r.backing
+        && r.backing != Backing::Share
+        && prev.prot != VM_PROT_ALL
+        && r.prot != VM_PROT_ALL
         && prev.start + prev.len == r.start
         && in_window(prev.start) == in_window(r.start)
 }
 
-/// The regions from `i` that one memory entry covers: `regions[i]` and
-/// the regions joined to it.
+/// The regions from `i` that one memory entry (or allocation) covers:
+/// `regions[i]` and the regions joined to it.
 fn run(regions: &[Region], i: usize) -> usize {
     1 + regions[i + 1..].iter().take_while(|r| r.joined).count()
 }
@@ -412,7 +415,8 @@ fn map_regions(r: &mut Reader, entries: &[Port]) -> Result<(), String> {
     let mut i = 0;
     while i < regions.len() {
         let n = run(&regions, i);
-        let (g, joined) = (&regions[i], &regions[i + 1..i + n]);
+        let all = &regions[i..i + n];
+        let (g, joined) = (&all[0], &all[1..]);
         i += n;
         // Only the heap window is mapped (reserved) here already.
         let overwrite = if in_window(g.start) {
@@ -440,11 +444,12 @@ fn map_regions(r: &mut Reader, entries: &[Port]) -> Result<(), String> {
         let kr = unsafe {
             match g.backing {
                 Backing::Fresh => {
-                    let kr = mach_vm_allocate(task(), &mut addr, g.len, flags);
+                    let kr = mach_vm_allocate(task(), &mut addr, len, flags);
                     if kr == 0 {
-                        mach_vm_protect(task(), addr, g.len, 0, g.prot);
+                        reprotect(VM_PROT_DEFAULT, all)
+                    } else {
+                        kr
                     }
-                    kr
                 }
                 b => {
                     let Some(&e) = entries.next() else {
@@ -676,6 +681,9 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
     w.bytes(&shadow_stack());
     w.str(&crate::vfs::cwd());
     w.str(&mount_text);
+    // The memory regions follow the head in the blob. They are taken once
+    // the child has been started, so they are put in place last.
+    let head = w.written();
     let tracked = super::super::verity_pager::tracked_identities().map_err(|error| {
         -(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64)
     })?;
@@ -695,8 +703,6 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
     let pager = super::super::verity_pager::ForkSnapshot::capture().map_err(|error| {
         -(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64)
     })?;
-    let snap = snapshot()?;
-    save_regions(&mut w, &snap.regions);
     let own = OWN_FDS.write().unwrap_or_else(|e| e.into_inner());
     let fd_guard = fdtab::lifecycle();
     let writer_receipts = fdtab::fork_writer_receipts().map_err(|error| -(error as i64))?;
@@ -739,33 +745,18 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
                 w.i32(*status);
             });
             if let Err(error) = crate::vfs::publish_fork_mounts(pid, &mount_text) {
-                unsafe {
-                    libc::kill(pid, libc::SIGKILL);
-                    while libc::waitpid(pid, std::ptr::null_mut(), 0) < 0
-                        && errno::last() == errno::EINTR
-                    {}
-                }
+                abandon(pid, port);
                 return Err(-(error as i64));
             }
             // Before the handover: the child keeps this entry.
             crate::sys::cred::note_child(pid);
             if let Err(error) = crate::sys::pty_owner::inherit_child(pid) {
-                unsafe {
-                    libc::kill(pid, libc::SIGKILL);
-                    while libc::waitpid(pid, std::ptr::null_mut(), 0) < 0
-                        && errno::last() == errno::EINTR
-                    {}
-                }
+                abandon(pid, port);
                 return Err(-(error as i64));
             }
             if unsafe { libc::kill(pid, libc::SIGCONT) } != 0 {
                 let error = errno::last();
-                unsafe {
-                    libc::kill(pid, libc::SIGKILL);
-                    while libc::waitpid(pid, std::ptr::null_mut(), 0) < 0
-                        && errno::last() == errno::EINTR
-                    {}
-                }
+                abandon(pid, port);
                 return Err(-(error as i64));
             }
             pid
@@ -779,6 +770,19 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
             return Err(e);
         }
     };
+    // The memory is copied while the child starts (exec, dyld, the
+    // runtime's own set-up); it asks for its state only after that.
+    let snap = match snapshot() {
+        Ok(snap) => snap,
+        Err(error) => {
+            abandon(pid, port);
+            return Err(error);
+        }
+    };
+    let mut regions = Writer::default();
+    save_regions(&mut regions, &snap.regions);
+    let mut blob = w.into_bytes();
+    blob.splice(head..head, regions.into_bytes());
     // Only the child holds a send right now: its exit is a no-senders
     // notification.
     // SAFETY: our port; the notification comes to the port itself.
@@ -795,7 +799,6 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
             &mut prev,
         );
     }
-    let blob = w.into_bytes();
     *lock(&HANDOVERS.0) += 1;
     let ready = std::sync::Arc::new(HandoverReady::default());
     let started = std::thread::Builder::new()
@@ -865,6 +868,18 @@ pub fn wait_handovers() {
             .1
             .wait_timeout(n, left)
             .map_or_else(|e| e.into_inner().0, |r| r.0);
+    }
+}
+
+/// Kill and reap a spawned child that is not handed its state, and drop
+/// our rights to its port.
+fn abandon(pid: i32, port: Port) {
+    // SAFETY: our own child, and our port's send and receive rights.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+        while libc::waitpid(pid, std::ptr::null_mut(), 0) < 0 && errno::last() == errno::EINTR {}
+        mach_port_deallocate(task(), port);
+        mach_port_mod_refs(task(), port, MACH_PORT_RIGHT_RECEIVE, -1);
     }
 }
 

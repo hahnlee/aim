@@ -377,6 +377,11 @@ fn fork_copies_adjacent_mappings_with_their_own_protections() {
 }
 
 #[test]
+fn fork_allocates_adjacent_untouched_mappings_with_their_own_protections() {
+    check("fork_untouched_runs");
+}
+
+#[test]
 fn a_parent_that_exits_right_after_fork_leaves_a_running_child() {
     check("fork_then_exit");
 }
