@@ -7,9 +7,10 @@
 //! traffic counters are filled there too. Other hooks remain #2268.
 //!
 //! Every map and program is a file in the boot's runtime directory
-//! (`<runtime>/bpf-objects`), so a pin is a hard link into the bpffs area
-//! of the path map and `BPF_OBJ_GET` an open, and any process that holds
-//! the fd (by fork, SCM_RIGHTS or binder) reaches the same object. A map
+//! (`<runtime>/bpf-objects`); a pin is a file of its own in the bpffs area
+//! of the path map that names it (`bpf_object::pin`), and `BPF_OBJ_GET`
+//! opens the object it names, so any process that holds the fd (by fork,
+//! SCM_RIGHTS or binder) reaches the same object. A map
 //! file is its data (at offset 0, so a ring buffer's mmap sees the kernel
 //! layout) followed by a header (`aim_storage::bpf_object`, which host
 //! services read too); processes map it shared and serialize updates with
@@ -58,9 +59,9 @@ const LINK_CREATE: u64 = 28;
 static MAPPED: Mutex<Option<HashMap<(u64, u64), Map>>> = Mutex::new(None);
 
 /// Where the object files of this boot live.
-fn objects_dir() -> PathBuf {
+pub(super) fn objects_dir() -> PathBuf {
     let dir = match vfs::runtime_dir() {
-        Some(r) => r.join("bpf-objects"),
+        Some(r) => r.join(OBJECTS),
         None => std::env::temp_dir().join(format!("linux-abi-bpf-{}", unsafe { libc::getpid() })),
     };
     let _ = std::fs::create_dir_all(&dir);
@@ -230,14 +231,8 @@ impl Kernel {
     /// The map pinned at guest `path`, if there is one.
     pub(super) fn pinned(path: &[u8]) -> Option<Kernel> {
         let r = vfs::resolve(LINUX_AT_FDCWD, path, true).ok()?;
-        let file = PrivateFile::allocate(|| {
-            std::fs::File::options()
-                .read(true)
-                .write(true)
-                .custom_flags(libc::O_CLOEXEC)
-                .open(std::ffi::OsStr::from_bytes(r.host.as_bytes()))
-        })
-        .ok()?;
+        let host = std::ffi::OsStr::from_bytes(r.host.as_bytes());
+        let file = PrivateFile::allocate(|| open(host.as_ref(), &objects_dir())).ok()?;
         Kernel::of(file.as_raw_fd())
     }
 
@@ -584,8 +579,14 @@ fn obj_pin(path: u64, fd: i32) -> i64 {
     let Some(src) = object_path(fd) else {
         return -(EBADF as i64);
     };
-    // SAFETY: linking our object file at the host path.
-    errno::check(unsafe { libc::link(src.as_ptr(), r.host.as_ptr()) } as i64)
+    let host = std::ffi::OsStr::from_bytes(r.host.as_bytes());
+    match pin(
+        host.as_ref(),
+        std::ffi::OsStr::from_bytes(src.as_bytes()).as_ref(),
+    ) {
+        Ok(()) => 0,
+        Err(error) => -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64),
+    }
 }
 
 fn obj_get(path: u64) -> i64 {
@@ -599,14 +600,13 @@ fn obj_get(path: u64) -> i64 {
         Ok(r) => r,
         Err(e) => return -(e as i64),
     };
-    let file = match PrivateFile::allocate(|| {
-        std::fs::File::options()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_CLOEXEC)
-            .open(std::ffi::OsStr::from_bytes(r.host.as_bytes()))
-    }) {
+    let host = std::ffi::OsStr::from_bytes(r.host.as_bytes());
+    let file = match PrivateFile::allocate(|| open(host.as_ref(), &objects_dir())) {
         Ok(file) => file,
+        // Not a pin.
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            return -(EPERM as i64);
+        }
         Err(error) => {
             return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64);
         }

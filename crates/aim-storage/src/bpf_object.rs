@@ -285,11 +285,69 @@ pub struct Mapped {
 unsafe impl Send for Mapped {}
 unsafe impl Sync for Mapped {}
 
+/// The directory of a boot's object files, beside its bpffs area
+/// (`<runtime>/bpf`).
+pub const OBJECTS: &str = "bpf-objects";
+
+/// The object files of the boot whose bpffs area is `area`.
+pub fn objects_beside(area: &Path) -> std::path::PathBuf {
+    area.with_file_name(OBJECTS)
+}
+/// What a pin holds: this prefix, then the object file's name in
+/// [`OBJECTS`].
+const PIN: &[u8] = b"AIMBPFPIN1\n";
+
+/// Pins the object file `object` (in [`OBJECTS`]) at `pin`: as bpffs's, a
+/// new inode of its own, so its mode and owner are its own, that refers to
+/// the object. Fails with `AlreadyExists` when `pin` exists.
+pub fn pin(pin: &Path, object: &Path) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+    let name = object
+        .file_name()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let record = [PIN, name.as_bytes()].concat();
+    std::fs::File::options()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(pin)?
+        .write_all(&record)
+}
+
+/// The object file pinned at `pin`, of those in `objects`, opened for
+/// reading and writing.
+pub fn open(pin: &Path, objects: &Path) -> io::Result<std::fs::File> {
+    use std::io::Read;
+    use std::os::unix::ffi::OsStrExt;
+    let mut record = Vec::new();
+    std::fs::File::open(pin)?
+        .take((PIN.len() + 255) as u64)
+        .read_to_end(&mut record)?;
+    let name = record
+        .strip_prefix(PIN)
+        .map(std::ffi::OsStr::from_bytes)
+        .filter(|name| {
+            let mut parts = Path::new(name).components();
+            matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none()
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: not a pinned object", pin.display()),
+            )
+        })?;
+    std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(objects.join(name))
+}
+
 impl Mapped {
-    /// The map file at `path`.
-    pub fn open(path: &Path) -> io::Result<Mapped> {
+    /// The map pinned at `path`, of the objects in `objects`.
+    pub fn open(path: &Path, objects: &Path) -> io::Result<Mapped> {
         use std::os::fd::AsRawFd;
-        let file = std::fs::File::options().read(true).write(true).open(path)?;
+        let file = open(path, objects)?;
         let len = file.metadata()?.len() as usize;
         let invalid = || {
             io::Error::new(
@@ -350,7 +408,8 @@ impl Drop for Mapped {
 mod tests {
     use super::*;
 
-    /// A hash map file of `n` slots, as `bpf(BPF_MAP_CREATE)` lays it out.
+    /// A hash map file of `n` slots, as `bpf(BPF_MAP_CREATE)` lays it out,
+    /// in `dir`'s objects, pinned at `dir/bpf/map`.
     fn file(dir: &Path, n: u32) -> std::path::PathBuf {
         let slot = 8 + round8(4) + round8(8);
         let data_len = slot * n as usize;
@@ -361,8 +420,12 @@ mod tests {
             h[at..at + 4].copy_from_slice(&v.to_ne_bytes());
         }
         h[64..72].copy_from_slice(&(data_len as u64).to_ne_bytes());
-        let path = dir.join("map");
-        std::fs::write(&path, b).unwrap();
+        let object = dir.join(OBJECTS).join("obj.map");
+        std::fs::create_dir_all(dir.join(OBJECTS)).unwrap();
+        std::fs::create_dir_all(dir.join("bpf")).unwrap();
+        std::fs::write(&object, b).unwrap();
+        let path = dir.join("bpf/map");
+        pin(&path, &object).unwrap();
         path
     }
 
@@ -371,7 +434,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("aim-bpf-object-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = file(&dir, 2);
-        let m = Mapped::open(&path).unwrap();
+        let objects = objects_beside(&dir.join("bpf"));
+        let m = Mapped::open(&path, &objects).unwrap();
         let map = m.map();
         assert_eq!(map.lookup(&7u32.to_ne_bytes()), None);
         {
@@ -398,17 +462,49 @@ mod tests {
             Some(80u64.to_ne_bytes().to_vec())
         );
         // Another mapping of the file sees the same elements.
-        let again = Mapped::open(&path).unwrap();
+        let again = Mapped::open(&path, &objects).unwrap();
         assert_eq!(
             again.map().lookup(&7u32.to_ne_bytes()),
             Some(70u64.to_ne_bytes().to_vec())
         );
         assert_eq!(again.map().lookup(&[0; 3]), None);
-        std::fs::write(&path, [0u8; 64]).unwrap();
+        // A pin is its own inode; a second one names the same object.
         assert_eq!(
-            Mapped::open(&path).err().map(|e| e.kind()),
+            pin(&path, &objects.join("obj.map")).err().map(|e| e.kind()),
+            Some(io::ErrorKind::AlreadyExists)
+        );
+        let second = dir.join("bpf/second");
+        pin(&second, &objects.join("obj.map")).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_ne!(
+            std::fs::metadata(&path).unwrap().ino(),
+            std::fs::metadata(&second).unwrap().ino()
+        );
+        assert_eq!(
+            Mapped::open(&second, &objects)
+                .unwrap()
+                .map()
+                .lookup(&8u32.to_ne_bytes()),
+            Some(80u64.to_ne_bytes().to_vec())
+        );
+        std::fs::write(objects.join("obj.map"), [0u8; 64]).unwrap();
+        assert_eq!(
+            Mapped::open(&path, &objects).err().map(|e| e.kind()),
             Some(io::ErrorKind::InvalidData)
         );
+        // Neither a file that is no pin, nor a pin naming a path outside
+        // the objects, opens.
+        for record in [
+            &b"no pin"[..],
+            b"AIMBPFPIN1\n../bpf/map",
+            b"AIMBPFPIN1\n/etc/hosts",
+        ] {
+            std::fs::write(&second, record).unwrap();
+            assert_eq!(
+                open(&second, &objects).err().map(|e| e.kind()),
+                Some(io::ErrorKind::InvalidData)
+            );
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
