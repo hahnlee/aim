@@ -9461,14 +9461,23 @@ files by `linux-translate --image`):
 without it every ELF of every process took the load-time rewrite, a
 private rewritten copy of its code, and loading a program took 2.7 ms
 instead of 1.2 ms (medians); first boots reach zygote 0.2-0.4 s sooner
-(2026-11-11). The longest are bpfloader (0.3-0.6 s) and
+(2026-11-11). The longest are bpfloader and
 `aconfigd-mainline init` (0.12-0.36 s) (#529). bpfloader takes about
-0.35 s on a warm resident boot: three process images (netbpfload execs
-uprobestatsbpfload, then the platform bpfloader), netbpfload's 200,000
-`lseek` and 100,000 `read` calls re-reading its ELF objects (0.17 s; the
-I/O owner keeps a plain regular file's type and access mode per descriptor
-instead of re-querying them, #2434), and about 0.03 s of BPF map creation,
-program loads and pins (#418, #561).
+0.25 s on a warm resident boot (median of 9, was 0.29 s): three process
+images (netbpfload execs uprobestatsbpfload, then the platform bpfloader);
+netbpfload's 189,000 `lseek` and 95,000 `read` calls re-reading its ELF
+objects take 0.12 s, what the Mac's own calls cost (0.29 us per `lseek`,
+0.5 us per 4 KiB `read`); its 144 `chmod`/`chown` of pins take 0.017 s
+(#3007). A pin is an empty file of its own, as bpffs gives each pin its own
+inode, instead of a hard link to its object: a clone of the object's
+template, which names it in a host attribute the guest cannot set, made
+whole in one call for about a third of a link's cost on the Mac. The bpffs
+area makes no other files and opens a pin as no file; no link or rename
+moves a pin out of it or gives an object fd a name, and no
+`/proc/self/fd` link reopens an object (ENXIO). BPF_OBJ_GET checks its
+flags and the caller's access to the pin, a frozen map changes through no
+fd, and a map is mapped only when its header lays its elements out inside
+its file (#418, #561).
 
 ## Debugging
 

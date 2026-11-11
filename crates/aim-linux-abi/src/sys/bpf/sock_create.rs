@@ -38,22 +38,15 @@ pub(super) fn prepare(a: &[u32]) -> Result<Vec<u8>, i64> {
                 let fd = i32::from_ne_bytes(code[pc + 4..pc + 8].try_into().unwrap());
                 let pin = fdtab::pin_guest(fd).map_err(|e| -(e as i64))?;
                 let fd = pin.descriptor().as_raw_fd();
-                let (header, stat) = read_header(fd).ok_or(-(EINVAL as i64))?;
+                let (header, _) = read_header(fd).ok_or(-(EINVAL as i64))?;
                 if header.kind != KIND_MAP {
                     return Err(-(EINVAL as i64));
                 }
-                let path = object_path(fd).ok_or(-(EBADF as i64))?;
-                let name = format!("map-{}-{}", stat.st_dev, stat.st_ino);
-                match std::fs::hard_link(
-                    std::ffi::OsStr::from_bytes(path.as_bytes()),
-                    objects_dir().join(&name),
-                ) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                    Err(e) => return Err(-(io(e) as i64)),
-                }
+                // A map's file keeps its one name in the objects for the boot.
+                let name = object_name(fd).ok_or(-(EBADF as i64))?;
+                let name = name.as_bytes();
                 refs.extend_from_slice(&(name.len() as u32).to_ne_bytes());
-                refs.extend_from_slice(name.as_bytes());
+                refs.extend_from_slice(name);
                 // The reference table is indexed by instruction, not guest FD.
                 code[pc + 4..pc + 8].copy_from_slice(&(pc as u32).to_ne_bytes());
             }
@@ -637,6 +630,15 @@ mod tests {
         let program = bpf([OBJ_GET, get.as_ptr() as u64, 16, 0, 0, 0]);
         assert!(program >= 0, "reopen loader pin: {program}");
         assert_eq!(attach_at(target, program, false), 0);
+        // The attachment is another name of the program's file; a pin of
+        // the attached program still names its object.
+        let again = c"/sys/fs/bpf/netd_shared/prog_attached";
+        let pin = [again.as_ptr() as u64, program as u64];
+        assert_eq!(bpf([OBJ_PIN, pin.as_ptr() as u64, 16, 0, 0, 0]), 0);
+        let get_again = [again.as_ptr() as u64, 0u64];
+        let reopened = bpf([OBJ_GET, get_again.as_ptr() as u64, 16, 0, 0, 0]);
+        assert!(reopened >= 0, "reopen attached pin: {reopened}");
+        close(reopened);
         close(program);
         assert_eq!(socket(2, 2), -(EPERM as i64));
         assert_eq!(attach_at(target, 0, true), 0);
@@ -1321,10 +1323,19 @@ mod tests {
             return;
         };
         let (_view, _dir, target) = setup();
+        std::fs::create_dir_all(_dir.join("data/bpf")).unwrap();
+        vfs::add_mount(
+            "/sys/fs/bpf",
+            _dir.join("data/bpf"),
+            vfs::Area::Writable,
+            "bpf",
+            "bpf",
+        )
+        .unwrap();
         let map = call(MAP_CREATE, &[HASH, 4, 1, 16, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert!(map >= 0);
         let kernel = Kernel::of(map as i32).unwrap();
-        let name = CString::new("/data/map-pin").unwrap();
+        let name = CString::new("/sys/fs/bpf/map-pin").unwrap();
         let pin = [name.as_ptr() as u64, map as u64, 0];
         assert_eq!(bpf([OBJ_PIN, pin.as_ptr() as u64, 24, 0, 0, 0]), 0);
         close(map);
@@ -1346,7 +1357,7 @@ mod tests {
         assert_eq!(attach_at(target, program, false), 0);
         close(program);
         close(map);
-        std::fs::remove_file(_dir.join("data/map-pin")).unwrap();
+        std::fs::remove_file(_dir.join("data/bpf/map-pin")).unwrap();
         // Another map, irrespective of any FD reuse, cannot replace this map.
         let unrelated = call(MAP_CREATE, &[HASH, 4, 1, 16, 0, 0, 0, 0, 0, 0, 0, 0]);
         Kernel::of(unrelated as i32)

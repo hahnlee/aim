@@ -55,6 +55,19 @@ pub struct Header {
 }
 const _: () = assert!(std::mem::size_of::<Header>() == HEADER);
 
+impl Header {
+    /// Whether this is the header of a map whose file is `len` bytes: its
+    /// data before it, and its elements, as its parameters lay them out,
+    /// inside its data.
+    pub fn fits_map(&self, len: usize) -> bool {
+        self.magic == MAGIC
+            && self.kind == KIND_MAP
+            && (self.data_len as usize).checked_add(HEADER) == Some(len)
+            && elements_len(self.ty, self.key_size, self.value_size, self.max_entries)
+                .is_some_and(|n| n <= self.data_len as usize)
+    }
+}
+
 pub fn round8(n: u32) -> usize {
     (n as usize).div_ceil(8) * 8
 }
@@ -84,6 +97,39 @@ pub fn arrayed(ty: u32) -> bool {
 
 pub fn ncpu() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// Bytes of the elements of a map of type `ty` with these parameters, as
+/// `bpf(BPF_MAP_CREATE)` lays them out; None for parameters no map has.
+/// A ring buffer is a consumer page, a producer page, then its data area
+/// (a power of two, page aligned), as the kernel's mmap layout. Other
+/// types (sockets, ...) hold kernel objects the programs would use; there
+/// are none.
+pub fn elements_len(ty: u32, key_size: u32, value_size: u32, max_entries: u32) -> Option<usize> {
+    Some(if ty == RINGBUF {
+        if !max_entries.is_power_of_two() || key_size != 0 || value_size != 0 {
+            return None;
+        }
+        2 * 16384 + max_entries as usize
+    } else if hashed(ty) || arrayed(ty) {
+        if max_entries == 0 || value_size == 0 || key_size == 0 || (!hashed(ty) && key_size != 4) {
+            return None;
+        }
+        let value = if percpu(ty) {
+            round8(value_size).checked_mul(ncpu())?
+        } else {
+            value_size as usize
+        };
+        let value = value.checked_next_multiple_of(8)?;
+        let per = if hashed(ty) {
+            (8 + round8(key_size)).checked_add(value)?
+        } else {
+            value
+        };
+        per.checked_mul(max_entries as usize)?
+    } else {
+        return None;
+    })
 }
 
 /// Why a key has no slot to store it in.
@@ -285,11 +331,126 @@ pub struct Mapped {
 unsafe impl Send for Mapped {}
 unsafe impl Sync for Mapped {}
 
+/// The directory of a boot's object files, beside its bpffs area
+/// (`<runtime>/bpf`).
+pub const OBJECTS: &str = "bpf-objects";
+
+/// The object files of the boot whose bpffs area is `area`.
+pub fn objects_beside(area: &Path) -> std::path::PathBuf {
+    area.with_file_name(OBJECTS)
+}
+/// The host attribute naming a pin's object file in [`OBJECTS`]: one the
+/// guest cannot set or read (its attributes are `dev.aim.xattr.*`), so a
+/// file the guest made is no pin.
+const PIN: &std::ffi::CStr = c"dev.aim.bpf.pin";
+
+/// The pin template of object file `object`: an empty file beside it that
+/// carries [`PIN`].
+fn template(object: &Path) -> std::path::PathBuf {
+    let mut name = object.as_os_str().to_os_string();
+    name.push(".pin");
+    name.into()
+}
+
+/// Makes the pin template of the new object file `object` (in
+/// [`OBJECTS`]), before any process can pin it.
+pub fn make_pin_template(object: &Path) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+    let name = object
+        .file_name()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let path = template(object);
+    let file = std::fs::File::options()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    // SAFETY: the attribute's name and value outlive the call.
+    if unsafe {
+        libc::fsetxattr(
+            file.as_raw_fd(),
+            PIN.as_ptr(),
+            name.as_bytes().as_ptr().cast(),
+            name.len(),
+            0,
+            0,
+        )
+    } != 0
+    {
+        let error = io::Error::last_os_error();
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Pins the object file `object` (in [`OBJECTS`]) at `pin`: as bpffs's, an
+/// empty file of its own, so its mode and owner are its own, that refers
+/// to the object. A clone of the object's pin template, it appears whole
+/// or not at all. Fails with `AlreadyExists` when `pin` exists.
+pub fn pin(pin: &Path, object: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let from = std::ffi::CString::new(template(object).as_os_str().as_bytes())?;
+    let to = std::ffi::CString::new(pin.as_os_str().as_bytes())?;
+    // SAFETY: two paths; clonefile fails with EEXIST on an existing `to`.
+    if unsafe { libc::clonefile(from.as_ptr(), to.as_ptr(), 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Removes the pin template of `object`, whose creation failed.
+pub fn remove_pin_template(object: &Path) {
+    let _ = std::fs::remove_file(template(object));
+}
+
+/// The object file pinned at `pin`, of those in `objects`. A file that is
+/// no pin fails with `InvalidData`.
+pub fn object(pin: &Path, objects: &Path) -> io::Result<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(pin.as_os_str().as_bytes())?;
+    let mut name = [0u8; 256];
+    // SAFETY: a bounded read of the attribute into the local buffer.
+    let n = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            PIN.as_ptr(),
+            name.as_mut_ptr().cast(),
+            name.len(),
+            0,
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    let not_pin = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: not a pinned object", pin.display()),
+        )
+    };
+    if n < 0 {
+        let error = io::Error::last_os_error();
+        return Err(match error.raw_os_error() {
+            Some(libc::ENOATTR) => not_pin(),
+            _ => error,
+        });
+    }
+    let name = std::ffi::OsStr::from_bytes(&name[..n as usize]);
+    let mut parts = Path::new(name).components();
+    if !matches!(parts.next(), Some(std::path::Component::Normal(_))) || parts.next().is_some() {
+        return Err(not_pin());
+    }
+    Ok(objects.join(name))
+}
+
 impl Mapped {
-    /// The map file at `path`.
-    pub fn open(path: &Path) -> io::Result<Mapped> {
+    /// The map pinned at `path`, of the objects in `objects`.
+    pub fn open(path: &Path, objects: &Path) -> io::Result<Mapped> {
         use std::os::fd::AsRawFd;
-        let file = std::fs::File::options().read(true).write(true).open(path)?;
+        let file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(object(path, objects)?)?;
         let len = file.metadata()?.len() as usize;
         let invalid = || {
             io::Error::new(
@@ -324,11 +485,7 @@ impl Mapped {
             },
             len,
         };
-        if h.magic != MAGIC
-            || h.kind != KIND_MAP
-            || h.data_len as usize + HEADER != len
-            || h.max_entries == 0
-        {
+        if !h.fits_map(len) {
             return Err(invalid());
         }
         Ok(mapped)
@@ -350,7 +507,8 @@ impl Drop for Mapped {
 mod tests {
     use super::*;
 
-    /// A hash map file of `n` slots, as `bpf(BPF_MAP_CREATE)` lays it out.
+    /// A hash map file of `n` slots, as `bpf(BPF_MAP_CREATE)` lays it out,
+    /// in `dir`'s objects, pinned at `dir/bpf/map`.
     fn file(dir: &Path, n: u32) -> std::path::PathBuf {
         let slot = 8 + round8(4) + round8(8);
         let data_len = slot * n as usize;
@@ -361,8 +519,13 @@ mod tests {
             h[at..at + 4].copy_from_slice(&v.to_ne_bytes());
         }
         h[64..72].copy_from_slice(&(data_len as u64).to_ne_bytes());
-        let path = dir.join("map");
-        std::fs::write(&path, b).unwrap();
+        let object = dir.join(OBJECTS).join("obj.map");
+        std::fs::create_dir_all(dir.join(OBJECTS)).unwrap();
+        std::fs::create_dir_all(dir.join("bpf")).unwrap();
+        std::fs::write(&object, b).unwrap();
+        make_pin_template(&object).unwrap();
+        let path = dir.join("bpf/map");
+        pin(&path, &object).unwrap();
         path
     }
 
@@ -371,7 +534,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("aim-bpf-object-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = file(&dir, 2);
-        let m = Mapped::open(&path).unwrap();
+        let objects = objects_beside(&dir.join("bpf"));
+        let m = Mapped::open(&path, &objects).unwrap();
         let map = m.map();
         assert_eq!(map.lookup(&7u32.to_ne_bytes()), None);
         {
@@ -398,15 +562,78 @@ mod tests {
             Some(80u64.to_ne_bytes().to_vec())
         );
         // Another mapping of the file sees the same elements.
-        let again = Mapped::open(&path).unwrap();
+        let again = Mapped::open(&path, &objects).unwrap();
         assert_eq!(
             again.map().lookup(&7u32.to_ne_bytes()),
             Some(70u64.to_ne_bytes().to_vec())
         );
         assert_eq!(again.map().lookup(&[0; 3]), None);
-        std::fs::write(&path, [0u8; 64]).unwrap();
+        // A pin is its own inode; a second one names the same object.
         assert_eq!(
-            Mapped::open(&path).err().map(|e| e.kind()),
+            pin(&path, &objects.join("obj.map")).err().map(|e| e.kind()),
+            Some(io::ErrorKind::AlreadyExists)
+        );
+        let second = dir.join("bpf/second");
+        pin(&second, &objects.join("obj.map")).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_ne!(
+            std::fs::metadata(&path).unwrap().ino(),
+            std::fs::metadata(&second).unwrap().ino()
+        );
+        assert_eq!(
+            Mapped::open(&second, &objects)
+                .unwrap()
+                .map()
+                .lookup(&8u32.to_ne_bytes()),
+            Some(80u64.to_ne_bytes().to_vec())
+        );
+        // A header whose parameters lay out more than its data, or whose
+        // data is not the file's, maps nothing.
+        let backing = objects.join("obj.map");
+        let whole = std::fs::read(&backing).unwrap();
+        let at = whole.len() - HEADER;
+        for (offset, value) in [(24, 3u64), (16, 9), (64, 32)] {
+            let mut bytes = whole.clone();
+            let width = if offset == 64 { 8 } else { 4 };
+            bytes[at + offset..at + offset + width].copy_from_slice(&value.to_ne_bytes()[..width]);
+            std::fs::write(&backing, bytes).unwrap();
+            assert_eq!(
+                Mapped::open(&path, &objects).err().map(|e| e.kind()),
+                Some(io::ErrorKind::InvalidData),
+                "header field at {offset}"
+            );
+        }
+        std::fs::write(objects.join("obj.map"), [0u8; 64]).unwrap();
+        assert_eq!(
+            Mapped::open(&path, &objects).err().map(|e| e.kind()),
+            Some(io::ErrorKind::InvalidData)
+        );
+        // Neither a file the guest could make (whatever it holds), nor a pin
+        // naming a path outside the objects, opens; a pin is empty.
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        let forged = dir.join("bpf/forged");
+        std::fs::write(&forged, b"obj.map").unwrap();
+        assert_eq!(
+            object(&forged, &objects).err().map(|e| e.kind()),
+            Some(io::ErrorKind::InvalidData)
+        );
+        let outside = std::ffi::CString::new(forged.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a path, an attribute name and value.
+        assert_eq!(
+            unsafe {
+                libc::setxattr(
+                    outside.as_ptr(),
+                    PIN.as_ptr(),
+                    b"../bpf/map".as_ptr().cast(),
+                    10,
+                    0,
+                    0,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            object(&forged, &objects).err().map(|e| e.kind()),
             Some(io::ErrorKind::InvalidData)
         );
         std::fs::remove_dir_all(&dir).unwrap();

@@ -103,7 +103,16 @@ fn create_uid_map(host: &AppHost, key_size: u32, value_size: u32) -> UidMap {
     );
     let end = name.iter().position(|&b| b == 0).unwrap();
     use std::os::unix::ffi::OsStrExt;
-    std::fs::hard_link(std::ffi::OsStr::from_bytes(&name[..end]), &path).unwrap();
+    let object = std::path::Path::new(std::ffi::OsStr::from_bytes(&name[..end]));
+    // The layer's objects of this test process, beside the host's bpffs area.
+    let objects = aim_storage::bpf_object::objects_beside(host.bpf().unwrap());
+    std::fs::create_dir_all(&objects).unwrap();
+    let beside = objects.join(object.file_name().unwrap());
+    if !beside.exists() {
+        std::fs::hard_link(object, &beside).unwrap();
+        aim_storage::bpf_object::make_pin_template(&beside).unwrap();
+    }
+    aim_storage::bpf_object::pin(&path, &beside).unwrap();
     UidMap(fd as i32)
 }
 
