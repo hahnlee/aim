@@ -1643,9 +1643,8 @@ mod home_tests;
 mod tests {
     use super::*;
 
-    fn tmp() -> PathBuf {
-        let dir = aim_paths::scratch_dir("aim-slice");
-        dir
+    fn tmp() -> aim_paths::Scratch {
+        aim_paths::Scratch::new("aim-slice")
     }
 
     /// `ContentProvider`'s URI users: added to a `content` URI that has
@@ -1757,7 +1756,8 @@ mod tests {
     /// restored.
     #[test]
     fn grants_persist_and_round_trip_through_a_backup() {
-        let dir = tmp().join("slice");
+        let scratch = tmp();
+        let dir = scratch.join("slice");
         // Callers grant a URI without its user: the client's authority is
         // the URI's as it is.
         let uri = Uri::parse("content://com.example.slices/wifi/details");
@@ -1787,7 +1787,8 @@ mod tests {
         let text = String::from_utf8(backup.clone()).unwrap();
         assert!(text.starts_with(r#"<slice-access-list version="2"><client pkg="com.client@0""#));
 
-        let other = tmp().join("slice");
+        let other_scratch = tmp();
+        let other = other_scratch.join("slice");
         let mut restored = Store::new(other.clone());
         restored.restore(&backup).unwrap();
         restored.persist();
@@ -1797,7 +1798,8 @@ mod tests {
         );
         assert!(restored.has_permission("com.client", 0, &uri));
 
-        let mut old = Store::new(tmp().join("slice"));
+        let old_scratch = tmp();
+        let mut old = Store::new(old_scratch.join("slice"));
         old.restore(br#"<slice-access-list version="1"><client pkg="a@0" fullAccess="1" /></slice-access-list>"#)
             .unwrap();
         assert!(!old.has_full_access("a", 0));
@@ -1807,7 +1809,8 @@ mod tests {
     /// its authorities and its files go; of a client: its grants go.
     #[test]
     fn a_cleared_package_s_grants_go() {
-        let dir = tmp().join("slice");
+        let scratch = tmp();
+        let dir = scratch.join("slice");
         let uri = Uri::parse("content://com.example.slices/wifi");
         let mut store = Store::new(dir.clone());
         store
@@ -1829,7 +1832,8 @@ mod tests {
     /// part, as the original's `PkgUser.hashCode` does.
     #[test]
     fn a_grant_of_no_provider_fails_after_the_client() {
-        let mut store = Store::new(tmp().join("slice"));
+        let scratch = tmp();
+        let mut store = Store::new(scratch.join("slice"));
         let uri = Uri::parse("content://com.example.slices/x");
         assert!(store.grant("com.client", 0, None, 0, &uri).is_err());
         assert!(store.has_permission("com.client", 0, &uri));

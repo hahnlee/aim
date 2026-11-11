@@ -132,16 +132,17 @@ fn mapped_areas_are_visible_and_wake_readers_across_mappings() {
     let area = PropAreaReader::new(reader.bytes()).unwrap();
     assert_eq!(area.get("debug.first").unwrap().value, "changed");
     drop(service);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
-fn run_boot(tag: &str, only: Option<&[&str]>) -> (Boot, std::path::PathBuf) {
+/// The boot of a fresh root, dropped before its root.
+fn run_boot(tag: &str, only: Option<&[&str]>) -> (common::TempDir, Boot) {
     let root = common::temp_dir(tag);
     let image = common::fixture_image(&root);
     let mut options = BootOptions::new(image, root.join("data"), RunMode::Run);
     options.linux_run = Some(common::fake_linux_run(&root));
     options.only = only.map(|o| o.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>());
-    (Boot::prepare(options).unwrap(), root)
+    let boot = Boot::prepare(options).unwrap();
+    (root, boot)
 }
 
 /// Sends a set from a client thread and serves it on this thread.
@@ -162,7 +163,7 @@ fn set_over_socket(boot: &mut Boot, socket: usize, name: &str, value: &str) -> u
 
 #[test]
 fn setprop2_over_the_socket_updates_the_areas() {
-    let (mut boot, root) = run_boot("props-socket", None);
+    let (root, mut boot) = run_boot("props-socket", None);
     let sockets = boot.property_sockets();
     assert!(sockets[0].ends_with("dev/socket/property_service"));
     assert!(sockets[1].ends_with("dev/socket/property_service_for_system"));
@@ -217,13 +218,11 @@ fn setprop2_over_the_socket_updates_the_areas() {
     let decoded = aim_guest_init::props::decode_persistent_properties(&persisted).unwrap();
     assert!(decoded.contains(&("persist.sys.locale".into(), "en-US".into())));
     drop(boot);
-    common::make_writable(&root);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
 fn ctl_messages_start_and_stop_services_with_passed_socket_fds() {
-    let (mut boot, root) = run_boot("props-ctl", None);
+    let (_root, mut boot) = run_boot("props-ctl", None);
     // logd is declared by the fixture's logd.rc with three sockets and two
     // files.
     assert_eq!(
@@ -323,13 +322,11 @@ fn ctl_messages_start_and_stop_services_with_passed_socket_fds() {
     let flags = boot.executor.supervisor.record("logd").unwrap().flags;
     assert!(flags & aim_guest_init::supervisor::flags::ONESHOT != 0);
     drop(boot);
-    common::make_writable(&root);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
 fn only_filter_skips_other_services() {
-    let (mut boot, root) = run_boot("props-only", Some(&["servicemanager"]));
+    let (_root, mut boot) = run_boot("props-only", Some(&["servicemanager"]));
     assert_eq!(
         set_over_socket(&mut boot, 0, "ctl.start", "logd"),
         PROP_SUCCESS
@@ -355,6 +352,4 @@ fn only_filter_skips_other_services() {
             .is_some()
     );
     drop(boot);
-    common::make_writable(&root);
-    let _ = std::fs::remove_dir_all(&root);
 }

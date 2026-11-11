@@ -616,6 +616,11 @@ impl Layout {
         ] {
             fs::create_dir_all(dir)?;
         }
+        // The syscall layer's own unnamed files (`vfs::unnamed_file`),
+        // made here so that no guest umask decides its mode.
+        let scratch = self.runtime.join("scratch");
+        fs::create_dir(&scratch)?;
+        fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700))?;
         // The kernel log: the syscall layer keeps its ring in /dev/kmsg,
         // and knows /proc/kmsg by this file (`sys/kmsg.rs`).
         fs::write(self.dev_dir().join("kmsg"), b"")?;
@@ -755,6 +760,8 @@ mod tests {
         layout.prepare_runtime().unwrap();
         let pts = layout.dev_dir().join("pts");
         assert!(fs::metadata(&pts).unwrap().is_dir());
+        let scratch = fs::metadata(layout.runtime.join("scratch")).unwrap();
+        assert_eq!(scratch.permissions().mode() & 0o7777, 0o700);
         assert_eq!(layout.path_map().lookup("/dev/pts/3").0, pts.join("3"));
         fs::remove_dir_all(dir).unwrap();
     }

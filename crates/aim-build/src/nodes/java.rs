@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn local_contract_rejects_inherited_abstract_methods_and_wrong_overloads() {
-        let work = aim_paths::scratch_dir("local-contract");
+        let work = aim_paths::Scratch::new("local-contract");
         let source = work.join("source");
         fs::create_dir_all(&source).unwrap();
         let mut log = Log::create(work.join("test.log"), false).unwrap();

@@ -90,21 +90,9 @@ struct Shared(i32);
 
 impl Shared {
     fn new() -> Result<Shared, Errno> {
-        let mut tmpl = std::env::temp_dir()
-            .join("linux-abi-fown.XXXXXX")
-            .into_os_string()
-            .into_encoded_bytes();
-        tmpl.push(0);
-        // SAFETY: mkstemp fills in the template; the name goes at once.
-        let fd = unsafe { libc::mkstemp(tmpl.as_mut_ptr().cast()) };
-        if fd < 0 {
-            return Err(errno::last());
-        }
-        // SAFETY: our new file's name and descriptor.
-        unsafe {
-            libc::unlink(tmpl.as_ptr().cast());
-            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-        }
+        let fd = crate::vfs::unnamed_file("linux-abi-fown")?;
+        // SAFETY: our new file's descriptor.
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
         Ok(Shared(super::fdtab::hide(fd)))
     }
 

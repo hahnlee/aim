@@ -25,15 +25,35 @@ pub const PROGRAMS: &[&str] = &[
     "/system/bin/testsvc",
 ];
 
-/// A fresh short temp directory (socket paths stay readable in logs).
-pub fn temp_dir(tag: &str) -> PathBuf {
+/// A fresh short temp directory (socket paths stay readable in logs),
+/// removed with what it holds, made writable first, when dropped: at the
+/// end of a test or when its panic unwinds.
+pub struct TempDir(PathBuf);
+
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        make_writable(&self.0);
+        if let Err(error) = fs::remove_dir_all(&self.0) {
+            eprintln!("{}: {error}", self.0.display());
+        }
+    }
+}
+
+pub fn temp_dir(tag: &str) -> TempDir {
     let dir = std::env::temp_dir().join(format!("dgi-{tag}-{}", std::process::id()));
     if dir.exists() {
         make_writable(&dir);
         fs::remove_dir_all(&dir).unwrap();
     }
     fs::create_dir_all(&dir).unwrap();
-    dir
+    TempDir(dir)
 }
 
 pub fn make_writable(path: &Path) {

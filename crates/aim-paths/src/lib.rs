@@ -258,6 +258,40 @@ pub fn scratch_dir(prefix: &str) -> PathBuf {
     scratch_dir_in(&std::env::temp_dir(), prefix)
 }
 
+/// A [`scratch_dir`] that is removed, with what it holds, when dropped:
+/// at the end of a test or when its panic unwinds.
+pub struct Scratch(PathBuf);
+
+impl Scratch {
+    pub fn new(prefix: &str) -> Self {
+        Self(scratch_dir(prefix))
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        match std::fs::remove_dir_all(&self.0) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                eprintln!("{}: {error}", self.0.display())
+            }
+            _ => {}
+        }
+    }
+}
+
 /// `scratch_dir` in `parent`.
 pub fn scratch_dir_in(parent: &Path, prefix: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -273,5 +307,33 @@ pub fn scratch_dir_in(parent: &Path, prefix: &str) -> PathBuf {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => panic!("{}: {error}", dir.display()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A scratch directory goes with what it holds when its test ends,
+    /// and when the test's panic unwinds.
+    #[test]
+    fn a_scratch_directory_goes_when_dropped_or_unwound() {
+        let scratch = super::Scratch::new("aim-paths-scratch");
+        let path = scratch.to_path_buf();
+        std::fs::create_dir(path.join("inner")).unwrap();
+        std::fs::write(path.join("inner/file"), b"x").unwrap();
+        drop(scratch);
+        assert!(!path.exists());
+        let unwound = std::panic::catch_unwind(|| {
+            let scratch = super::Scratch::new("aim-paths-scratch");
+            let path = scratch.to_path_buf();
+            std::fs::write(path.join("file"), b"x").unwrap();
+            std::panic::panic_any(path);
+        })
+        .unwrap_err();
+        assert!(
+            !unwound
+                .downcast_ref::<std::path::PathBuf>()
+                .unwrap()
+                .exists()
+        );
     }
 }

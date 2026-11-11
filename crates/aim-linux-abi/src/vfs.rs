@@ -1623,6 +1623,49 @@ pub fn runtime_dir() -> Option<&'static Path> {
     VFS.get()?.runtime.as_deref()
 }
 
+/// A new file of the layer's own with no name, its descriptor: made as
+/// `<prefix>.XXXXXX` and removed at once, in `<runtime>/scratch` (which
+/// nothing else fills, so a name is found and removed quickly), or in
+/// `$TMPDIR` without a runtime directory.
+pub(crate) fn unnamed_file(prefix: &str) -> Result<i32, Errno> {
+    static SCRATCH: OnceLock<PathBuf> = OnceLock::new();
+    let directory = match (SCRATCH.get(), runtime_dir()) {
+        (Some(scratch), _) => scratch.clone(),
+        (None, Some(runtime)) => {
+            let scratch = runtime.join("scratch");
+            make_scratch(&scratch)
+                .map_err(|error| errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
+            SCRATCH.get_or_init(|| scratch).clone()
+        }
+        (None, None) => std::env::temp_dir(),
+    };
+    let mut template = directory
+        .join(format!("{prefix}.XXXXXX"))
+        .into_os_string()
+        .into_vec();
+    template.push(0);
+    // SAFETY: mkstemp fills in the template; the name goes at once.
+    let fd = unsafe { libc::mkstemp(template.as_mut_ptr().cast()) };
+    if fd < 0 {
+        return Err(errno::last());
+    }
+    // SAFETY: the name mkstemp just made.
+    unsafe { libc::unlink(template.as_ptr().cast()) };
+    Ok(fd)
+}
+
+/// The scratch directory of a runtime guest-init did not prepare it in:
+/// the layer's own (0700) whatever the umask a guest thread has set,
+/// which is the process's.
+fn make_scratch(scratch: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(scratch) {
+        Ok(()) => std::fs::set_permissions(scratch, std::fs::Permissions::from_mode(0o700)),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 /// A mount as `/proc/mounts` lists it.
 pub struct MountPoint {
     pub id: u64,
@@ -3221,17 +3264,31 @@ fn resolve_inner(
     })
 }
 
+#[cfg(test)]
+static TEST_VIEW: OnceLock<PathBuf> = OnceLock::new();
+
 /// The process-wide view the unit tests share (it is initialized once):
 /// `/data` and the data mirrors as guest-init maps them. The guard keeps
-/// tests that mount from running at the same time.
+/// tests that mount from running at the same time. Its directory goes
+/// when the test process exits.
 #[cfg(test)]
 pub(crate) fn test_view() -> (std::sync::MutexGuard<'static, ()>, &'static Path) {
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
     static LOCK: Mutex<()> = Mutex::new(());
+    // Only the process that made it: a fork child's exit leaves it.
+    extern "C" fn remove_test_view() {
+        if let Some(dir) = TEST_VIEW.get()
+            && dir.ends_with(format!("vfs-view-{}", std::process::id()))
+            && let Err(error) = std::fs::remove_dir_all(dir)
+        {
+            eprintln!("{}: {error}", dir.display());
+        }
+    }
     let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = DIR.get_or_init(|| {
+    let dir = TEST_VIEW.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("vfs-view-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: registering a function of this process for its exit.
+        unsafe { libc::atexit(remove_test_view) };
         let (root, data) = (dir.join("root"), dir.join("data"));
         for d in [&root, &data, &dir.join("run/data_mirror")] {
             std::fs::create_dir_all(d).unwrap();
@@ -3266,6 +3323,51 @@ pub(crate) fn test_view() -> (std::sync::MutexGuard<'static, ()>, &'static Path)
 
 #[cfg(test)]
 mod tests {
+    /// The layer's unnamed files are made in the runtime directory's
+    /// scratch directory, not $TMPDIR, and leave no name behind.
+    #[test]
+    fn unnamed_files_are_made_in_the_runtime_scratch_directory() {
+        let (_view, _) = super::test_view();
+        let scratch = super::runtime_dir().unwrap().join("scratch");
+        let fd = super::unnamed_file("vfs-test").unwrap();
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstat(fd, &mut stat) }, 0);
+        assert_eq!(stat.st_nlink, 0);
+        let mut directory: libc::stat = unsafe { std::mem::zeroed() };
+        let path = std::ffi::CString::new(scratch.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::stat(path.as_ptr(), &mut directory) }, 0);
+        assert_eq!(stat.st_dev, directory.st_dev);
+        assert!(std::fs::read_dir(&scratch).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("vfs-test")
+        }));
+        unsafe { libc::close(fd) };
+    }
+
+    /// A scratch directory made under a guest's umask is still the
+    /// layer's to make files in.
+    #[test]
+    fn the_scratch_directory_does_not_take_the_guest_umask() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "vfs::tests::the_scratch_directory_does_not_take_the_guest_umask",
+        ) {
+            return;
+        }
+        let root = aim_paths::Scratch::new("vfs-scratch-umask");
+        let scratch = root.join("scratch");
+        let previous = unsafe { libc::umask(0o777) };
+        let made = super::make_scratch(&scratch);
+        unsafe { libc::umask(previous) };
+        made.unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&scratch).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o700);
+        std::fs::write(scratch.join("file"), b"").unwrap();
+    }
+
     /// The table's visibility of each mount and its generation follow
     /// every write.
     #[test]

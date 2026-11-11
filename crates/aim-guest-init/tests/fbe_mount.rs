@@ -92,8 +92,6 @@ fn a_boot_ended_before_the_first_policy_is_not_taken_for_one_from_before_fbe() {
     mount_all(&mut second).unwrap();
     assert!(second.fatal.is_none(), "{:?}", second.fatal);
     drop(second);
-    common::make_writable(&root);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A data directory the original image's LockSettings protects is refused
@@ -118,8 +116,6 @@ fn an_app_host_image_refuses_a_data_directory_the_original_protects() {
         "{fatal}"
     );
     drop(second);
-    common::make_writable(&root);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// `mount_all` gives what an earlier build wrote below an encrypted
@@ -168,6 +164,4 @@ fn mount_all_repairs_policy_less_inodes_and_names_one_it_cannot() {
             .is_empty()
     );
     drop(third);
-    common::make_writable(&root);
-    let _ = std::fs::remove_dir_all(&root);
 }

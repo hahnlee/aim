@@ -50,7 +50,9 @@ fn headless_display_has_no_windows_or_native_ui() {
         aim_paths::skip("no Metal device for headless scanout buffer import");
         return;
     }
-    let socket = std::env::temp_dir().join(format!("aim-headless-{}.sock", std::process::id()));
+    // The display server's input directories go beside its socket.
+    let scratch = aim_paths::Scratch::new("aim-headless");
+    let socket = scratch.join("s");
     let child = Command::new(env!("CARGO_BIN_EXE_aim-display"))
         .args(["--mode", "headless", "--size", "64x48", "--socket"])
         .arg(&socket)

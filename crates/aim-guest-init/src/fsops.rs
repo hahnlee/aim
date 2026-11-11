@@ -1012,20 +1012,21 @@ mod tests {
     use super::*;
     use crate::paths::Layout;
 
-    fn temp_layout(tag: &str) -> Layout {
-        let root = std::env::temp_dir().join(format!("dgi-fsops-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+    /// A layout in a fresh root, removed when the returned root is
+    /// dropped.
+    fn temp_layout(tag: &str) -> (aim_paths::Scratch, Layout) {
+        let root = aim_paths::Scratch::new(&format!("dgi-fsops-{tag}"));
         let image = root.join("image");
         fs::create_dir_all(image.join("system/bin")).unwrap();
         std::os::unix::fs::symlink("/system/bin", image.join("bin")).unwrap();
         let layout = Layout::new(image, root.join("data"), Some(root.join("run")));
         layout.prepare().unwrap();
-        layout
+        (root, layout)
     }
 
     #[test]
     fn init_storage_bind_and_slave_keep_explicit_namespace_relations() {
-        let layout = temp_layout("storage-propagation");
+        let (_root, layout) = temp_layout("storage-propagation");
         let mut ops = FsOps::new(layout.path_map(), layout.fs_attrs_file(), true);
         ops.set_path_map_file(layout.path_map_file());
         ops.mkdir("/mnt/user", Some(0o755), None, None).unwrap();
@@ -1059,7 +1060,7 @@ mod tests {
     }
     #[test]
     fn init_bind_mounts_become_path_map_entries() {
-        let layout = temp_layout("bind");
+        let (_root, layout) = temp_layout("bind");
         let mut ops = FsOps::new(layout.path_map(), layout.fs_attrs_file(), true);
         ops.set_path_map_file(layout.path_map_file());
         ops.mkdir("/data/user_de", Some(0o711), None, None).unwrap();
@@ -1120,7 +1121,7 @@ mod tests {
 
     #[test]
     fn commands_act_on_mapped_areas() {
-        let layout = temp_layout("areas");
+        let (_root, layout) = temp_layout("areas");
         let mut ops = FsOps::new(layout.path_map(), layout.fs_attrs_file(), true);
         assert!(matches!(
             ops.mkdir("/data/misc", Some(0o1771), Some(1000), Some(1000))
@@ -1214,6 +1215,5 @@ mod tests {
         ));
         ops.remove("/data/misc/x", false).unwrap();
         assert!(!layout.data.join("data/misc/x").exists());
-        let _ = fs::remove_dir_all(layout.data.parent().unwrap());
     }
 }

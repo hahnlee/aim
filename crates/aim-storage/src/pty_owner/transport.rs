@@ -1860,11 +1860,31 @@ impl Client {
 mod tests {
     use super::*;
     use std::{fs, os::unix::fs::DirBuilderExt, path::PathBuf};
-    fn runtime() -> PathBuf {
+    /// A test's runtime directory by its canonical path, removed after
+    /// the test.
+    struct Runtime {
+        path: PathBuf,
+        _root: aim_paths::Scratch,
+    }
+    impl std::ops::Deref for Runtime {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+    impl AsRef<std::path::Path> for Runtime {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+    fn runtime() -> Runtime {
         // A unique name: an earlier run with this pid may have left one.
-        let root = aim_paths::scratch_dir("aim-pty-transport");
+        let root = aim_paths::Scratch::new("aim-pty-transport");
         fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
-        fs::canonicalize(root).unwrap()
+        Runtime {
+            path: fs::canonicalize(&root).unwrap(),
+            _root: root,
+        }
     }
     #[test]
     fn mach_frame_preserves_unaligned_payload_and_rejects_nonzero_padding() {

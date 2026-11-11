@@ -702,8 +702,7 @@ mod tests {
 
     #[test]
     fn hotplug_retains_lifetimes_and_stale_removal_once() {
-        let root = std::env::temp_dir().join(format!("input-lifetime-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = aim_paths::Scratch::new("input-lifetime");
         let dir = root.join("input");
         let specs = || devices(100, 200, 160.0, 160.0);
         let devs = Devices::create(&dir, specs()).unwrap();
@@ -745,7 +744,6 @@ mod tests {
         );
         assert_eq!(records[0].1.name(), b"aim-touchscreen");
         assert!(super::super::hotplug::read(&dir, end).unwrap().1.is_empty());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn open(dir: &Path, index: u32) -> (UnixStream, Descriptor) {
@@ -822,7 +820,9 @@ mod tests {
 
     #[test]
     fn masks_axes_keymap_and_flush() {
-        let dir = std::env::temp_dir().join(format!("evdev-ctl-{}", std::process::id()));
+        // The devices' hotplug record goes beside their directory.
+        let root = aim_paths::Scratch::new("evdev-ctl");
+        let dir = root.join("in");
         let devs = Devices::create(&dir, devices(100, 200, 160.0, 160.0)).unwrap();
         let (mut k, dk) = open(&dir, KEYBOARD);
 
@@ -953,22 +953,20 @@ mod tests {
         // A live server's nodes are not stale.
         assert!(!remove_stale(&dir));
         drop(devs);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn stale_nodes_go() {
-        let dir = std::env::temp_dir().join(format!("evdev-stale-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = aim_paths::Scratch::new("evdev-stale");
         std::fs::write(dir.join("event0"), b"").unwrap();
         assert!(remove_stale(&dir));
         assert!(!dir.join("event0").exists());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn packets_state_and_grab() {
-        let dir = std::env::temp_dir().join(format!("evdev-{}", std::process::id()));
+        let root = aim_paths::Scratch::new("evdev");
+        let dir = root.join("in");
         let devs = Devices::create(&dir, devices(100, 200, 160.0, 160.0)).unwrap();
         let mut names: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
@@ -1033,6 +1031,5 @@ mod tests {
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         let mut rest = Vec::new();
         a.read_to_end(&mut rest).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

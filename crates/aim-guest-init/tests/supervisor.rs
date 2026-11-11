@@ -56,7 +56,7 @@ struct Fixture {
     planner: Planner,
     props: BTreeMap<String, String>,
     now: Instant,
-    _root: std::path::PathBuf,
+    _root: common::TempDir,
 }
 
 fn parse(ids: &IdResolver, props: &BTreeMap<String, String>) -> Vec<Service> {

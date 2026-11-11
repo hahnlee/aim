@@ -1582,18 +1582,7 @@ pub(super) fn content_fd_unpublished(data: &[u8], cloexec: bool) -> i64 {
 
 /// A new unlinked file holding `data`.
 fn fresh(data: &[u8]) -> Result<i32, i64> {
-    let mut tmpl = std::env::temp_dir()
-        .join("linux-abi-proc.XXXXXX")
-        .into_os_string()
-        .into_encoded_bytes();
-    tmpl.push(0);
-    // SAFETY: mkstemp fills the template; the name is removed at once.
-    let fd = unsafe { libc::mkstemp(tmpl.as_mut_ptr().cast()) };
-    if fd < 0 {
-        return Err(-(errno::last() as i64));
-    }
-    // SAFETY: the name mkstemp just made.
-    unsafe { libc::unlink(tmpl.as_ptr().cast()) };
+    let fd = crate::vfs::unnamed_file("linux-abi-proc").map_err(|error| -(error as i64))?;
     fill(fd, data);
     Ok(fd)
 }

@@ -87,8 +87,6 @@ fn fixture_image_dry_run_boot() {
     assert_eq!(boot.property("ro.cold_boot_done").as_deref(), Some("true"));
     // A dry run only writes the runtime layout, never the image.
     assert!(!Path::new(&root.join("image/dev/socket")).exists());
-    common::make_writable(&root);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// An image named relative to the working directory is handed on
@@ -116,8 +114,6 @@ fn a_relative_image_is_handed_on_absolute() {
         assert!(fields.len() < 3 || fields[2].starts_with('/'), "{line}");
     }
     drop(boot);
-    common::make_writable(&root);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -138,8 +134,6 @@ fn excluded_services_are_not_started() {
             .any(|e| matches!(e, Effect::Skipped(reason) if reason == "'logd' excluded"))
     );
     assert_eq!(boot.property("init.svc.logd"), None);
-    common::make_writable(&root);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// `installkey`'s vdc left out is the failure it reboots for: the boot
@@ -163,8 +157,6 @@ fn a_boot_without_installkey_s_vdc_ends_there() {
             .iter()
             .any(|record| record.executed.command.starts_with("mkdir /data/misc "))
     );
-    common::make_writable(&root);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The full boot of the derived image as a dry run. Prints the statistics.
@@ -303,8 +295,6 @@ fn real_image_dry_run_boot() {
             .iter()
             .any(|a| a.module_name == "com.android.hardware.power" && a.partition == "VENDOR")
     );
-    common::make_writable(&root);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The zones a Mac names (`/etc/localtime`) are in the guest's tzdata,
