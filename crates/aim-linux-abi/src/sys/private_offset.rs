@@ -18,38 +18,41 @@
 //! after checking the description is still unshared.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-#[derive(Clone, Copy)]
-enum State {
-    /// The layer holds the description's offset; the host's is stale.
-    Held(i64),
-    /// Other descriptors refer to the description: the host's offset is
-    /// the one.
-    Shared,
-}
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 /// Whether any offset is held; read on every syscall.
 static HELD: AtomicBool = AtomicBool::new(false);
-/// Whether any fd has a state; read on every close.
-static KNOWN: AtomicBool = AtomicBool::new(false);
-/// The fds this module knows, each with its state; a few at a time.
-static STATES: Mutex<Vec<(i32, State)>> = Mutex::new(Vec::new());
+/// The held offsets, by fd; a few at a time, and none once the process has
+/// a second thread.
+static OFFSETS: Mutex<Vec<(i32, i64)>> = Mutex::new(Vec::new());
+/// Nonzero for an fd whose description other descriptors refer to: the
+/// host's offset is the one, and the description is not checked again.
+static SHARED: [AtomicU8; super::fdtab::SLOW_FDS] =
+    [const { AtomicU8::new(0) }; super::fdtab::SLOW_FDS];
 
-fn publish(states: &[(i32, State)]) {
-    let held = states
-        .iter()
-        .any(|(_, state)| matches!(state, State::Held(_)));
-    HELD.store(held, Ordering::Relaxed);
-    KNOWN.store(!states.is_empty(), Ordering::Relaxed);
+fn shared(fd: i32) -> Option<&'static AtomicU8> {
+    usize::try_from(fd).ok().and_then(|at| SHARED.get(at))
 }
 
-fn set(states: &mut Vec<(i32, State)>, fd: i32, state: Option<State>) {
-    states.retain(|(known, _)| *known != fd);
-    if let Some(state) = state {
-        states.push((fd, state));
+fn set(offsets: &mut Vec<(i32, i64)>, fd: i32, offset: Option<i64>) {
+    offsets.retain(|(known, _)| *known != fd);
+    if let Some(offset) = offset {
+        offsets.push((fd, offset));
     }
-    publish(states);
+    HELD.store(!offsets.is_empty(), Ordering::Relaxed);
+}
+
+/// Writes `offset` back to `fd`'s description.
+fn restore(fd: i32, offset: i64) {
+    // SAFETY: plain lseek of a descriptor this process holds; a nonnegative
+    // SEEK_SET of a regular file cannot fail.
+    if unsafe { libc::lseek(fd, offset, libc::SEEK_SET) } != offset {
+        crate::diag!(
+            "[linux-abi] fd {fd}: restoring its held offset {offset} failed: {}",
+            std::io::Error::last_os_error()
+        );
+        std::process::abort();
+    }
 }
 
 /// Whether syscall `nr` keeps held offsets: lseek, read, write, readv,
@@ -66,32 +69,27 @@ pub fn held() -> bool {
 
 /// Writes every held offset back to its description and stops holding it.
 pub fn release() {
-    let mut states = STATES.lock().unwrap();
-    for &(fd, state) in states.iter() {
-        if let State::Held(offset) = state {
-            // SAFETY: plain lseek of a descriptor this process holds; a
-            // nonnegative SEEK_SET of a regular file cannot fail.
-            if unsafe { libc::lseek(fd, offset, libc::SEEK_SET) } != offset {
-                crate::diag!(
-                    "[linux-abi] fd {fd}: restoring its held offset {offset} failed: {}",
-                    std::io::Error::last_os_error()
-                );
-                std::process::abort();
-            }
-        }
+    let mut offsets = OFFSETS.lock().unwrap();
+    for &(fd, offset) in offsets.iter() {
+        restore(fd, offset);
     }
-    states.retain(|(_, state)| matches!(state, State::Shared));
-    publish(&states);
+    offsets.clear();
+    HELD.store(false, Ordering::Relaxed);
 }
 
-/// `fd` is closed, replaced or no longer a plain regular file.
+/// `fd` is closed, replaced or no longer a plain regular file; a held
+/// offset goes back to its description first.
 pub fn forget(fd: i32) {
-    if !KNOWN.load(Ordering::Relaxed) {
+    if let Some(slot) = shared(fd) {
+        slot.store(0, Ordering::Relaxed);
+    }
+    if !held() {
         return;
     }
-    let mut states = STATES.lock().unwrap();
-    if states.iter().any(|(known, _)| *known == fd) {
-        set(&mut states, fd, None);
+    let mut offsets = OFFSETS.lock().unwrap();
+    if let Some(&(_, offset)) = offsets.iter().find(|(known, _)| *known == fd) {
+        restore(fd, offset);
+        set(&mut offsets, fd, None);
     }
 }
 
@@ -101,14 +99,18 @@ pub fn seek(fd: i32, offset: i64, whence: i32) -> Option<i64> {
     if !super::thread::alone() {
         return None;
     }
-    let mut states = STATES.lock().unwrap();
-    let current = match states.iter().find(|(known, _)| *known == fd) {
-        Some((_, State::Held(current))) => *current,
-        Some((_, State::Shared)) => return None,
+    if shared(fd).is_some_and(|slot| slot.load(Ordering::Relaxed) != 0) {
+        return None;
+    }
+    let mut offsets = OFFSETS.lock().unwrap();
+    let current = match offsets.iter().find(|(known, _)| *known == fd) {
+        Some(&(_, current)) => current,
         None => match unshared_offset(fd) {
             Some(current) => current,
             None => {
-                set(&mut states, fd, Some(State::Shared));
+                if let Some(slot) = shared(fd) {
+                    slot.store(1, Ordering::Relaxed);
+                }
                 return None;
             }
         },
@@ -117,18 +119,18 @@ pub fn seek(fd: i32, offset: i64, whence: i32) -> Option<i64> {
         libc::SEEK_SET if offset >= 0 => offset,
         libc::SEEK_CUR => match current.checked_add(offset) {
             Some(target) if target >= 0 => target,
-            _ => return Some(host_seek(&mut states, fd, current, offset, whence)),
+            _ => return Some(host_seek(&mut offsets, fd, current, offset, whence)),
         },
-        _ => return Some(host_seek(&mut states, fd, current, offset, whence)),
+        _ => return Some(host_seek(&mut offsets, fd, current, offset, whence)),
     };
-    set(&mut states, fd, Some(State::Held(target)));
+    set(&mut offsets, fd, Some(target));
     Some(target)
 }
 
 /// The host's own answer (SEEK_END, SEEK_DATA, SEEK_HOLE, a bad offset or
 /// whence) from the held position, which the host then holds again.
 fn host_seek(
-    states: &mut Vec<(i32, State)>,
+    offsets: &mut Vec<(i32, i64)>,
     fd: i32,
     current: i64,
     offset: i64,
@@ -139,7 +141,7 @@ fn host_seek(
         if libc::lseek(fd, current, libc::SEEK_SET) != current {
             return -(crate::errno::last() as i64);
         }
-        set(states, fd, None);
+        set(offsets, fd, None);
         crate::errno::check(libc::lseek(fd, offset, whence))
     }
 }
@@ -150,10 +152,8 @@ pub fn read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
     if !held() {
         return None;
     }
-    let mut states = STATES.lock().unwrap();
-    let (_, State::Held(offset)) = states.iter_mut().find(|(known, _)| *known == fd)? else {
-        return None;
-    };
+    let mut offsets = OFFSETS.lock().unwrap();
+    let (_, offset) = offsets.iter_mut().find(|(known, _)| *known == fd)?;
     // SAFETY: guest buffers, as the host read would take them.
     let n = unsafe { libc::preadv(fd, iov.as_ptr(), iov.len() as i32, *offset) };
     if n < 0 {
