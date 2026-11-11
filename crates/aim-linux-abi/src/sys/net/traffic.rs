@@ -581,9 +581,11 @@ mod tests {
             assert_eq!(bpf::bpf([6, pin.as_ptr() as u64, 24, 0, 0, 0]), 0);
             assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
         }
-        let reader =
-            aim_storage::bpf_object::Mapped::open(&directory.join("map_netd_iface_stats_map"))
-                .unwrap();
+        let reader = aim_storage::bpf_object::Mapped::open(
+            &directory.join("map_netd_iface_stats_map"),
+            &crate::sys::bpf::objects_dir(),
+        )
+        .unwrap();
         assert_eq!(reader.map().lookup(&netif::LO.to_ne_bytes()), None);
         let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
@@ -646,9 +648,11 @@ mod tests {
             [4, 122, 1, 31]
         );
         assert_eq!(reader.map().lookup(&netif::ETH0.to_ne_bytes()), None);
-        let names =
-            aim_storage::bpf_object::Mapped::open(&directory.join("map_netd_iface_index_name_map"))
-                .unwrap();
+        let names = aim_storage::bpf_object::Mapped::open(
+            &directory.join("map_netd_iface_index_name_map"),
+            &crate::sys::bpf::objects_dir(),
+        )
+        .unwrap();
         assert_eq!(
             &names.map().lookup(&netif::LO.to_ne_bytes()).unwrap()[..3],
             b"lo\0"

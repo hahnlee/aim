@@ -250,7 +250,10 @@ impl NetworkStats {
     fn uid_map(&self) -> Result<&Mapped, Exception> {
         match self.app_uid_stats.get() {
             Some(m) => Ok(m),
-            None => match Mapped::open(&self.host.bpf()?.join(APP_UID_STATS_MAP)) {
+            None => match Mapped::open(
+                &self.host.bpf()?.join(APP_UID_STATS_MAP),
+                &aim_storage::bpf_object::objects_beside(self.host.bpf()?),
+            ) {
                 Ok(m) => Ok(self.app_uid_stats.get_or_init(|| m)),
                 // The original's BpfMapRO aborts without its map.
                 Err(e) => Err(Exception::new(
