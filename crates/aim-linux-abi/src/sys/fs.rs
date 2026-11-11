@@ -339,7 +339,9 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     // Linux publishes a new inode with its owner and mode already set. Keep
     // regular-file lookup/open behind the creator's directory lock until our
     // host inode has its guest metadata. Separate opens (including O_RDONLY)
-    // and bind aliases must share this lock across processes.
+    // and bind aliases must share this lock across processes; an open that
+    // neither creates nor truncates goes without it while no creation is in
+    // progress there, and again under it if one began meanwhile.
     if attrs::recording() && !r.read_only() {
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         let found = unsafe { libc::lstat(r.host.as_ptr(), &mut stat) } == 0;
@@ -356,9 +358,26 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
         if unsafe { libc::stat(parent.as_ptr(), &mut stat) } < 0 {
             return -(errno::last() as i64);
         }
-        return attrs::with_inode_lock(attrs::Host::Path(&parent), &stat, || {
-            Ok(openat_host(&r, flags, mode, id))
-        })
+        if flags & (O_CREAT | O_TRUNC) == 0
+            && let Some(quiet) = attrs::Quiet::of(&stat)
+        {
+            let fd = openat_host(&r, flags, mode, id);
+            if quiet.kept() {
+                return fd;
+            }
+            if fd >= 0 {
+                fdtab::on_close(fd as i32);
+                // SAFETY: the unpublished fd this open made.
+                unsafe { libc::close(fd as i32) };
+            }
+        }
+        let open = || Ok(openat_host(&r, flags, mode, id));
+        let parent = attrs::Host::Path(&parent);
+        return if flags & O_CREAT != 0 {
+            attrs::with_creation_lock(parent, &stat, open)
+        } else {
+            attrs::with_inode_lock(parent, &stat, open)
+        }
         .unwrap_or_else(|error| -(error as i64));
     }
     openat_host(&r, flags, mode, id)
@@ -3358,7 +3377,7 @@ mod dac_tests {
         let (started, ready) = mpsc::channel();
         let (sent, received) = mpsc::channel();
         let mut threads = Vec::new();
-        let early = attrs::with_inode_lock(attrs::Host::Path(&parent), &stat, || {
+        let early = attrs::with_creation_lock(attrs::Host::Path(&parent), &stat, || {
             // Pause the creator after the host inode exists but before its
             // guest metadata is published. Neither kind of open may see root:root.
             let file = fs::OpenOptions::new()
@@ -3411,6 +3430,51 @@ mod dac_tests {
             (stat.st_uid, stat.st_gid, stat.st_mode & 0o777),
             (1017, 1017, 0o600)
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+    /// An open of a published file goes without its directory's lock while
+    /// no creation is in progress there (#3007): another holder of the
+    /// lock, a chmod of the directory say, does not hold it up. A creation
+    /// that began since it looked sends it to the lock.
+    #[test]
+    fn an_open_goes_without_the_directory_lock_while_no_creation_is_in_progress() {
+        if fdtab::isolated_kernel_test(
+            "sys::fs::dac_tests::an_open_goes_without_the_directory_lock_while_no_creation_is_in_progress",
+        ) {
+            return;
+        }
+        use std::{sync::mpsc, time::Duration};
+        let (_guard, root) = vfs::test_view();
+        let directory = root.join("data/open-quiet");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("file"), b"").unwrap();
+        record("/data/open-quiet", 1017, 1017, 0o700);
+        record("/data/open-quiet/file", 1017, 1017, 0o600);
+        let app = identity(1017, 1017);
+        super::super::cred::init(app.clone(), None);
+        let parent = CString::new(directory.as_os_str().as_bytes()).unwrap();
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::stat(parent.as_ptr(), &mut stat) }, 0);
+        let (sent, received) = mpsc::channel();
+        let opener = attrs::with_inode_lock(attrs::Host::Path(&parent), &stat, || {
+            let app = app.clone();
+            let opener = std::thread::spawn(move || {
+                sent.send(open("/data/open-quiet/file", 0, 0, &app))
+                    .unwrap();
+            });
+            closed(received.recv_timeout(Duration::from_secs(5)).unwrap());
+            Ok(opener)
+        })
+        .unwrap();
+        opener.join().unwrap();
+        let quiet = attrs::Quiet::of(&stat).unwrap();
+        attrs::with_creation_lock(attrs::Host::Path(&parent), &stat, || {
+            assert!(attrs::Quiet::of(&stat).is_none());
+            Ok(())
+        })
+        .unwrap();
+        assert!(!quiet.kept());
+        assert!(attrs::Quiet::of(&stat).unwrap().kept());
         fs::remove_dir_all(directory).unwrap();
     }
     #[test]

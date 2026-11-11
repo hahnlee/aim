@@ -96,6 +96,10 @@ of POLLNVAL/EBADF, and epoll_ctl accepts EPOLLOUT on it; a pidfd adds POLLHUP
 once its process is reaped (#2699), which a hidden reap-watch kqueue
 (`NOTE_REAP`, or this process's own reap of a zombie) reports to an interest or
 poll with no events and as a second edge to an edge-triggered one (#2711).
+epoll_ctl accepts a bpf map fd (#3054): a ring buffer reports EPOLLIN while
+its producer position is ahead of its consumer's, another map EPOLLERR, read on
+each wait as no knote fires for them; a program fd stays EPERM. Poll and select
+still report a map file's host readiness.
 A pidfd's state is its open file's (the fd table's), so a dup, dup3 or
 F_DUPFD copy, and a fork child's copy of either, is the same pidfd for
 pidfd_send_signal, waitid(P_PIDFD) and poll/epoll, sharing one reap watch
@@ -514,7 +518,12 @@ open returning EACCES while the creator's host inode still appeared root-owned;
 SQLite's succeeding `O_RDONLY` retry made the connection read-only. The Rust
 publication test and 200 fresh-database rounds (direct and in-memory/attached
 connections, including a directory alias) pass after the fix. No guest boot was
-run (2026-10-28).
+run (2026-10-28). An open that neither creates nor truncates goes without that
+lock while no creation is in progress in the directory (a creation counter per
+directory inode slot, shared by every process), and again under it if one began
+meanwhile (#3007): a warm boot opens about 2,460 files without the lock and
+takes it only for its ~240 creating opens, against all 3,100 opens before
+(2026-11-11).
 
 Socket-layer traffic accounting now fills netd's guest-only interface counters
 and interface name map alongside its per-UID counters (#224, #1720). Focused

@@ -297,6 +297,25 @@ pub(super) fn mmap_pieces(
     Ok(pieces)
 }
 
+/// `bpf_map_poll`: the epoll events of object `fd` now. A ring buffer is
+/// readable while its producer is ahead of its consumer
+/// (`ringbuf_map_poll_kern`); a map without a `map_poll` reports EPOLLERR.
+/// None for a program or BTF, whose file has no poll (`file_can_poll`).
+pub(super) fn poll(fd: i32) -> Option<u32> {
+    const EPOLLIN: u32 = 0x1;
+    const EPOLLERR: u32 = 0x8;
+    const EPOLLRDNORM: u32 = 0x40;
+    let (h, _) = read_header(fd)?;
+    if h.kind != KIND_MAP {
+        return None;
+    }
+    Some(match mapped(fd).ok()?.ring_available() {
+        Some(0) => 0,
+        Some(_) => EPOLLIN | EPOLLRDNORM,
+        None => EPOLLERR,
+    })
+}
+
 /// The header of object file `fd`, if it is one.
 fn read_header(fd: i32) -> Option<(Header, libc::stat)> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -1559,6 +1578,68 @@ mod tests {
             -(EINVAL as i64)
         );
         assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+    }
+
+    /// epoll as `bpf_map_poll` reports (#3054): a ring buffer readable
+    /// while its producer is ahead of its consumer, edge-triggered once per
+    /// change; another map EPOLLERR; a program not pollable.
+    #[test]
+    fn epoll_polls_maps_as_bpf_map_poll() {
+        use super::super::epoll::{epoll_create1, epoll_ctl, epoll_pwait};
+        let mut ring = [0u32; 24];
+        ring[..5].copy_from_slice(&[RINGBUF, 0, 0, PAGE as u32, 0]);
+        let rb = call(MAP_CREATE, &mut ring);
+        assert!(rb >= 0, "{rb}");
+        let mut hash = [0u32; 24];
+        hash[..5].copy_from_slice(&[HASH, 8, 4, 4, 0]);
+        let map = call(MAP_CREATE, &mut hash);
+        assert!(map >= 0, "{map}");
+        let mut prog = [0u32; 24];
+        prog[0] = 1;
+        prog[1] = 1;
+        let program = call(PROG_LOAD, &mut prog);
+        assert!(program >= 0, "{program}");
+        let ep = epoll_create1([0; 6]);
+        assert!(ep >= 0);
+        let ctl = |op: u64, fd: i64, events: u32| {
+            let event = [events as u64, fd as u64];
+            epoll_ctl([ep as u64, op, fd as u64, event.as_ptr() as u64, 0, 0])
+        };
+        let wait = || {
+            let mut out = [0u64; 4];
+            let n = epoll_pwait([ep as u64, out.as_mut_ptr() as u64, 2, 0, 0, 0]);
+            (0..n.max(0) as usize)
+                .map(|i| (out[2 * i] as u32, out[2 * i + 1] as i64))
+                .collect::<Vec<_>>()
+        };
+        // A position page of the ring buffer, as its producer and consumer
+        // write them.
+        let position = |page: i64, value: u64| {
+            // SAFETY: a local value written to the object file.
+            let written = unsafe {
+                libc::pwrite(rb as i32, (&raw const value).cast(), 8, page * PAGE as i64)
+            };
+            assert_eq!(written, 8);
+        };
+        assert_eq!(ctl(1, program, 1), -(EPERM as i64));
+        assert_eq!(ctl(1, rb, 0x41), 0);
+        assert_eq!(wait(), []);
+        position(1, 8);
+        assert_eq!(wait(), [(0x41, rb)]);
+        assert_eq!(wait(), [(0x41, rb)]);
+        position(0, 8);
+        assert_eq!(wait(), []);
+        position(1, 16);
+        // EPOLLET: once after its change.
+        assert_eq!(ctl(3, rb, 1 | 1 << 31), 0);
+        assert_eq!(wait(), [(0x1, rb)]);
+        assert_eq!(wait(), []);
+        assert_eq!(ctl(2, rb, 0), 0);
+        assert_eq!(ctl(1, map, 1), 0);
+        assert_eq!(wait(), [(0x8, map)]);
+        for fd in [ep, rb, map, program] {
+            assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        }
     }
 
     #[test]

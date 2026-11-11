@@ -27,7 +27,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{
     Mutex, OnceLock,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
 use crate::vfs;
@@ -682,6 +682,116 @@ pub fn with_inode_lock<T>(
     let result = action();
     drop(held);
     result
+}
+
+/// The creations begun and ended in the directories whose inode numbers
+/// share a slot of `<runtime>/inode-creations/<device>`, mapped once per
+/// process and device and shared by every process: an open of an existing
+/// file goes without its directory's lock while none is in progress there
+/// ([`Quiet`]). A creator that dies mid-creation leaves its slot's
+/// directories to the lock.
+#[repr(C)]
+struct Creations {
+    begun: AtomicU32,
+    ended: AtomicU32,
+}
+const CREATION_SLOTS: usize = 2048;
+
+fn creations(stat: &libc::stat) -> Result<&'static Creations, crate::errno::Errno> {
+    static MAPPED: Mutex<Vec<(i32, usize)>> = Mutex::new(Vec::new());
+    let mut mapped = MAPPED.lock().unwrap();
+    let base = match mapped.iter().find(|(device, _)| *device == stat.st_dev) {
+        Some(&(_, base)) => base,
+        None => {
+            use std::os::fd::AsRawFd;
+            let len = CREATION_SLOTS * std::mem::size_of::<Creations>();
+            let directory = vfs::runtime_dir()
+                .ok_or(crate::errno::EIO)?
+                .join("inode-creations");
+            let file = aim_storage::private_fd::PrivateFile::allocate(|| {
+                std::fs::create_dir_all(&directory)?;
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(directory.join(format!("{:x}", stat.st_dev as u32)))?;
+                file.set_len(len as u64)?;
+                Ok(file)
+            })
+            .map_err(|e| crate::errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)))?;
+            let prot = libc::PROT_READ | libc::PROT_WRITE;
+            // SAFETY: a shared mapping of the whole file, kept for the process.
+            let address = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    len,
+                    prot,
+                    libc::MAP_SHARED,
+                    file.as_raw_fd(),
+                    0,
+                )
+            };
+            if address == libc::MAP_FAILED {
+                return Err(crate::errno::last());
+            }
+            mapped.push((stat.st_dev, address as usize));
+            address as usize
+        }
+    };
+    let slot = stat.st_ino as usize % CREATION_SLOTS;
+    // SAFETY: a slot of the mapping above, which lives as long as the process.
+    Ok(unsafe { &*((base as *const Creations).add(slot)) })
+}
+
+/// [`with_inode_lock`] on directory `host` for an open that may create an
+/// inode in it and publish its metadata, which openers going without the
+/// lock see begin ([`Quiet`]).
+pub fn with_creation_lock<T>(
+    host: Host,
+    stat: &libc::stat,
+    action: impl FnOnce() -> Result<T, crate::errno::Errno>,
+) -> Result<T, crate::errno::Errno> {
+    if !recording() {
+        return action();
+    }
+    let creations = creations(stat)?;
+    with_inode_lock(host, stat, || {
+        struct Ended<'a>(&'a AtomicU32);
+        impl Drop for Ended<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        creations.begun.fetch_add(1, Ordering::SeqCst);
+        let _ended = Ended(&creations.ended);
+        action()
+    })
+}
+
+/// No creation in progress in a directory ([`with_creation_lock`]) when it
+/// was taken: what is opened there until [`Quiet::kept`] says none began
+/// since has its metadata published, as under the directory's lock.
+pub struct Quiet {
+    creations: &'static Creations,
+    begun: u32,
+}
+
+impl Quiet {
+    /// Directory `stat`'s, if none of its creations is in progress.
+    pub fn of(stat: &libc::stat) -> Option<Quiet> {
+        let creations = creations(stat).ok()?;
+        // Ended first: begun can only have caught up with it.
+        let ended = creations.ended.load(Ordering::SeqCst);
+        let begun = creations.begun.load(Ordering::SeqCst);
+        (begun == ended).then_some(Quiet { creations, begun })
+    }
+
+    /// Whether no creation began since: none can have ended either.
+    pub fn kept(&self) -> bool {
+        std::sync::atomic::fence(Ordering::SeqCst);
+        self.creations.begun.load(Ordering::SeqCst) == self.begun
+    }
 }
 
 /// Record a guest chown/chmod of `host` (only under a path map): on the

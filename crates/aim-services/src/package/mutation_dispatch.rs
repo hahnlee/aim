@@ -22,8 +22,10 @@ pub struct Dependencies {
     pub preferred: Arc<preferred::registry::Registry>,
     pub shell_restricted: Box<dyn Fn(i32) -> Result<bool, Exception> + Send + Sync>,
     pub enable_compressed: Box<dyn Fn(&str, i32) -> Result<bool, Exception> + Send + Sync>,
+    /// False when another publication superseded the stage before anything
+    /// of it was written.
     pub commit_preferred:
-        Box<dyn Fn(preferred::registry::Stage) -> Result<(), Exception> + Send + Sync>,
+        Box<dyn Fn(preferred::registry::Stage) -> Result<bool, Exception> + Send + Sync>,
     pub system_install_state: Box<dyn Fn(&str, bool, i32) -> Result<bool, Exception> + Send + Sync>,
     pub quarantine_enabled: bool,
 }
@@ -401,13 +403,9 @@ impl Prepared {
             }
             Finish::Mime { package, group } => {
                 if effects::mime_index_changed(before, after, package, group.as_deref())? {
-                    let stages = dependencies
+                    dependencies
                         .preferred
-                        .prepare_clear_all(Some(package))
-                        .map_err(|error| Exception::new(EX_ILLEGAL_STATE, error))?;
-                    for stage in stages {
-                        (dependencies.commit_preferred)(stage)?;
-                    }
+                        .clear_all(Some(package), &dependencies.commit_preferred)?;
                     let state = after.packages.get(package).ok_or_else(|| {
                         Exception::new(EX_ILLEGAL_STATE, "MIME package disappeared")
                     })?;

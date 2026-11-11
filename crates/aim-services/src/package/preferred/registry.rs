@@ -501,9 +501,12 @@ mod tests {
                 .len(),
             3
         );
-        for stage in registry.prepare_clear_all(Some("removed")).unwrap() {
-            registry.publish(stage).unwrap();
-        }
+        registry
+            .clear_all(Some("removed"), |stage| {
+                registry.publish(stage).unwrap();
+                Ok(true)
+            })
+            .unwrap();
         assert_eq!(
             registry
                 .snapshot(10)
@@ -593,6 +596,69 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    /// A removal's clear superseded by another publication before its write
+    /// is prepared again on the published resolver (#3058), including the
+    /// later users the shared removal list marks changed.
+    #[test]
+    fn clear_all_prepares_a_superseded_user_again() {
+        let registry = Registry::new(Arc::new(Provider(Mutex::new((1..=8).collect()))));
+        let mut first = Preferred::default();
+        first.add_preferred(activity("removed"), false);
+        registry.insert_user(0, first).unwrap();
+        let mut second = Preferred::default();
+        second.add_preferred(activity("kept"), false);
+        registry.insert_user(10, second).unwrap();
+        let add = |user, name: &str| {
+            let mut other = activity(name);
+            other.filter.add_action(name);
+            let stage = registry
+                .prepare_mutation(
+                    user,
+                    0,
+                    &super::super::Mutation::Add {
+                        activity: other,
+                        remove_existing: false,
+                    },
+                )
+                .unwrap()
+                .stage
+                .unwrap();
+            registry.publish(stage).unwrap();
+        };
+        let mut attempts = Vec::new();
+        let committed = registry
+            .clear_all(Some("removed"), |stage| {
+                attempts.push(stage.user);
+                // Another publication lands between each user's first
+                // prepare and its commit.
+                if attempts.iter().filter(|&&user| user == stage.user).count() == 1 {
+                    add(stage.user, "concurrent");
+                }
+                if registry.validate(&stage).is_err() {
+                    return Ok(false);
+                }
+                registry.publish(stage).unwrap();
+                Ok(true)
+            })
+            .unwrap();
+        assert_eq!(attempts, [0, 0, 10, 10]);
+        assert_eq!(committed, [0, 10]);
+        let packages = |user| -> Vec<_> {
+            registry
+                .snapshot(user)
+                .unwrap()
+                .unwrap()
+                .state
+                .preferred
+                .entries()
+                .iter()
+                .map(|entry| entry.component.package.clone())
+                .collect()
+        };
+        assert_eq!(packages(0), ["concurrent"]);
+        assert_eq!(packages(10), ["kept", "concurrent"]);
     }
 
     #[test]
@@ -1146,11 +1212,25 @@ pub trait Actions: Send + Sync {
 impl Registry {
     /// Settings USER_ALL iteration is ascending SparseArray user order and its
     /// shared removal list keeps later existing resolvers marked changed.
-    pub fn prepare_clear_all(&self, package: Option<&str>) -> Result<Vec<Stage>, String> {
+    /// `commit` returns false when another publication superseded a stage
+    /// before anything of it was written; that user's clear is then prepared
+    /// again on its current resolver, as the original's runs under mLock.
+    /// Returns the users whose resolver was committed, in commit order.
+    pub fn clear_all(
+        &self,
+        package: Option<&str>,
+        mut commit: impl FnMut(Stage) -> Result<bool, aim_binder_host::parcel::Exception>,
+    ) -> Result<Vec<i32>, aim_binder_host::parcel::Exception> {
+        let fail = |error: String| {
+            aim_binder_host::parcel::Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                error,
+            )
+        };
         let users = {
             let state = self.state.lock().unwrap();
             if state.revoked {
-                return Err("preferred registry is revoked".into());
+                return Err(fail("preferred registry is revoked".into()));
             }
             state
                 .users
@@ -1163,39 +1243,49 @@ impl Registry {
                 .collect::<Vec<_>>()
         };
         let mut removed = false;
-        let mut stages = Vec::new();
+        let mut committed = Vec::new();
         for (user, generation) in users {
-            let prepared = self.prepare_mutation(
-                user,
-                generation,
-                &super::Mutation::Clear {
-                    package: package.map(str::to_owned),
-                },
-            )?;
-            removed |= prepared.changed;
-            if let Some(stage) = prepared.stage {
-                stages.push(stage);
-            } else if removed {
-                let old = {
-                    let state = self.state.lock().unwrap();
-                    let old = state.users.get(&user).ok_or("preferred user changed")?;
-                    if old.snapshot.generation != generation {
-                        return Err("preferred user changed".into());
+            loop {
+                let prepared = self
+                    .prepare_mutation(
+                        user,
+                        generation,
+                        &super::Mutation::Clear {
+                            package: package.map(str::to_owned),
+                        },
+                    )
+                    .map_err(fail)?;
+                let stage = match prepared.stage {
+                    Some(stage) => stage,
+                    None if removed => {
+                        let old = {
+                            let state = self.state.lock().unwrap();
+                            state
+                                .users
+                                .get(&user)
+                                .ok_or_else(|| fail("preferred user changed".into()))?
+                                .clone()
+                        };
+                        Stage {
+                            user,
+                            before_generation: old.snapshot.generation,
+                            preferred: old.snapshot.state.clone(),
+                            preferred_order: old.snapshot.preferred_order.clone(),
+                            persistent_order: order(&old.persistent),
+                            cross_profile_order: order(&old.cross_profile),
+                            replacement: old,
+                        }
                     }
-                    old.clone()
+                    None => break,
                 };
-                stages.push(Stage {
-                    user,
-                    before_generation: generation,
-                    preferred: old.snapshot.state.clone(),
-                    preferred_order: old.snapshot.preferred_order.clone(),
-                    persistent_order: order(&old.persistent),
-                    cross_profile_order: order(&old.cross_profile),
-                    replacement: old,
-                });
+                if commit(stage)? {
+                    removed |= prepared.changed;
+                    committed.push(user);
+                    break;
+                }
             }
         }
-        Ok(stages)
+        Ok(committed)
     }
 }
 
