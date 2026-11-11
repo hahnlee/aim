@@ -631,6 +631,22 @@ fn object_path(fd: i32) -> Option<CString> {
     None
 }
 
+/// Whether `fd` is an object's (a map's, program's or type
+/// information's): a file the objects directory names, where all of an
+/// object's names are. Linux's are anon inodes, on no mount a path is on.
+pub(crate) fn is_object(fd: i32) -> bool {
+    let mut buf = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes at most PATH_MAX bytes.
+    if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(&buf[..n]));
+    objects_dir()
+        .canonicalize()
+        .is_ok_and(|dir| path.starts_with(dir))
+}
+
 /// The name in the objects directory of the object behind `fd` (a
 /// program's attachments are other names of its file).
 fn object_name(fd: i32) -> Option<std::ffi::OsString> {
@@ -1124,6 +1140,48 @@ mod tests {
             at,
             c"/data/linked".as_ptr() as u64,
             0,
+            0,
+        ]);
+        assert_eq!(link, -(errno::EXDEV as i64));
+        // Neither by its open file (AT_EMPTY_PATH, or its /proc/self/fd
+        // link), nor does an object fd (an anon inode) take a name.
+        let link_fd = |fd: i64, path: &std::ffi::CStr| {
+            super::super::fsops::linkat([
+                fd as u64,
+                c"".as_ptr() as u64,
+                at,
+                path.as_ptr() as u64,
+                super::super::fs::AT_EMPTY_PATH,
+                0,
+            ])
+        };
+        let path = open(c"/sys/fs/bpf/map", O_PATH);
+        assert!(path >= 0, "O_PATH: {path}");
+        assert_eq!(link_fd(path, c"/data/linked"), -(errno::EXDEV as i64));
+        assert_eq!(link_fd(path, c"/sys/fs/bpf/map"), -(EEXIST as i64));
+        assert_eq!(link_fd(path, c"/sys/fs/bpf/again"), 0);
+        assert!(bpffs.join("again").exists());
+        shut(path);
+        assert_eq!(link_fd(fd, c"/data/object"), -(errno::EXDEV as i64));
+        assert_eq!(link_fd(fd, c"/sys/fs/bpf/object"), -(errno::EXDEV as i64));
+        assert!(!root.join("data/object").exists());
+        let proc_host = root.join("run/proc-bpf");
+        std::fs::create_dir_all(&proc_host).unwrap();
+        vfs::add_mount(
+            "/proc",
+            proc_host.canonicalize().unwrap(),
+            vfs::Area::Kernfs,
+            "proc",
+            "proc",
+        )
+        .unwrap();
+        let magic = std::ffi::CString::new(format!("/proc/self/fd/{fd}")).unwrap();
+        let link = super::super::fsops::linkat([
+            at,
+            magic.as_ptr() as u64,
+            at,
+            c"/data/object".as_ptr() as u64,
+            0x400,
             0,
         ]);
         assert_eq!(link, -(errno::EXDEV as i64));

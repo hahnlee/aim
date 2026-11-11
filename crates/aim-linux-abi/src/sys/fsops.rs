@@ -522,15 +522,6 @@ pub fn linkat(a: [u64; 6]) -> i64 {
         (Some(_), None) | (None, Some(_)) => return -EXDEV,
         _ => {}
     }
-    // bpffs is its own mount: a pin neither leaves it nor a file enters
-    // it, after an existing new name's EEXIST.
-    if old
-        .as_ref()
-        .is_some_and(|old| in_bpffs(&old.guest) != in_bpffs(&new.guest))
-        && attrs::absent(&new.host)
-    {
-        return -EXDEV;
-    }
     // An open file, by AT_EMPTY_PATH or its /proc/self/fd link (how an
     // O_TMPFILE file gets its name).
     let fd = match &old {
@@ -538,6 +529,23 @@ pub fn linkat(a: [u64; 6]) -> i64 {
         Some(r) if flags & AT_SYMLINK_FOLLOW != 0 => tmpfile::proc_fd(&r.guest),
         Some(_) => None,
     };
+    // bpffs is its own mount: a pin neither leaves it nor a file enters
+    // it. A bpf object (an anon inode) is on no mount a name is on. Both
+    // after an existing new name's EEXIST.
+    let crosses = match (fd, &old) {
+        (Some(fd), _) => super::bpf::is_object(fd) || fd_in_bpffs(fd) != in_bpffs(&new.guest),
+        (None, Some(old)) => in_bpffs(&old.guest) != in_bpffs(&new.guest),
+        (None, None) => unreachable!(),
+    };
+    if crosses {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: host path, local buffer.
+        return if unsafe { libc::lstat(new.host.as_ptr(), &mut stat) } == 0 {
+            -(crate::errno::EEXIST as i64)
+        } else {
+            -EXDEV
+        };
+    }
     match (fd, old) {
         (Some(fd), _) => {
             if let Err(error) = super::fscrypt::link(Host::Fd(fd), &new.host) {
@@ -566,6 +574,18 @@ const RENAME_WHITEOUT: u64 = 4;
 /// Whether guest path `guest` is in a bpffs mount.
 fn in_bpffs(guest: &str) -> bool {
     vfs::fstype(guest).as_deref() == Some("bpf")
+}
+
+/// Whether open file `fd` is in a bpffs mount.
+fn fd_in_bpffs(fd: i32) -> bool {
+    let mut buf = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes at most PATH_MAX bytes.
+    if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    let host = std::path::Path::new(std::ffi::OsStr::from_bytes(&buf[..len]));
+    vfs::guest_path_of_host(host).is_some_and(|guest| in_bpffs(&guest))
 }
 
 pub fn renameat2(a: [u64; 6]) -> i64 {
