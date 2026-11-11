@@ -113,6 +113,15 @@ impl UpdateOwnership {
         changed
     }
 
+    /// How many reads are queued, to drop those of a rejected scan.
+    pub(in crate::package) fn queued(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub(in crate::package) fn drop_queued_after(&mut self, queued: usize) {
+        self.pending.truncate(queued);
+    }
+
     /// InstallPackageHelper queues reads only for eligible system providers.
     /// Rescanning a provider retains existing contributions until removal;
     /// addToUpdateOwnerDenyList accumulates rather than replacing its list.

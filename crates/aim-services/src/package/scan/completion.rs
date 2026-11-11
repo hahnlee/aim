@@ -120,13 +120,17 @@ impl SigningScan {
             }
         }
         self.refresh_init_apex(code);
-        let mut staged = self.clone();
-        let candidate =
-            staged.apply_staged_existing(code, update, saved_users, all_users, disabled)?;
-        let candidate = staged.finish_init_apex(candidate, &code.location)?;
-        let completed = staged.finish_staged_scan_metadata(candidate, apks, inputs)?;
-        *self = staged;
-        Ok(completed)
+        let undo = self.undo_record(&identity.internal_name);
+        let completed = (|| {
+            let candidate =
+                self.apply_staged_existing(code, update, saved_users, all_users, disabled)?;
+            let candidate = self.finish_init_apex(candidate, &code.location)?;
+            self.finish_staged_scan_metadata(candidate, apks, inputs)
+        })();
+        if completed.is_err() {
+            self.roll_back(undo);
+        }
+        completed
     }
 
     /// Original-name creation copies the original setting after source

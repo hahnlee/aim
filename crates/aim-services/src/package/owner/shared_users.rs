@@ -187,6 +187,15 @@ impl SharedUser {
         self.retained_instances.push(std::sync::Arc::new(value));
         Ok(())
     }
+    /// Whether a retained setting of `name` aliases its users.
+    pub(in crate::package) fn retains(&self, name: &str) -> bool {
+        self.retained.contains_key(name)
+            || self
+                .retained_instances
+                .iter()
+                .any(|value| value.package.name == name)
+    }
+
     pub(in crate::package) fn update_user_aliases(
         &mut self,
         name: &str,

@@ -634,7 +634,7 @@ fn current_factory_record_survives_loading_completion_and_real_existing_scan() {
     owner
         .scan_existing(
             &replacement,
-            update,
+            update.clone(),
             &saved_users,
             Some(&users),
             Some(&current),
@@ -651,6 +651,39 @@ fn current_factory_record_survives_loading_completion_and_real_existing_scan() {
         owner.disabled_loaded_packages()["factory.example"].package,
         current.parsed
     );
+    // Rejections after the scan replaced the setting and signer (a different
+    // saved update owner), and after it registered the code (the seInfo
+    // compatibility owner fails), each leave the owner as it was.
+    let accepted = owner.settings.packages[0].clone();
+    let mut foreign = accepted.clone();
+    foreign.install_source.update_owner = Some("other.store".into());
+    let failing = |_: &AndroidPackage| Err::<i32, _>("compatibility owner failed".to_string());
+    for (saved, compatibility) in [
+        (&foreign, &compat as &dyn SeInfoCompatibility),
+        (&accepted, &failing),
+    ] {
+        let mut completion = inputs();
+        completion.seinfo.compatibility = compatibility;
+        completion.context.mode = AbiScanMode::Existing {
+            first_boot_or_upgrade: false,
+            old_was_stub: false,
+            saved: Some(saved),
+        };
+        completion.context.updated = true;
+        let before = owner.clone();
+        let error = owner
+            .scan_existing(
+                &replacement,
+                update.clone(),
+                &saved_users,
+                Some(&users),
+                Some(&current),
+                &apks,
+                completion,
+            )
+            .unwrap_err();
+        assert_eq!(owner, before, "{error:?}");
+    }
 }
 
 fn assert_init_update_owner_policy(base: &SigningScan, admitted: &NewPackageOutcome) {

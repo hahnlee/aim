@@ -218,6 +218,25 @@ impl AppIds {
         }
     }
 
+    /// The detached settings of `name`, which aliasing its users changes.
+    pub(in crate::package) fn detached_of(
+        &self,
+        name: &str,
+    ) -> Vec<(i32, std::sync::Arc<DetachedSetting>)> {
+        self.detached
+            .iter()
+            .filter(|(_, v)| v.package.name == name)
+            .map(|(id, v)| (*id, v.clone()))
+            .collect()
+    }
+
+    pub(in crate::package) fn restore_detached(
+        &mut self,
+        saved: Vec<(i32, std::sync::Arc<DetachedSetting>)>,
+    ) {
+        self.detached.extend(saved);
+    }
+
     pub(in crate::package) fn detach_user_aliases(&mut self, name: &str) {
         for value in self
             .detached

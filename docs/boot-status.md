@@ -1099,9 +1099,12 @@ and construction (#2421): three matched warm second boots reduce median raw scan
 from 2.028 to 1.214 s; median `boot_completed` is 6.216 s
 against 6.978 s before (2026-10-30). The image scan parses every scan
 directory's packages in one parallel batch and takes the results in scan
-order, and a boot-scanned package's owner is staged once (it was cloned three
-times per package); the system image scan takes 1.4-1.7 s fresh and
-0.27-0.35 s warm; the APEX modules are parsed and verified in parallel.
+order. A rejected saved package is rolled back from an undo record of the
+entries its scan writes, not a copy of the whole scan owner per package, and
+keyset registration and seInfo assignment change the owner in place (#2996);
+the system image scan takes 1.10-1.15 s fresh and 0.15-0.19 s warm (from
+0.28-0.53 s warm, 2026-11-11, load 9-12); the APEX modules are parsed and
+verified in parallel.
 The in-process services read properties from the areas mapped once, with
 bionic's serial protocol, and the package boot's live property capture is
 reused until the global property serial changes (a boot makes about 4,500

@@ -146,10 +146,30 @@ pub fn register(
     {
         return Err("upgrade keyset has no corresponding definition".into());
     }
-    let mut staged = settings.clone();
-    initialize_references(&mut staged);
-    let old = staged.packages[at].key_set_data.proper_signing_key_set;
-    let unchanged = staged
+    // Only the key sets and this package's references change: keep those to
+    // restore on an error rather than a copy of every package's setting.
+    let saved = (
+        settings.key_sets.clone(),
+        settings.packages[at].key_set_data.clone(),
+    );
+    let registered = apply(settings, at, &signing, aliases, defined.is_some(), upgrades);
+    if registered.is_err() {
+        (settings.key_sets, settings.packages[at].key_set_data) = saved;
+    }
+    registered
+}
+
+fn apply(
+    settings: &mut Settings,
+    at: usize,
+    signing: &[Vec<u8>],
+    aliases: Vec<(String, Vec<Vec<u8>>)>,
+    defined: bool,
+    upgrades: &[String],
+) -> Result<(), String> {
+    initialize_references(settings);
+    let old = settings.packages[at].key_set_data.proper_signing_key_set;
+    let unchanged = settings
         .key_sets
         .key_sets
         .iter()
@@ -158,7 +178,7 @@ pub fn register(
             let existing: BTreeSet<_> = ids
                 .iter()
                 .filter_map(|id| {
-                    staged
+                    settings
                         .key_sets
                         .public_keys
                         .iter()
@@ -169,13 +189,13 @@ pub fn register(
             existing == signing.iter().collect()
         });
     if !unchanged {
-        staged.packages[at].key_set_data.proper_signing_key_set = -1;
-        release(&mut staged, old);
-        let id = add_set(&mut staged, &signing)?;
-        staged.packages[at].key_set_data.proper_signing_key_set = id;
+        settings.packages[at].key_set_data.proper_signing_key_set = -1;
+        release(settings, old);
+        let id = add_set(settings, signing)?;
+        settings.packages[at].key_set_data.proper_signing_key_set = id;
     }
-    if defined.is_some() {
-        let old: Vec<_> = staged.packages[at]
+    if defined {
+        let old: Vec<_> = settings.packages[at]
             .key_set_data
             .defined_key_sets
             .iter()
@@ -183,37 +203,36 @@ pub fn register(
             .collect();
         let mut added = Vec::new();
         for (alias, keys) in aliases {
-            added.push((Some(alias), add_set(&mut staged, &keys)?));
+            added.push((Some(alias), add_set(settings, &keys)?));
         }
-        staged.packages[at].key_set_data.defined_key_sets.clear();
+        settings.packages[at].key_set_data.defined_key_sets.clear();
         for (alias, id) in added {
-            staged.packages[at]
+            settings.packages[at]
                 .key_set_data
                 .add_defined_key_set(id, alias);
         }
-        staged.packages[at].key_set_data.upgrade_key_sets.clear();
+        settings.packages[at].key_set_data.upgrade_key_sets.clear();
         for alias in upgrades {
-            let id = staged.packages[at]
+            let id = settings.packages[at]
                 .key_set_data
                 .defined_key_sets
                 .iter()
                 .find(|(name, _)| name.as_deref() == Some(alias.as_str()))
                 .unwrap()
                 .1;
-            if !staged.packages[at]
+            if !settings.packages[at]
                 .key_set_data
                 .upgrade_key_sets
                 .contains(&id)
             {
-                staged.packages[at].key_set_data.upgrade_key_sets.push(id);
+                settings.packages[at].key_set_data.upgrade_key_sets.push(id);
             }
         }
         for id in old {
-            release(&mut staged, id);
+            release(settings, id);
         }
     }
-    staged.key_sets.versioned = true;
-    *settings = staged;
+    settings.key_sets.versioned = true;
     Ok(())
 }
 
