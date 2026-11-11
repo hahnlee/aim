@@ -10,6 +10,9 @@
 service aim-system /system_ext/bin/aim-system
     class main
     user system
-    group system
+    # ZygoteInit.forkSystemServer's groups: the original modules here read
+    # what system_server reads by group, e.g. the Connectivity module's
+    # bpffs maps (0460 root:net_bw_acct, net_bw_stats).
+    group system radio bluetooth graphics input audio camera log compass mount wifi usb gps media_rw mtp package_info reserved_disk net_bt_admin net_bt inet net_admin net_bw_stats net_bw_acct readproc wakelock uhid readtracefs
     # ZygoteInit gives system_server IPC_LOCK for the original PinnerService.
     capabilities IPC_LOCK
