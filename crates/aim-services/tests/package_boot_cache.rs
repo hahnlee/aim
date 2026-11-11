@@ -147,13 +147,13 @@ fn cached_second_scan_equals_cold_image_scan() {
     let fixture = Fixture::new("parity");
     let apks = apks(&original, original.with_extension("identity"));
     let apexes = apexes(&original);
-    let first = Image::parse_cached(&apks, &apexes, Some(&fixture.cache())).unwrap();
+    let first = Image::parse_cached(&apks, &apexes, Some(&fixture.cache()), None).unwrap();
     let before = receipts(&fixture.cache());
     assert_eq!(before.len(), first.packages.len() * 2);
     let first_signing = collect(&apks, &first, &[]);
     // A second parser and a new image scan, sharing only disk cache/settings.
     let second_apks = self::apks(&original, original.with_extension("identity"));
-    let warm = Image::parse_cached(&second_apks, &apexes, Some(&fixture.cache())).unwrap();
+    let warm = Image::parse_cached(&second_apks, &apexes, Some(&fixture.cache()), None).unwrap();
     assert_eq!(
         receipts(&fixture.cache()),
         before,
@@ -205,13 +205,13 @@ fn changed_apk_and_configuration_invalidate_cached_parse() {
     fs::write(&blocked, b"not a directory").unwrap();
     equal(
         &cold,
-        &Image::parse_cached(&apks, &[], Some(&blocked)).unwrap(),
+        &Image::parse_cached(&apks, &[], Some(&blocked), None).unwrap(),
     );
-    let first = Image::parse_cached(&apks, &[], Some(&cache)).unwrap();
+    let first = Image::parse_cached(&apks, &[], Some(&cache), None).unwrap();
     equal(&cold, &first);
     // Replace a copied APK by another valid APK; the original tree is read-only.
     fs::copy(original.join("system/framework/framework-res.apk"), &target).unwrap();
-    let changed = Image::parse_cached(&apks, &[], Some(&cache)).unwrap();
+    let changed = Image::parse_cached(&apks, &[], Some(&cache), None).unwrap();
     equal(&changed, &Image::parse(&apks, &[]).unwrap());
     assert_ne!(
         first.packages.last().unwrap().parsed,
@@ -221,13 +221,13 @@ fn changed_apk_and_configuration_invalidate_cached_parse() {
     fs::write(&identity, b"image-two").unwrap();
     equal(
         &changed,
-        &Image::parse_cached(&apks, &[], Some(&cache)).unwrap(),
+        &Image::parse_cached(&apks, &[], Some(&cache), None).unwrap(),
     );
     assert_ne!(old, receipts(&cache));
     let old = receipts(&cache);
     apks.platform.density_dpi = Some(640);
     equal(
-        &Image::parse_cached(&apks, &[], Some(&cache)).unwrap(),
+        &Image::parse_cached(&apks, &[], Some(&cache), None).unwrap(),
         &Image::parse(&apks, &[]).unwrap(),
     );
     assert_ne!(old, receipts(&cache));
@@ -237,7 +237,7 @@ fn changed_apk_and_configuration_invalidate_cached_parse() {
     ));
     fs::write(&entry, b"torn parcel").unwrap();
     equal(
-        &Image::parse_cached(&apks, &[], Some(&cache)).unwrap(),
+        &Image::parse_cached(&apks, &[], Some(&cache), None).unwrap(),
         &Image::parse(&apks, &[]).unwrap(),
     );
 }
@@ -317,13 +317,13 @@ fn benchmark_raw_scan_and_signing() {
             fs::remove_dir_all(fixture.cache()).unwrap();
         }
         let start = Instant::now();
-        let cold = Image::parse_cached(&apks, &apexes, Some(&fixture.cache())).unwrap();
+        let cold = Image::parse_cached(&apks, &apexes, Some(&fixture.cache()), None).unwrap();
         let parse_cold = start.elapsed();
         let codes = collect(&apks, &cold, &[]);
         let cold_total = start.elapsed();
         let saved = saved(&apks, &codes);
         let start = Instant::now();
-        let warm = Image::parse_cached(&apks, &apexes, Some(&fixture.cache())).unwrap();
+        let warm = Image::parse_cached(&apks, &apexes, Some(&fixture.cache()), None).unwrap();
         let parse_warm = start.elapsed();
         let warm_codes = collect(&apks, &warm, &saved);
         let warm_total = start.elapsed();
