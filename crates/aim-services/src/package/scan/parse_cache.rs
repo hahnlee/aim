@@ -20,6 +20,8 @@ pub(super) struct Cache {
 pub(super) struct Entry {
     path: PathBuf,
     stamp: [u8; 32],
+    /// The directories the parser descends into below the scanned path.
+    descent: String,
 }
 
 impl Cache {
@@ -72,9 +74,11 @@ impl Cache {
     pub fn entry(&self, host: &Path, path: &str, flags: i32) -> Option<Entry> {
         let mut key = self.base.clone();
         key.update(format!("{path}\0{flags}\0"));
-        stamps(host, &mut key, 0)?;
+        let mut descent = String::new();
+        stamps(host, &mut key, 0, &mut descent)?;
         let name = Path::new(path).file_name()?.to_str()?;
         Some(Entry {
+            descent,
             // PackageCacher.getCacheKey uses the guest absolute path, not the
             // host mount path (which can differ between boots).
             path: self.dir.join(format!("{name}-{flags}-{}", java_hash(path))),
@@ -97,7 +101,13 @@ impl Cache {
             return None;
         }
         let parsed = AndroidPackage::read_cache_entry(&bytes).ok()?;
-        (parsed.path.as_deref() == Some(path)).then_some(parsed)
+        // PackageCacher compares the scanned path with the parsed one,
+        // which never matches a package in a directory of its own (a data
+        // app's /data/app/~~X/<package>-Y, parsed from /data/app/~~X), so
+        // its cache never serves those. The key here stamps the descent,
+        // so the parse's path is the scanned path with that descent.
+        let descended = parsed.path.as_deref()?.strip_prefix(path)?;
+        (descended == entry.descent).then_some(parsed)
     }
 
     /// Sidecar includes the parcel digest: interruption between the two atomic
@@ -111,7 +121,7 @@ impl Cache {
     }
 }
 
-fn stamps(path: &Path, key: &mut Sha256, depth: usize) -> Option<()> {
+fn stamps(path: &Path, key: &mut Sha256, depth: usize, descent: &mut String) -> Option<()> {
     let meta = fs::metadata(path).ok()?;
     key.update(format!(
         "{}:{}:{}\0",
@@ -133,12 +143,14 @@ fn stamps(path: &Path, key: &mut Sha256, depth: usize) -> Option<()> {
             && one.path().is_dir()
         {
             key.update(format!("{:?}\0", one.file_name()));
-            stamps(&one.path(), key, depth + 1)?;
+            descent.push('/');
+            descent.push_str(one.file_name().to_str()?);
+            stamps(&one.path(), key, depth + 1, descent)?;
         } else {
             for entry in children {
                 if entry.path().extension().is_some_and(|ext| ext == "apk") {
                     key.update(format!("{:?}\0", entry.file_name()));
-                    stamps(&entry.path(), key, depth + 1)?;
+                    stamps(&entry.path(), key, depth + 1, &mut String::new())?;
                 }
             }
         }
@@ -259,6 +271,48 @@ mod tests {
         fs::remove_file(package.join("split.apk")).unwrap();
         fs::write(package.join("base.apk"), b"changed").unwrap();
         assert_ne!(entry.stamp, cache.entry(&package, path, 16).unwrap().stamp);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A data app's package directory, nested in its random directory, is
+    /// read back for the scanned path with that descent, and only for it.
+    #[test]
+    fn serves_a_package_parsed_from_its_nested_directory() {
+        let root = std::env::temp_dir().join(format!("aim-cache-nested-{}", std::process::id()));
+        let random = root.join("~~r1==");
+        let package = random.join("app.example-p1==");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("base.apk"), b"one").unwrap();
+        let cache = Cache {
+            dir: root.clone(),
+            base: Sha256::new(),
+        };
+        let path = "/data/app/~~r1==";
+        let parsed = |path: &str| {
+            AndroidPackage {
+                path: Some(path.into()),
+                feature_flag_state: Some(vec![]),
+                ..Default::default()
+            }
+            .to_cache_entry()
+            .unwrap()
+            .bytes
+        };
+        let entry = cache.entry(&random, path, 0).unwrap();
+        let bytes = parsed("/data/app/~~r1==/app.example-p1==");
+        cache.store(&entry, &bytes);
+        assert_eq!(
+            cache.read(&entry, path),
+            Some(AndroidPackage::read_cache_entry(&bytes).unwrap())
+        );
+        for other in [
+            path,
+            "/data/app/~~r1==/app.example-p2==",
+            "/data/app/~~r2==",
+        ] {
+            cache.store(&entry, &parsed(other));
+            assert!(cache.read(&entry, path).is_none(), "{other}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }
