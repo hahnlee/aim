@@ -687,25 +687,42 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
     // follow the head in the blob. They are taken once the child has been
     // started, so they are put in place last.
     let head = w.written();
-    let tracked = super::super::verity_pager::tracked_identities().map_err(|error| {
+    let io = |error: std::io::Error| {
         -(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64)
-    })?;
-    let identity_count = tracked.len();
-    // Without verified mappings there is nothing to hand over.
-    let fork_lease = (!tracked.is_empty())
-        .then(crate::verity_client)
-        .flatten()
-        .map(|client| client.fork_lease(tracked))
-        .transpose()
-        .map_err(|error| {
-            crate::diag!(
-                "[linux-abi] fork mapping admission ({identity_count} identities): {error}"
-            );
-            -(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64)
-        })?;
-    let pager = super::super::verity_pager::ForkSnapshot::capture().map_err(|error| {
-        -(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64)
-    })?;
+    };
+    // From here until the memory and its records are copied, no mapping
+    // changes, as Linux holds mmap_lock for writing while it copies the
+    // mappings. The lease is taken first: it waits for enables in
+    // progress, which hold the epoch; a verified mapping made meanwhile
+    // needs another one.
+    let (fork_lease, epoch) = loop {
+        let tracked = super::super::verity_pager::tracked_identities().map_err(io)?;
+        let identity_count = tracked.len();
+        // Without verified mappings there is nothing to hand over.
+        let fork_lease = (!tracked.is_empty())
+            .then(crate::verity_client)
+            .flatten()
+            .map(|client| client.fork_lease(tracked.iter().copied()))
+            .transpose()
+            .map_err(|error| {
+                crate::diag!(
+                    "[linux-abi] fork mapping admission ({identity_count} identities): {error}"
+                );
+                io(error)
+            })?;
+        let epoch = super::super::verity_pager::exclusive_mutation();
+        if super::super::verity_pager::tracked_identities()
+            .map_err(io)?
+            .is_subset(&tracked)
+        {
+            break (fork_lease, epoch);
+        }
+        drop(epoch);
+        if let Some(lease) = fork_lease {
+            lease.abort().map_err(io)?;
+        }
+    };
+    let mut pager = super::super::verity_pager::ForkSnapshot::capture().map_err(io)?;
     let own = OWN_FDS.write().unwrap_or_else(|e| e.into_inner());
     let fd_guard = fdtab::lifecycle();
     let writer_receipts = fdtab::fork_writer_receipts().map_err(|error| -(error as i64))?;
@@ -717,9 +734,6 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
         w.retain_private(diag);
     }
     let private_receipts = w.take_private().map_err(|error| -(error as i64))?;
-    pager.write(&mut w).map_err(|error| {
-        -(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64)
-    })?;
     let mut transfers = pager.private_fds();
     {
         use std::os::fd::AsRawFd;
@@ -737,17 +751,12 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
         }
     }
     let port = new_port()?;
-    let spawned = spawn(exe, runtime, &fds, &transfers, port).map(|pid| (pid, fds));
+    let spawned = spawn(exe, runtime, &fds, &transfers, port);
     drop(fd_guard);
     drop(own);
 
     let pid = match spawned {
-        Ok((pid, fds)) => {
-            w.seq(fds.iter(), |w, (fd, cloexec, status)| {
-                w.i32(*fd);
-                w.bool(*cloexec);
-                w.i32(*status);
-            });
+        Ok(pid) => {
             if let Err(error) = crate::vfs::publish_fork_mounts(pid, &mount_text) {
                 abandon(pid, port);
                 return Err(-(error as i64));
@@ -775,12 +784,14 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
         }
     };
     // The memory is copied while the child starts (exec, dyld, the
-    // runtime's own set-up); it asks for its state only after that. No
-    // mapping changes between the copy and its records, as Linux holds
-    // mmap_lock for writing while it copies the mappings.
-    let mut memory = Writer::default();
-    let epoch = super::super::verity_pager::exclusive_mutation();
-    let snap = match snapshot() {
+    // runtime's own set-up); it asks for its state only after that. The
+    // verified mappings' page states are held still meanwhile.
+    let snap = pager.freeze().map_err(io).and_then(|frozen| {
+        let snap = snapshot();
+        drop(frozen);
+        snap
+    });
+    let snap = match snap {
         Ok(snap) => snap,
         Err(error) => {
             drop(epoch);
@@ -788,9 +799,20 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
             return Err(error);
         }
     };
+    let mut memory = Writer::default();
     save_regions(&mut memory, &snap.regions);
     state::save_process(&mut memory);
+    let written = pager.write(&mut w);
     drop(epoch);
+    if let Err(error) = written {
+        abandon(pid, port);
+        return Err(io(error));
+    }
+    w.seq(fds.iter(), |w, (fd, cloexec, status)| {
+        w.i32(*fd);
+        w.bool(*cloexec);
+        w.i32(*status);
+    });
     let mut blob = w.into_bytes();
     blob.splice(head..head, memory.into_bytes());
     // Only the child holds a send right now: its exit is a no-senders

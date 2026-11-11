@@ -235,15 +235,14 @@ pub fn mmap(a: [u64; 6]) -> i64 {
             return -(ENOMEM as i64);
         }
     }
-    let result = mmap_guest(a);
-    if result >= 0 {
-        let lo = result as u64;
+    mmap_guest(a, |lo| {
         vm_account::with(|s| s.map(lo, lo + len, kind));
         super::vma_names::forget(lo, lo + len);
-    }
-    result
+    })
 }
-fn mmap_guest(mut a: [u64; 6]) -> i64 {
+/// The mapping itself; `mapped` records a new one at its address, under the
+/// VM epoch with it.
+fn mmap_guest(mut a: [u64; 6], mapped: impl FnOnce(u64)) -> i64 {
     if a[3] & MAP_ANONYMOUS != 0 {
         let _epoch = super::verity_pager::mutation();
         let _mapping = super::memfd::mapping_change();
@@ -252,6 +251,9 @@ fn mmap_guest(mut a: [u64; 6]) -> i64 {
             && let Err(error) = super::verity_pager::reconcile_memberships()
         {
             return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64);
+        }
+        if result >= 0 {
+            mapped(result as u64);
         }
         return result;
     }
@@ -331,6 +333,9 @@ fn mmap_guest(mut a: [u64; 6]) -> i64 {
         && let Err(error) = super::verity_pager::reconcile_memberships()
     {
         return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64);
+    }
+    if result >= 0 {
+        mapped(result as u64);
     }
     result
 }

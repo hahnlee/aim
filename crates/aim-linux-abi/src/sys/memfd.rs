@@ -154,16 +154,24 @@ pub(super) fn install<T>(fd: i32, k: Key, publish: impl FnOnce() -> T) -> T {
     })
 }
 
-pub(super) fn closed(k: Key) {
-    let last = with(|m| {
+/// A descriptor of memfd `k` was closed; whether that was its last
+/// reference, so that it is to be reclaimed ([`reclaim_closed`]).
+pub(super) fn closed(k: Key) -> bool {
+    with(|m| {
         let Some(f) = m.get_mut(&k) else { return false };
         f.orphaned =
             fdtab::fds_where(|kind| matches!(kind, Kind::Memfd(key) if *key == k)).is_empty();
         f.orphaned && f.views.is_empty()
-    });
-    if last {
-        reclaim();
-    }
+    })
+}
+
+/// Reclaim the memfds whose last descriptor was closed, outside the fd
+/// table's lifecycle lock: the backing is unmapped and the record dropped
+/// under the VM epoch, as any other unmap, so a fork never copies a
+/// half-reclaimed memfd or records one it does not copy.
+pub(super) fn reclaim_closed() {
+    let _epoch = super::verity_pager::mutation();
+    reclaim();
 }
 
 /// Retry only objects with no descriptors, including private syscall pins.

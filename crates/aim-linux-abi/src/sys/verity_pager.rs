@@ -810,6 +810,11 @@ pub struct ForkSnapshot {
     mappings: Vec<ForkMapping>,
     carriers: Vec<super::fdtab::ForkPrivateFd>,
 }
+/// The page states of every mapping, held still ([`ForkSnapshot::freeze`]).
+pub struct Frozen {
+    _pages: Vec<std::sync::MutexGuard<'static, Vec<PageState>>>,
+    _mappings: std::sync::MutexGuard<'static, Vec<Registration>>,
+}
 impl ForkSnapshot {
     pub fn capture() -> io::Result<Self> {
         let mappings: Vec<ForkMapping> = MAPPINGS
@@ -853,6 +858,33 @@ impl ForkSnapshot {
             }
         }
         Ok(Self { mappings, carriers })
+    }
+    /// Read the page states again and hold them still, no page faulted in
+    /// or discarded, until the result is dropped: the fork copies the
+    /// memory they describe meanwhile. The caller holds the VM epoch
+    /// exclusively since [`capture`](Self::capture), so the mappings are
+    /// the ones captured.
+    pub fn freeze(&mut self) -> io::Result<Frozen> {
+        let mappings = MAPPINGS.lock().unwrap();
+        let pages: Vec<_> = mappings
+            .iter()
+            .map(|registration| unsafe { &*registration.mapping }.operation.lock().unwrap())
+            .collect();
+        if pages.len() != self.mappings.len() {
+            return Err(io::Error::from_raw_os_error(libc::EBUSY));
+        }
+        for ((mapping, registration), held) in
+            self.mappings.iter_mut().zip(mappings.iter()).zip(&pages)
+        {
+            if unsafe { &*registration.mapping }.base != mapping.base {
+                return Err(io::Error::from_raw_os_error(libc::EBUSY));
+            }
+            mapping.pages = (*held).clone();
+        }
+        Ok(Frozen {
+            _pages: pages,
+            _mappings: mappings,
+        })
     }
     /// Physical carriers only; the spawn owner must never publish them as guest FDs.
     pub fn private_fds(&self) -> Vec<(i32, i32)> {

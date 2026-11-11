@@ -66,9 +66,14 @@ The design is the one Cygwin uses on Windows. The parent spawns a fresh
    (`sys/fork/state.rs`). What goes with the descriptors is saved with the
    fd table before the spawn; the rest, the records of the memory among
    it (stub islands, the program break, mapping names, file copies, memfd
-   and ashmem views), after the memory is copied, so that the child never
-   has a record older than the memory it holds. Each module saves and
-   restores its own part:
+   and ashmem views), after the memory is copied. From before the fd
+   table is saved until then, the fork holds the VM epoch exclusively, as
+   Linux holds mmap_lock for writing while it copies the mappings: no
+   mmap, munmap, mremap, madvise, mprotect or brk, and no memfd reclaim,
+   runs meanwhile, and the verified mappings' page states are held still
+   (no page faulted in or discarded) while the memory is copied. So the
+   child's records and page states are those of the memory it holds. Each
+   module saves and restores its own part:
    - the fd table: each fd's kind (eventfd, timerfd, socket, epoll,
      inotify, pidfd, directory stream, memfd), with dup'ed fds sharing one
      object, and the hidden fds;
@@ -148,7 +153,8 @@ crashing process), whose file table is a copy (#595).
   sensors clients connect on first use.
 - Knob fds (writable `/proc` files) stay plain fds, since their action is
   code. Evdev fds are also plain until reopened.
-- The snapshot is taken entry by entry while other guest threads run. On
+- The snapshot is taken entry by entry while other guest threads run.
+  Their mapping changes wait for it, but their stores to memory do not: on
   Linux, the whole address space is copied at one instant. Zygote forks
   single-threaded.
 - Guest `MAP_FIXED` mappings outside the guest range and `MADV_DONTFORK`

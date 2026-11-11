@@ -1192,6 +1192,7 @@ static int maps_line(const char* p, char* line, size_t size) {
 // (names, the program break, stub islands, ...) are never older than the
 // memory the child holds, as on Linux, where fork copies them together.
 static void fork_records_follow_memory(void) {
+  race_stop = 0;
   pthread_t t;
   CHECK(pthread_create(&t, NULL, race_names, NULL) == 0, "thread");
   int checked = 0;
@@ -1226,6 +1227,75 @@ static void fork_records_follow_memory(void) {
   pthread_join(t, NULL);
   CHECK(checked > 0, "no mapping was checked");
   printf("ok fork_records_follow_memory\n");
+}
+
+static volatile int race_memfd = -1, race_go = -1, race_ready = -1, race_done = -1;
+
+// For each round the main thread starts: makes an executable-mode memfd
+// (its contents in memory, not the file), writes it, and then closes its
+// last descriptor a varying time later, while the main thread forks.
+static void* race_memfds(void* arg) {
+  (void)arg;
+  for (int n = 0; !race_stop; n++) {
+    while (race_go < n)
+      if (race_stop) return NULL;
+    int fd = memfd_create("fork-race", 0);
+    if (fd < 0 || ftruncate(fd, RACE_PAGE) != 0 || pwrite(fd, "old!", 4, 0) != 4) _exit(2);
+    void* p = mmap(NULL, RACE_PAGE, PROT_READ | PROT_EXEC, MAP_SHARED, fd, 0);
+    if (p == MAP_FAILED || munmap(p, RACE_PAGE) != 0) _exit(3);
+    if (pwrite(fd, "new!", 4, 0) != 4) _exit(4);
+    race_memfd = fd;
+    race_ready = n;
+    usleep(n * 37 % 3000);
+    race_memfd = -1;
+    close(fd);
+    race_done = n;
+  }
+  return NULL;
+}
+
+// While another thread closes the last descriptor of an executable-mode
+// memfd, a fork child that inherits it reads its contents, not the stale
+// file: the memfd's record is saved with the fd table and the memory, and
+// its reclaim waits for the copy. Only the close races the fork.
+static void fork_memfd_close_race(void) {
+  race_stop = 0;
+  pthread_t t;
+  CHECK(pthread_create(&t, NULL, race_memfds, NULL) == 0, "thread");
+  int checked = 0;
+  for (int n = 0; n < 100; n++) {
+    int p[2];
+    CHECK(pipe(p) == 0, "pipe");
+    race_go = n;
+    while (race_ready < n) {
+    }
+    pid_t pid = fork();
+    CHECK(pid >= 0, "fork");
+    if (pid == 0) {
+      int fd = race_memfd, seen = 0, bad = 0;
+      char got[4];
+      if (fd >= 0) {
+        seen = 1;
+        bad = pread(fd, got, 4, 0) != 4 || memcmp(got, "new!", 4) != 0;
+      }
+      if (write(p[1], &seen, sizeof(seen)) != sizeof(seen)) _exit(3);
+      _exit(bad);
+    }
+    close(p[1]);
+    int seen = 0;
+    CHECK(read(p[0], &seen, sizeof(seen)) == sizeof(seen), "child report");
+    close(p[0]);
+    int st;
+    CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st), "child %#x", st);
+    CHECK(WEXITSTATUS(st) == 0, "fork %d: the memfd read its stale file", n);
+    checked += seen;
+    while (race_done < n) {
+    }
+  }
+  race_stop = 1;
+  pthread_join(t, NULL);
+  CHECK(checked > 0, "no memfd was checked");
+  printf("ok fork_memfd_close_race\n");
 }
 
 // Adjacent mappings never touched are allocated afresh in the child as
@@ -2534,6 +2604,7 @@ int main(int argc, char** argv) {
       {"fork_memory", fork_memory}, {"fork_memory_runs", fork_memory_runs},
       {"fork_untouched_runs", fork_untouched_runs}, {"fork_then_exit", fork_then_exit},
       {"fork_records_follow_memory", fork_records_follow_memory},
+      {"fork_memfd_close_race", fork_memfd_close_race},
       {"identity", identity},       {"identity_file", identity_file},
       {"seccomp_filter", seccomp_filter},
       {"xattrs", xattrs},           {"pf_key", pf_key},
