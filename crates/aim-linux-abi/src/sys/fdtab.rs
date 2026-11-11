@@ -938,6 +938,7 @@ fn clear_regular_access(fd: i32) {
     if let Some(slot) = REGULAR_ACCESS.get(fd as usize) {
         slot.store(0, Ordering::Relaxed);
     }
+    super::private_offset::forget(fd);
 }
 const CLOSER: u32 = 1 << 16;
 thread_local! {static OWN_BORROWS:std::cell::RefCell<Vec<i32>>=const{std::cell::RefCell::new(Vec::new())};}

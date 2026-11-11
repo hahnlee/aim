@@ -9482,10 +9482,14 @@ instead of 1.2 ms (medians); first boots reach zygote 0.2-0.4 s sooner
 `aconfigd-mainline init` (0.12-0.36 s) (#529). bpfloader takes about
 0.25 s on a warm resident boot (median of 9, was 0.29 s): three process
 images (netbpfload execs uprobestatsbpfload, then the platform bpfloader);
-netbpfload's 189,000 `lseek` and 95,000 `read` calls re-reading its ELF
-objects take 0.12 s, what the Mac's own calls cost (0.29 us per `lseek`,
-0.5 us per 4 KiB `read`); its 144 `chmod`/`chown` of pins take 0.017 s
-(#3007). A pin is an empty file of its own, as bpffs gives each pin its own
+netbpfload re-reads its ELF objects through stdio with 189,000 `lseek`
+and 95,000 4 KiB `read` calls. While a process has one thread and no other
+descriptor refers to a read-only file's description, the layer holds its
+offset: `lseek` makes no host call and `read` is a `preadv` (0.04 us
+against 0.25 us per `lseek`); any other syscall or host call first gives the
+offset back (#3033). Its syscalls take 0.09-0.11 s instead of 0.12-0.24 s
+and it runs 0.12-0.14 s instead of 0.15-0.28 s; its 144 `chmod`/`chown` of
+pins take 0.017 s (#3007). A pin is an empty file of its own, as bpffs gives each pin its own
 inode, instead of a hard link to its object: a clone of the object's
 template, which names it in a host attribute the guest cannot set, made
 whole in one call for about a third of a link's cost on the Mac. The bpffs
