@@ -189,6 +189,30 @@ fn observer_removes_only_uid_user_and_callbacks_keep_message_order_across_restar
     });
 }
 
+/// Shutdown handles the messages posted before it and stops the handler,
+/// so nothing persists below `/data` afterwards (#2890).
+#[test]
+fn shutdown_handles_posted_messages_then_stops_persisting() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        let owner = host.background_install_control();
+        let file = host.data().unwrap().join(STATES);
+        {
+            let mut state = owner.state.lock().unwrap();
+            for name in ["p", "q"] {
+                insert(state.load(&file).unwrap(), 0, name.into());
+            }
+            state.persist(&file).unwrap();
+        }
+        owner.package_removed(Some("p"), 10100).unwrap();
+        owner.shutdown().unwrap();
+        let remaining = BTreeMap::from([(0, vec!["q".to_string()])]);
+        assert_eq!(State::default().load(&file).unwrap(), &remaining);
+        assert!(owner.package_removed(Some("q"), 10101).is_err());
+        owner.shutdown().unwrap();
+        assert_eq!(State::default().load(&file).unwrap(), &remaining);
+    });
+}
+
 #[test]
 fn aidl_query_is_system_identity_filtered_and_permission_denial_is_flag_gated() {
     crate::system::with_discovery_session(|host, _, _| {
