@@ -1807,6 +1807,12 @@ fn stat_at_as(
         return Ok(st);
     }
     let r = resolve_as(dirfd, path, follow, id, attrs::FS).map_err(|e| -(e as i64))?;
+    stat_resolved(&r, follow)
+}
+
+/// stat of a resolved path (`follow` as it was resolved), with the
+/// guest's ownership view.
+pub(super) fn stat_resolved(r: &vfs::Resolved, follow: bool) -> Result<libc::stat, i64> {
     if r.guest == "/dev/fuse" {
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         st.st_mode = libc::S_IFCHR | 0o666;
@@ -1824,12 +1830,13 @@ fn stat_at_as(
     if let Some(s) = super::ashmem::stat(&r.guest).or_else(|| super::dma_heap::stat(&r.guest)) {
         return Ok(s);
     }
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: host path and local stat buffer.
     if unsafe { libc::lstat(r.host.as_ptr(), &mut st) } < 0 {
         return Err(-(errno::last() as i64));
     }
-    attrs::apply(attrs_host(&r), || r.guest.clone(), &mut st);
-    super::evdev::stat(&r, &mut st);
+    attrs::apply(attrs_host(r), || r.guest.clone(), &mut st);
+    super::evdev::stat(r, &mut st);
     Ok(st)
 }
 

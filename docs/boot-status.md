@@ -1175,7 +1175,15 @@ without a policy (`fscrypt::policy_less`, 2026-11-10). A data
 directory's CE storage belongs to the image that first mounts it:
 `mount_all` refuses a data directory the derived image
 (the original LockSettingsService) booted to the app host image, and the
-reverse, naming both (ADR 0016). Settings'
+reverse, naming both (ADR 0016). A locked directory's entries keep their
+extended attributes by their no-key paths, as on Linux, so installd's
+`fixupAppData` before the unlock finds each app's `user.inode_cache` and
+leaves its cache directories' GIDs alone; until then it gave every CE
+cache directory the app's GID on each warm boot and the CE
+reconciliation set the cache GID back (about 880 chowns, 440 chmods and
+as many log lines). Instrumented warm boots (three alternating rounds,
+host load 6-15, 2026-11-11): installd's syscall time 0.43-0.55 s against
+0.68-0.97 s; the CE reconciliation 118-276 ms against 316-498 ms. Settings'
 warm median first presented frame was 1.094 s after open (2026-10-30). Raw capture now waits for user-0 DE storage
 about 0.2 s on warm data; fresh data also waits for init to apply the locale.
 Full modes, HDR/color/refresh and DisplayManager information still query

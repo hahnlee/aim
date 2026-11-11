@@ -1535,6 +1535,46 @@ mod tests {
         std::fs::remove_dir_all(&host).unwrap();
     }
 
+    /// installd's fixupAppData reads a locked app directory's
+    /// `user.inode_cache` by its no-key path, as Linux keeps xattrs
+    /// readable without the key.
+    #[test]
+    fn a_locked_directory_s_entries_keep_their_attributes() {
+        let (_guard, view) = crate::vfs::test_view();
+        let host = view.join("data/fscrypt-tests");
+        let _ = std::fs::remove_dir_all(&host);
+        std::fs::create_dir_all(&host).unwrap();
+        let identifier = populate(view, "kept", &[0x3c; 64]);
+        let (name, value) = (c"user.inode_cache", 0x1234_5678_u64.to_le_bytes());
+        let xattr = |nr: u64, path: &CString, value: &mut [u8]| {
+            let args = [
+                path.as_ptr() as u64,
+                name.as_ptr() as u64,
+                value.as_mut_ptr() as u64,
+                value.len() as u64,
+                0,
+                0,
+            ];
+            match nr {
+                8 => super::super::xattr::getxattr(nr, args),
+                _ => super::super::xattr::setxattr(nr, args),
+            }
+        };
+        assert_eq!(xattr(5, &guest("kept/sub"), &mut value.clone()), 0);
+        assert_eq!(
+            remove(&open(view, "kept"), identifier, false, &root()),
+            Ok(0)
+        );
+        let sub = list("kept")
+            .into_iter()
+            .find(|name| kind(&format!("kept/{name}")) == Ok(libc::S_IFDIR as u32))
+            .unwrap();
+        let mut read = [0u8; 8];
+        assert_eq!(xattr(8, &guest(&format!("kept/{sub}")), &mut read), 8);
+        assert_eq!(read, value);
+        std::fs::remove_dir_all(&host).unwrap();
+    }
+
     #[test]
     fn a_tree_whose_key_is_present_keeps_its_names_while_another_is_absent() {
         let (_guard, view) = crate::vfs::test_view();
