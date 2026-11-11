@@ -151,6 +151,12 @@ fn scan(
     // teardown revokes native service registrations too.
     system.package_observer_owner(&system.package_bootstrap()?)?;
     parse_ahead(host, system, &image_inputs)?;
+    // The scan's first writes under /data (the platform's settings, then
+    // the package state) follow init's: its mkdirs with their policies
+    // through init_user0, and the data template's files after it.
+    wait_for("user-0 DE storage", |deadline| {
+        host.wait_property("vendor.aim.user0.de_ready", "true", deadline)
+    })?;
     let Binder::Local(ptr) = system.begin_package_manager_boot(false, Some(image_inputs))? else {
         unreachable!("the session is this process's")
     };
@@ -170,10 +176,10 @@ fn scan(
     Ok(boot)
 }
 
-/// Parses the scan's packages while the boot waits for user 0's storage and
-/// the locale, which its first writes under /data follow (#2985). The
-/// parse's inputs are the configuration the boot will have: the Mac's
-/// locale, which init applies at post-fs-data, the display's density, and
+/// Parses the scan's packages while the boot waits for user 0's storage,
+/// which its first writes under /data follow (#2985). The parse's inputs
+/// are the configuration the boot will have: the Mac's locale, which init
+/// applies at early-init and again at post-fs-data, the display's density, and
 /// the SDK extension versions `derive_sdk` sets just before `init_user0`,
 /// which the parses wait for. The scan takes only the parses whose cache
 /// key its own configuration gives.

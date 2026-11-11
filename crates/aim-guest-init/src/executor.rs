@@ -802,8 +802,9 @@ impl GuestExecutor {
     }
 
     /// Places the data template's files (`DataMount::place_template`), then
-    /// marks user 0's DE storage ready; a failure ends the boot.
-    fn place_template(&mut self) {
+    /// marks user 0's DE storage ready if `init_user0` succeeded; a failure
+    /// ends the boot.
+    fn place_template(&mut self, init_user0_succeeded: bool) {
         let placed = match &self.data {
             Some(data) => data.borrow().place_template(),
             None => Ok(0),
@@ -814,7 +815,10 @@ impl GuestExecutor {
                     "data template: placed {moved} files and directories"
                 ));
             }
-            self.set_property(USER0_DE_READY, "true")
+            if init_user0_succeeded {
+                self.set_property(USER0_DE_READY, "true")?;
+            }
+            Ok(())
         });
         if let Err(error) = ready {
             self.log.push(format!("FATAL: {error}"));
@@ -1005,14 +1009,14 @@ impl GuestExecutor {
                         self.run_onrestart(&service, &commands);
                         self.current = saved;
                     }
-                    SupervisorEvent::ExecFinished { service } => {
+                    SupervisorEvent::ExecFinished { service, success } => {
                         self.log.push(format!("exec service '{service}' finished"));
                         self.exec_pid = None;
                         self.exec_service = None;
                         if self.template_after.as_ref() == Some(&service) {
                             self.template_after = None;
                             if self.shutdown.is_none() {
-                                self.place_template();
+                                self.place_template(success);
                             }
                         }
                         self.outbox.push_back(Outgoing::ExecFinished);
@@ -1291,7 +1295,7 @@ impl GuestExecutor {
                 if flow == CommandFlow::ExecServiceRunning {
                     self.template_after = self.exec_service.clone();
                 } else {
-                    self.place_template();
+                    self.place_template(false);
                 }
                 return Ok(flow);
             }

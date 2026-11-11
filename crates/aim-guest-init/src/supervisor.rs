@@ -54,8 +54,9 @@ pub enum SupervisorEvent {
         commands: Vec<CommandSpec>,
         vendor_subcontext: bool,
     },
-    /// The `exec`/`exec_start` service exited: unblock the action queue.
-    ExecFinished { service: String },
+    /// The `exec`/`exec_start` service exited, with status 0 or not:
+    /// unblock the action queue.
+    ExecFinished { service: String, success: bool },
     /// A critical service crashed too often: init would reboot into the
     /// bootloader (`LOG(FATAL)`).
     Fatal(String),
@@ -791,6 +792,7 @@ impl Supervisor {
             record.flags &= !flags::EXEC;
             self.events.push(SupervisorEvent::ExecFinished {
                 service: name.clone(),
+                success: exit.is_success(),
             });
         }
         if record.flags & flags::TEMPORARY != 0 {

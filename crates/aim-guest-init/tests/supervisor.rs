@@ -425,7 +425,7 @@ fn exec_services_are_temporary_and_unblock_on_exit() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, SupervisorEvent::ExecFinished { .. }))
+            .any(|e| matches!(e, SupervisorEvent::ExecFinished { success: true, .. }))
     );
     assert!(!f.supervisor.contains(&name));
 
@@ -447,7 +447,7 @@ fn exec_services_are_temporary_and_unblock_on_exit() {
     assert!(
         f.events()
             .iter()
-            .any(|e| matches!(e, SupervisorEvent::ExecFinished { service } if service == "one"))
+            .any(|e| matches!(e, SupervisorEvent::ExecFinished { service, success: false } if service == "one"))
     );
     assert!(f.flags("one") & flags::EXEC == 0);
 }
