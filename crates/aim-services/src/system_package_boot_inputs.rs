@@ -35,12 +35,14 @@ pub struct ImageScanInputs {
     pub vendor_sdk: i32,
     pub certificates: CertificateScanPolicy,
     pub cli: Cli,
+    pub ahead: Option<crate::package::scan::Ahead>,
 }
 impl ImageScanInputs {
     // PackageParser.PARSE_APEX at the pinned Android version is 1 << 10.
     pub fn policy(&self) -> ScanPolicy<'_> {
         ScanPolicy {
             parser_cache: self.cli.parser_cache.as_deref(),
+            ahead: self.ahead.as_ref(),
             certificates: self.certificates,
             seinfo: &self.seinfo,
             apex_parse_flags: 1 << 10,
@@ -178,6 +180,7 @@ impl ImageScanInputs {
                     && lifecycle.prior_sdk_version() < 25,
             },
             cli,
+            ahead: image.take_ahead(),
         })
     }
 }
@@ -414,6 +417,7 @@ impl System {
             apks,
             additional_data_volumes,
             inputs.cli.parser_cache.as_deref(),
+            inputs.ahead.as_ref(),
         )
         .map_err(|error| failed(format!("native data inventory: {error:?}")))?;
         let mut roots = BTreeMap::new();

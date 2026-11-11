@@ -133,6 +133,7 @@ fn scan(
     // Retain the epoch owner even before the first notification, so session
     // teardown revokes native service registrations too.
     system.package_observer_owner(&system.package_bootstrap()?)?;
+    parse_ahead(host, system, &image_inputs)?;
     let Binder::Local(ptr) = system.begin_package_manager_boot(false, Some(image_inputs))? else {
         unreachable!("the session is this process's")
     };
@@ -150,6 +151,68 @@ fn scan(
         session::read_finish_initial_scan_reply,
     )?;
     Ok(boot)
+}
+
+/// Parses the scan's packages while the boot waits for user 0's storage and
+/// the locale, which its first writes under /data follow (#2985). The
+/// parse's inputs are the configuration the boot will have: the Mac's
+/// locale, which init applies at post-fs-data, the display's density, and
+/// the SDK extension versions `derive_sdk` sets just before `init_user0`,
+/// which the parses wait for. The scan takes only the parses whose cache
+/// key its own configuration gives.
+fn parse_ahead(
+    host: &Arc<AppHost>,
+    system: &Arc<System>,
+    inputs: &Arc<crate::package::boot_image::Inputs>,
+) -> Result<(), Exception> {
+    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
+    let Some((base, name)) = super::package_boot_configuration::parser_cache_location(host)? else {
+        return Ok(());
+    };
+    let locale = host
+        .property("vendor.aim.mac.locale")
+        .or_else(|| host.property("persist.sys.locale"))
+        .ok_or_else(|| state("no boot locale".into()))?;
+    let (language, country) = super::package_boot_configuration::locale_codes(&locale)?;
+    let image = system.native_package_image()?;
+    let signing = system.package_signing_overrides()?;
+    let density = host.display_metrics()?.density_dpi;
+    let apexes = super::apex_manager::inventory(&host.process)
+        .map_err(state)?
+        .scan_apexes();
+    let (host, owned) = (host.clone(), inputs.clone());
+    inputs.parse_ahead(move || {
+        let parse = || -> Result<crate::package::scan::Ahead, Exception> {
+            wait_for("SDK extensions", |deadline| {
+                host.wait_property("init.svc.derive_sdk", "stopped", deadline)
+            })?;
+            let properties = |name: &str| host.property(name);
+            let apks = image
+                .apks_with_platform(
+                    &owned.config(&properties),
+                    signing,
+                    density,
+                    crate::package::parse::resources::Config {
+                        language,
+                        country,
+                        ..Default::default()
+                    },
+                    &|name| Ok(host.property(name)),
+                    || owned.platform().cloned(),
+                )
+                .map_err(state)?;
+            Ok(crate::package::scan::Ahead::parse(
+                &apks,
+                &apexes,
+                &base.join(name),
+            ))
+        };
+        parse().unwrap_or_else(|error| {
+            eprintln!("app host: package parses ahead: {}", error.message);
+            Default::default()
+        })
+    });
+    Ok(())
 }
 
 #[cfg(test)]
