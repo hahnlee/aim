@@ -10,7 +10,10 @@ use crate::package::{
 
 pub struct Visibility {
     state: model::State,
-    filter: AppsFilter,
+    config: apps_filter::Config,
+    /// The relations, made at the first query that needs them: the app
+    /// host finishes the raw scan without asking any.
+    filter: std::sync::OnceLock<Result<AppsFilter>>,
 }
 impl Visibility {
     pub(super) fn metadata_state(&self) -> &model::State {
@@ -217,15 +220,14 @@ impl Visibility {
             slots.insert(id, value);
         }
         state.uid_owners = Some(slots);
-        let filter = AppsFilter::new(
-            &state,
-            &apps_filter::Config {
+        Ok(Self {
+            state,
+            config: apps_filter::Config {
                 force_system_packages_queryable: selected.data != 0,
                 force_queryable_packages: forced,
             },
-        )
-        .map_err(|error| failure(format!("raw AppsFilter component owner: {error:?}")))?;
-        Ok(Self { state, filter })
+            filter: Default::default(),
+        })
     }
     pub fn instant(&self, uid: i32) -> Result<Option<String>> {
         apps_filter::instant_app_package_name(&self.state, uid)
@@ -290,7 +292,14 @@ impl Visibility {
                 "initial visibility cannot read live instant permission grants before permission owner attachment",
             ));
         }
-        Ok(self.filter.should_filter(&self.state, uid, package, user))
+        let filter = self.filter.get_or_init(|| {
+            AppsFilter::new(&self.state, &self.config)
+                .map_err(|error| failure(format!("raw AppsFilter component owner: {error:?}")))
+        });
+        Ok(filter
+            .as_ref()
+            .map_err(Clone::clone)?
+            .should_filter(&self.state, uid, package, user))
     }
     pub fn filter_uid(&self, target_uid: i32, calling_uid: i32) -> Result<bool> {
         let user = apps_filter::user_id(target_uid);
