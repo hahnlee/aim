@@ -1249,6 +1249,38 @@ mod tests {
         assert_eq!(access_of(got as i32), libc::O_RDWR);
         shut(got);
         shut(program);
+        // A pin netbpfload makes 0460 root:net_bw_acct: generic_permission
+        // grants its group class (read-write) to a supplementary group, and
+        // CAP_DAC_OVERRIDE whatever the class.
+        assert_eq!(pin_at(c"/sys/fs/bpf/netd", fd), 0);
+        let netd = c"/sys/fs/bpf/netd".as_ptr() as u64;
+        assert_eq!(super::super::fsops::fchmodat([at, netd, 0o460, 0, 0, 0]), 0);
+        assert_eq!(super::super::fsops::fchownat([at, netd, 0, 3007, 0, 0]), 0);
+        let root_identity = super::super::cred::current();
+        let mut identity = root_identity.clone();
+        identity.uid = [1000; 4];
+        identity.gid = [1000; 4];
+        identity.groups = vec![3006, 3007];
+        identity.cap_eff = 0;
+        identity.cap_perm = 0;
+        super::super::cred::init(identity.clone(), None);
+        for flags in [F_RDONLY, 0] {
+            let got = get(c"/sys/fs/bpf/netd", flags, 0);
+            assert!(got >= 0, "supplementary group: {got}");
+            shut(got);
+        }
+        identity.groups = vec![3006];
+        super::super::cred::init(identity.clone(), None);
+        assert_eq!(
+            get(c"/sys/fs/bpf/netd", F_RDONLY, 0),
+            -(errno::EACCES as i64)
+        );
+        identity.cap_eff = 1 << 1;
+        super::super::cred::init(identity, None);
+        let got = get(c"/sys/fs/bpf/netd", 0, 0);
+        assert!(got >= 0, "CAP_DAC_OVERRIDE: {got}");
+        shut(got);
+        super::super::cred::init(root_identity, None);
         // The pin is its creator's, mode 0600: another uid without
         // capabilities may not open it, and its own pin is its own, less
         // its umask.
