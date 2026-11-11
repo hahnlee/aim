@@ -1038,8 +1038,32 @@ impl Capture {
             version,
         )
         .map_err(|error| format!("preferred publication: {error:?}"))?;
-        let mut context = (*self.context).clone();
+        let mut context = self.preferred_context(handle, documents)?;
         context.scan_version = version;
+        let capture = Self::new(store.capture(), context)?;
+        Ok(PackageUpdate { store, capture })
+    }
+
+    /// The preferred owner's publication as a query view of this capture's
+    /// scan, while an installation that persisted a newer scan completes its
+    /// projection from the current view (as the freezer's view does).
+    pub(crate) fn with_preferred_view(
+        self: &Arc<Self>,
+        handle: Arc<crate::package::preferred::registry::Handle>,
+        documents: &[(i32, Vec<u8>)],
+    ) -> Result<Arc<Self>, String> {
+        Self::new(
+            self.scan.clone(),
+            self.preferred_context(handle, documents)?,
+        )
+    }
+
+    fn preferred_context(
+        &self,
+        handle: Arc<crate::package::preferred::registry::Handle>,
+        documents: &[(i32, Vec<u8>)],
+    ) -> Result<Context, String> {
+        let mut context = (*self.context).clone();
         context.system.preferred_owner = Some(handle);
         for (user, bytes) in documents {
             let user = context
@@ -1049,8 +1073,7 @@ impl Capture {
             user.preferred_activities = Some(bytes.clone());
             user.restrictions = Some(bytes.clone());
         }
-        let capture = Self::new(store.capture(), context)?;
-        Ok(PackageUpdate { store, capture })
+        Ok(context)
     }
 
     pub(crate) fn prepare_app_metadata_files(

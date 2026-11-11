@@ -528,6 +528,73 @@ mod tests {
         );
     }
 
+    /// A publication between the caller's capture and its mutation (#3055):
+    /// the mutation applies to the published resolver, as the original's
+    /// under mLock; only a selection naming captured registrations is stale.
+    #[test]
+    fn mutation_applies_to_a_resolver_published_after_its_capture() {
+        let registry = Registry::new(Arc::new(Provider(Mutex::new((1..=8).collect()))));
+        let mut initial = Preferred::default();
+        initial.add_preferred(activity("one"), false);
+        registry.insert_user(0, initial).unwrap();
+        let captured = registry.snapshot(0).unwrap().unwrap().generation;
+        let mut other = activity("other");
+        other.filter.add_action("other");
+        let stage = registry
+            .prepare_mutation(
+                0,
+                captured,
+                &super::super::Mutation::Add {
+                    activity: other,
+                    remove_existing: false,
+                },
+            )
+            .unwrap()
+            .stage
+            .unwrap();
+        registry.publish(stage).unwrap();
+        let stage = registry
+            .prepare_mutation(
+                0,
+                captured,
+                &super::super::Mutation::Replace {
+                    activity: activity("two"),
+                },
+            )
+            .unwrap()
+            .stage
+            .unwrap();
+        registry.validate(&stage).unwrap();
+        registry.publish(stage).unwrap();
+        let packages: Vec<_> = registry
+            .snapshot(0)
+            .unwrap()
+            .unwrap()
+            .state
+            .preferred
+            .entries()
+            .iter()
+            .map(|entry| entry.component.package.clone())
+            .collect();
+        assert_eq!(packages, ["other", "two"]);
+        let selection = Selection {
+            chosen: None,
+            edits: vec![Edit::Remove { registration: 0 }],
+        };
+        assert!(
+            registry
+                .prepare_mutation(
+                    0,
+                    captured,
+                    &super::super::Mutation::SetLast {
+                        selection,
+                        activity: activity("three"),
+                    },
+                )
+                .is_err()
+        );
+    }
+
     #[test]
     fn signed_identity_collisions_stale_stages_and_revocation() {
         let registry = Registry::new(Arc::new(Provider(Mutex::new([-1, 33, -1, -7, 44].into()))));
@@ -714,7 +781,12 @@ impl Registry {
                 .users
                 .get(&user)
                 .ok_or("native preferred user missing")?;
-            if old.snapshot.generation != generation {
+            // Only a selection names registrations of the caller's snapshot.
+            // Every other mutation applies to the current resolver, as the
+            // original's do under mLock, whatever was published since.
+            if matches!(mutation, Mutation::SetLast { selection, .. } if !selection.edits.is_empty())
+                && old.snapshot.generation != generation
+            {
                 return Err("preferred mutation snapshot changed".into());
             }
             old.clone()
@@ -991,7 +1063,7 @@ impl Registry {
         let preferred_order = order(&pref_ids);
         let replacement = User {
             snapshot: Snapshot {
-                generation,
+                generation: old.snapshot.generation,
                 state: state.clone(),
                 preferred_order: preferred_order.clone(),
             },
@@ -1002,7 +1074,7 @@ impl Registry {
         Ok(PreparedMutation {
             stage: Some(Stage {
                 user,
-                before_generation: generation,
+                before_generation: old.snapshot.generation,
                 preferred: state,
                 preferred_order,
                 persistent_order: order(&replacement.persistent),

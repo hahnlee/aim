@@ -270,34 +270,38 @@ impl Actions for SystemActions {
         let registry = system
             .package_preferred_registry(&self.bridge)
             .map_err(ActionError::Exception)?;
-        let prepared = registry
-            .prepare_mutation(user, generation, mutation)
-            .map_err(|error| {
-                ActionError::Exception(aim_binder_host::parcel::Exception::new(
-                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                    error,
-                ))
-            })?;
-        if let Some(stage) = prepared.stage {
-            system
-                .commit_package_preferred_stage(
-                    &self.bridge,
-                    &registry,
-                    stage,
-                    matches!(mutation, Mutation::CrossRemove { .. }) && !prepared.changed,
-                )
-                .map_err(ActionError::Exception)?;
-        }
+        // The original serializes preferred mutations under mLock: one that
+        // another publication superseded is prepared again on its result.
+        let (changed, effects) = loop {
+            let prepared = registry
+                .prepare_mutation(user, generation, mutation)
+                .map_err(|error| {
+                    ActionError::Exception(aim_binder_host::parcel::Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        error,
+                    ))
+                })?;
+            let Some(stage) = prepared.stage else {
+                break (prepared.changed, prepared.effects);
+            };
+            let memory_only = matches!(mutation, Mutation::CrossRemove { .. }) && !prepared.changed;
+            if system
+                .try_commit_package_preferred_stage(&self.bridge, &registry, stage, memory_only)
+                .map_err(ActionError::Exception)?
+            {
+                break (prepared.changed, prepared.effects);
+            }
+        };
         self.effects(
             user,
-            &prepared.effects,
+            &effects,
             if matches!(mutation, Mutation::Reset { .. }) {
                 1000
             } else {
                 calling_uid
             },
         )?;
-        Ok(prepared.changed)
+        Ok(changed)
     }
     fn cross_access(
         &self,
