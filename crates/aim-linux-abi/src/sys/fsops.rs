@@ -522,6 +522,15 @@ pub fn linkat(a: [u64; 6]) -> i64 {
         (Some(_), None) | (None, Some(_)) => return -EXDEV,
         _ => {}
     }
+    // bpffs is its own mount: a pin neither leaves it nor a file enters
+    // it, after an existing new name's EEXIST.
+    if old
+        .as_ref()
+        .is_some_and(|old| in_bpffs(&old.guest) != in_bpffs(&new.guest))
+        && attrs::absent(&new.host)
+    {
+        return -EXDEV;
+    }
     // An open file, by AT_EMPTY_PATH or its /proc/self/fd link (how an
     // O_TMPFILE file gets its name).
     let fd = match &old {
@@ -554,6 +563,11 @@ const RENAME_NOREPLACE: u64 = 1;
 const RENAME_EXCHANGE: u64 = 2;
 const RENAME_WHITEOUT: u64 = 4;
 
+/// Whether guest path `guest` is in a bpffs mount.
+fn in_bpffs(guest: &str) -> bool {
+    vfs::fstype(guest).as_deref() == Some("bpf")
+}
+
 pub fn renameat2(a: [u64; 6]) -> i64 {
     let flags = a[4];
     if flags & RENAME_WHITEOUT != 0 {
@@ -577,6 +591,10 @@ pub fn renameat2(a: [u64; 6]) -> i64 {
         (false, false) => {}
         (true, true) => return devpts_remove(&old, false).unwrap(),
         _ => return -EXDEV,
+    }
+    // So is bpffs.
+    if in_bpffs(&old.guest) != in_bpffs(&new.guest) {
+        return -EXDEV;
     }
     match (vfs::fuse_route(&old.guest), vfs::fuse_route(&new.guest)) {
         (Some(old), Some(new)) => {

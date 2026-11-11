@@ -69,8 +69,9 @@ pub(super) fn objects_dir() -> PathBuf {
     dir
 }
 
-/// A new object file of `data_len` bytes plus the header; returns its fd.
-fn create_object(mut header: Header, data_len: usize, initial: Option<&[u8]>) -> i64 {
+/// A new object file of `data_len` bytes plus the header; returns its fd,
+/// open for `access` (`O_RDONLY`, `O_WRONLY` or `O_RDWR`).
+fn create_object(mut header: Header, data_len: usize, initial: Option<&[u8]>, access: i32) -> i64 {
     let Ok(tmpl) = CString::new(objects_dir().join("obj.XXXXXX").as_os_str().as_bytes()) else {
         return -(EINVAL as i64);
     };
@@ -100,8 +101,6 @@ fn create_object(mut header: Header, data_len: usize, initial: Option<&[u8]>) ->
         if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
             return Err(errno::last());
         }
-        make_pin_template(object)
-            .map_err(|e| errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)))?;
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         if unsafe { libc::fstat(fd, &mut stat) } < 0 {
             return Err(errno::last());
@@ -126,15 +125,49 @@ fn create_object(mut header: Header, data_len: usize, initial: Option<&[u8]>) ->
                 return Err(if count < 0 { errno::last() } else { errno::EIO });
             }
         }
-        Ok(publish_object(file.as_raw_fd()))
+        make_pin_template(object).map_err(io_errno)?;
+        if access == libc::O_RDWR {
+            return Ok(publish_object(fd));
+        }
+        let narrowed = PrivateFile::allocate(|| open_object(object, access)).map_err(io_errno)?;
+        Ok(publish_object(narrowed.as_raw_fd()))
     })();
     let result = result.unwrap_or_else(|error| -(error as i64));
     if result < 0 {
+        remove_pin_template(object);
         unsafe {
             libc::unlink(tmpl.as_ptr().cast());
         }
     }
     result
+}
+
+fn io_errno(error: std::io::Error) -> errno::Errno {
+    errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))
+}
+
+/// Object file `path`, opened for `access`.
+fn open_object(path: &std::path::Path, access: i32) -> std::io::Result<std::fs::File> {
+    std::fs::File::options()
+        .read(access != libc::O_WRONLY)
+        .write(access != libc::O_RDONLY)
+        .open(path)
+}
+
+/// The access (`O_RDONLY`, `O_WRONLY`, `O_RDWR`) of object fd `fd`: what
+/// the kernel keeps as the file's `f_mode`.
+fn access_of(fd: i32) -> i32 {
+    (unsafe { libc::fcntl(fd, libc::F_GETFL) }) & libc::O_ACCMODE
+}
+
+/// `bpf_get_file_flag`: the access `BPF_F_RDONLY` or `BPF_F_WRONLY` asks.
+fn file_access(flags: u32) -> Result<i32, i64> {
+    match flags & (F_RDONLY | F_WRONLY) {
+        F_RDONLY => Ok(libc::O_RDONLY),
+        F_WRONLY => Ok(libc::O_WRONLY),
+        0 => Ok(libc::O_RDWR),
+        _ => Err(-(EINVAL as i64)),
+    }
 }
 /// Duplicate a fully initialized private description into a new guest slot.
 fn publish_object(private: i32) -> i64 {
@@ -167,8 +200,15 @@ fn read_header(fd: i32) -> Option<(Header, libc::stat)> {
     // SAFETY: a zeroed header, then filled from the file.
     let mut h: Header = unsafe { std::mem::zeroed() };
     let at = st.st_size - HEADER as i64;
+    // A write-only object fd reads through the object's own file.
+    let reader = if access_of(fd) == libc::O_WRONLY {
+        Some(open_object(&objects_dir().join(object_name(fd)?), libc::O_RDONLY).ok()?)
+    } else {
+        None
+    };
+    let from = reader.as_ref().map_or(fd, |file| file.as_raw_fd());
     // SAFETY: reading into the local header.
-    if unsafe { libc::pread(fd, (&raw mut h).cast(), HEADER, at) } != HEADER as isize
+    if unsafe { libc::pread(from, (&raw mut h).cast(), HEADER, at) } != HEADER as isize
         || h.magic != MAGIC
     {
         return None;
@@ -201,6 +241,16 @@ fn mapped(fd: i32) -> Result<Map, i64> {
                 return Err(-(EINVAL as i64));
             }
             let len = st.st_size as usize;
+            // The layer reads and writes the map whatever `fd`'s access.
+            let writable = if access_of(fd) == libc::O_RDWR {
+                None
+            } else {
+                let name = object_name(fd).ok_or(-(EBADF as i64))?;
+                Some(
+                    open_object(&objects_dir().join(name), libc::O_RDWR)
+                        .map_err(|e| -(io_errno(e) as i64))?,
+                )
+            };
             // SAFETY: a shared mapping of the whole object file.
             let base = unsafe {
                 libc::mmap(
@@ -208,7 +258,7 @@ fn mapped(fd: i32) -> Result<Map, i64> {
                     len,
                     libc::PROT_READ | libc::PROT_WRITE,
                     libc::MAP_SHARED,
-                    fd,
+                    writable.as_ref().map_or(fd, |file| file.as_raw_fd()),
                     0,
                 )
             };
@@ -235,8 +285,9 @@ impl Kernel {
     /// The map pinned at guest `path`, if there is one.
     pub(super) fn pinned(path: &[u8]) -> Option<Kernel> {
         let r = vfs::resolve(LINUX_AT_FDCWD, path, true).ok()?;
-        let host = std::ffi::OsStr::from_bytes(r.host.as_bytes());
-        let file = PrivateFile::allocate(|| open(host.as_ref(), &objects_dir())).ok()?;
+        let host = std::path::Path::new(std::ffi::OsStr::from_bytes(r.host.as_bytes()));
+        let path = object(host, &objects_dir()).ok()?;
+        let file = PrivateFile::allocate(|| open_object(&path, libc::O_RDWR)).ok()?;
         Kernel::of(file.as_raw_fd())
     }
 
@@ -366,14 +417,28 @@ fn map_create(attr: &[u32]) -> i64 {
         data_len: 0,
         _pad: [0; 56],
     };
-    create_object(header, data_len, None)
+    // `map_create`: the fd's access is what the map's flags ask.
+    match file_access(flags) {
+        Ok(access) => create_object(header, data_len, None, access),
+        Err(error) => error,
+    }
 }
 
 fn elem(cmd: u64, a: &[u64]) -> i64 {
     let fd = a[0] as u32 as i32;
     let (key_p, value_p, flags) = (a[1], a[2], a[3]);
+    let access = access_of(fd);
     let r = with_map(fd, |m| {
         let h = m.h();
+        // `map_get_sys_perms`: a lookup needs a readable fd, a change a
+        // writable one.
+        let permitted = match cmd {
+            MAP_LOOKUP_ELEM | MAP_GET_NEXT_KEY => access != libc::O_WRONLY,
+            _ => access != libc::O_RDONLY,
+        };
+        if !permitted {
+            return Err(-(EPERM as i64));
+        }
         let key = if h.ty == RINGBUF {
             return Err(-(EINVAL as i64));
         } else {
@@ -496,7 +561,7 @@ fn btf_load(btf: u64, size: u32) -> i64 {
         data_len: 0,
         _pad: [0; 56],
     };
-    create_object(header, size as usize, Some(&data))
+    create_object(header, size as usize, Some(&data), libc::O_RDWR)
 }
 
 fn prog_load(a: &[u32]) -> i64 {
@@ -532,7 +597,7 @@ fn prog_load(a: &[u32]) -> i64 {
         data_len: 0,
         _pad: pad,
     };
-    create_object(header, data.len(), Some(&data))
+    create_object(header, data.len(), Some(&data), libc::O_RDWR)
 }
 
 /// The host path of the object behind `fd`.
@@ -630,42 +695,76 @@ fn obj_pin(path: u64, fd: i32, file_flags: u32, path_fd: u32) -> i64 {
         Ok(r) => r,
         Err(e) => return -(e as i64),
     };
-    if super::attrs::recording() {
+    // `bpf_obj_do_pin`: only into bpffs.
+    if vfs::fstype(&r.guest).as_deref() != Some("bpf") {
+        return -(EPERM as i64);
+    }
+    let parent = if super::attrs::recording() {
         let parent = r
             .guest
             .rsplit_once('/')
             .map_or("/", |(p, _)| if p.is_empty() { "/" } else { p });
         match super::attrs::path_stat(parent) {
-            Ok(st) if super::attrs::permits(&st, 3, &id, super::attrs::FS) => {}
+            Ok(st) if super::attrs::permits(&st, 3, &id, super::attrs::FS) => Some(st),
             Ok(_) => return -(errno::EACCES as i64),
             Err(error) => return -(error as i64),
         }
-    }
+    } else {
+        None
+    };
     let Some(name) = object_name(fd) else {
         return -(EBADF as i64);
     };
-    let host = std::ffi::OsStr::from_bytes(r.host.as_bytes());
-    match pin(host.as_ref(), &objects_dir().join(name)) {
+    let host = std::path::Path::new(std::ffi::OsStr::from_bytes(r.host.as_bytes()));
+    if let Err(error) = pin(host, &objects_dir().join(name)) {
+        return -(io_errno(error) as i64);
+    }
+    // The new inode is the pinner's (its fsuid and fsgid, or a setgid
+    // directory's group), mode 0600 less its umask. Unrecorded, a file
+    // reads as root's, as the template's 0600.
+    let owned = (|| {
+        let mode = 0o600 & !super::pstate::current_umask();
+        if mode != 0o600 && unsafe { libc::chmod(r.host.as_ptr(), mode as libc::mode_t) } != 0 {
+            return Err(errno::last());
+        }
+        let Some(parent) = parent else { return Ok(()) };
+        let gid = if parent.st_mode & libc::S_ISGID != 0 {
+            parent.st_gid
+        } else {
+            id.gid[super::attrs::FS]
+        };
+        if id.uid[super::attrs::FS] != 0 || gid != 0 {
+            super::attrs::created(super::attrs::Host::Path(&r.host), || r.guest.clone())?;
+        }
+        Ok(())
+    })();
+    match owned {
         Ok(()) => 0,
-        Err(error) => -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64),
+        Err(error) => {
+            let _ = std::fs::remove_file(host);
+            -(error as i64)
+        }
     }
 }
 
 /// `bpf_obj_get_user`: the object pinned at guest `path`, which the caller
-/// must be able to access as `file_flags` ask (`path_permission`).
+/// must be able to access as `file_flags` ask (`path_permission`), in the
+/// access they ask.
 fn obj_get(path: u64, file_flags: u32, path_fd: u32) -> i64 {
-    if file_flags & !(F_RDONLY | F_WRONLY | F_PATH_FD) != 0
-        || file_flags & (F_RDONLY | F_WRONLY) == F_RDONLY | F_WRONLY
-    {
+    if file_flags & !(F_RDONLY | F_WRONLY | F_PATH_FD) != 0 {
         return -(EINVAL as i64);
     }
+    let access = match file_access(file_flags) {
+        Ok(access) => access,
+        Err(error) => return error,
+    };
     let dirfd = match path_dirfd(file_flags, path_fd) {
         Ok(dirfd) => dirfd,
         Err(error) => return error,
     };
-    let want = match file_flags & (F_RDONLY | F_WRONLY) {
-        F_RDONLY => 4,
-        F_WRONLY => 2,
+    let want = match access {
+        libc::O_RDONLY => 4,
+        libc::O_WRONLY => 2,
         _ => 6,
     };
     // SAFETY: guest string.
@@ -687,21 +786,34 @@ fn obj_get(path: u64, file_flags: u32, path_fd: u32) -> i64 {
             Err(error) => return -(error as i64),
         }
     }
-    let host = std::ffi::OsStr::from_bytes(r.host.as_bytes());
-    let file = match PrivateFile::allocate(|| open(host.as_ref(), &objects_dir())) {
+    // `bpf_inode_type`: a pin is a bpffs inode.
+    if vfs::fstype(&r.guest).as_deref() != Some("bpf") {
+        return -(errno::EACCES as i64);
+    }
+    let host = std::path::Path::new(std::ffi::OsStr::from_bytes(r.host.as_bytes()));
+    let file = match object(host, &objects_dir())
+        .and_then(|path| PrivateFile::allocate(|| open_object(&path, access)))
+    {
         Ok(file) => file,
-        // `bpf_inode_type`: no pin.
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
             return -(errno::EACCES as i64);
         }
-        Err(error) => {
-            return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64);
-        }
+        Err(error) => return -(io_errno(error) as i64),
     };
-    if read_header(file.as_raw_fd()).is_none() {
-        return -(errno::EACCES as i64);
+    match read_header(file.as_raw_fd()) {
+        Some((h, _)) if h.kind == KIND_MAP || access == libc::O_RDWR => {
+            publish_object(file.as_raw_fd())
+        }
+        // `bpf_prog_new_fd`: a program's fd is read-write whatever the
+        // flags asked.
+        Some(_) => match object(host, &objects_dir())
+            .and_then(|path| PrivateFile::allocate(|| open_object(&path, libc::O_RDWR)))
+        {
+            Ok(file) => publish_object(file.as_raw_fd()),
+            Err(error) => -(io_errno(error) as i64),
+        },
+        None => -(errno::EACCES as i64),
     }
-    publish_object(file.as_raw_fd())
 }
 
 fn info_by_fd(fd: i32, len_p: u64, info: u64) -> i64 {
@@ -819,6 +931,10 @@ pub fn bpf(a: [u64; 6]) -> i64 {
         MAP_FREEZE => {
             let fd = object_fd.unwrap();
             match read_header(fd) {
+                // `map_freeze` needs a writable fd.
+                Some((h, _)) if h.kind == KIND_MAP && access_of(fd) == libc::O_RDONLY => {
+                    -(EPERM as i64)
+                }
                 Some((h, st)) if h.kind == KIND_MAP => {
                     let one = 1u32.to_ne_bytes();
                     let at =
@@ -847,8 +963,17 @@ mod tests {
         }
         crate::diag::install_signal_handlers();
         let (_view, root) = vfs::test_view();
-        let pin = root.join("data/bpf-publication-pin");
-        let guest = std::ffi::CString::new("/data/bpf-publication-pin").unwrap();
+        std::fs::create_dir_all(root.join("data/bpffs")).unwrap();
+        vfs::add_mount(
+            "/sys/fs/bpf",
+            root.join("data/bpffs"),
+            vfs::Area::Writable,
+            "bpf",
+            "bpf",
+        )
+        .unwrap();
+        let pin = root.join("data/bpffs/publication-pin");
+        let guest = std::ffi::CString::new("/sys/fs/bpf/publication-pin").unwrap();
         let mut map = [0u32; 24];
         map[..5].copy_from_slice(&[ARRAY, 4, 8, 2, 0]);
         let mut prog = [0u32; 24];
@@ -933,9 +1058,11 @@ mod tests {
         );
     }
 
-    /// bpffs: only BPF_OBJ_PIN makes a file there, a pin opens as no
-    /// file, a file moved in is no pin, and BPF_OBJ_GET checks its flags and
-    /// the caller's access to the pin.
+    /// bpffs: only BPF_OBJ_PIN makes a file there, and only there; a pin
+    /// opens as no file, after `may_open`'s checks; neither a pin leaves
+    /// bpffs nor a file enters it; BPF_OBJ_GET checks its flags, the
+    /// caller's access to the pin and that it is one, and opens a map in
+    /// the access asked; a pin is its pinner's.
     #[test]
     fn bpffs_holds_only_pins_and_gets_check_flags_and_access() {
         if fdtab::isolated_kernel_test(
@@ -947,6 +1074,8 @@ mod tests {
         let (_view, root) = vfs::test_view();
         let bpffs = root.join("data/bpffs");
         std::fs::create_dir_all(&bpffs).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bpffs, std::fs::Permissions::from_mode(0o1777)).unwrap();
         vfs::add_mount(
             "/sys/fs/bpf",
             bpffs.clone(),
@@ -955,37 +1084,58 @@ mod tests {
             "bpf",
         )
         .unwrap();
-        use super::super::fs::{O_CREAT, O_PATH, openat};
+        use super::super::fs::{O_CREAT, O_PATH, close, openat};
+        let at = LINUX_AT_FDCWD as u64;
         let open = |path: &std::ffi::CStr, flags: u64| {
-            openat([
-                LINUX_AT_FDCWD as u64,
-                path.as_ptr() as u64,
-                flags,
-                0o600,
-                0,
-                0,
-            ])
+            openat([at, path.as_ptr() as u64, flags, 0o600, 0, 0])
         };
+        let shut = |fd: i64| assert_eq!(close([fd as u64, 0, 0, 0, 0, 0]), 0);
         assert_eq!(
             open(c"/sys/fs/bpf/made", O_CREAT | 1),
             -(errno::EACCES as i64)
         );
-        let mut map = [0u32; 24];
-        map[..5].copy_from_slice(&[ARRAY, 4, 8, 2, 0]);
-        let fd = call(MAP_CREATE, &mut map);
+        let create = |flags: u32| {
+            let mut map = [0u32; 24];
+            map[..5].copy_from_slice(&[ARRAY, 4, 8, 2, flags]);
+            call(MAP_CREATE, &mut map)
+        };
+        let fd = create(0);
         assert!(fd >= 0);
-        let pin_at = |path: &std::ffi::CStr| {
+        let pin_at = |path: &std::ffi::CStr, fd: i64| {
             let mut attr = [0u32; 24];
             attr[..2].copy_from_slice(&ptr(path.as_ptr().cast()));
             attr[2] = fd as u32;
             call(OBJ_PIN, &mut attr)
         };
-        assert_eq!(pin_at(c"/sys/fs/bpf/map"), 0);
-        assert_eq!(pin_at(c"/sys/fs/bpf/map"), -(EEXIST as i64));
+        assert_eq!(pin_at(c"/data/pinned", fd), -(EPERM as i64));
+        assert_eq!(pin_at(c"/sys/fs/bpf/map", fd), 0);
+        assert_eq!(pin_at(c"/sys/fs/bpf/map", fd), -(EEXIST as i64));
+        // `may_open`'s order: EEXIST, ENOTDIR, then the open's EIO.
+        assert_eq!(open(c"/sys/fs/bpf/map", O_CREAT | 0o200), -(EEXIST as i64));
+        assert_eq!(open(c"/sys/fs/bpf/map", 0o40000), -(errno::ENOTDIR as i64));
         assert_eq!(open(c"/sys/fs/bpf/map", 0), -(errno::EIO as i64));
         let path = open(c"/sys/fs/bpf/map", O_PATH);
         assert!(path >= 0, "O_PATH: {path}");
-        super::super::fs::close([path as u64, 0, 0, 0, 0, 0]);
+        shut(path);
+        // A pin neither leaves bpffs nor a file enters it.
+        let link = super::super::fsops::linkat([
+            at,
+            c"/sys/fs/bpf/map".as_ptr() as u64,
+            at,
+            c"/data/linked".as_ptr() as u64,
+            0,
+            0,
+        ]);
+        assert_eq!(link, -(errno::EXDEV as i64));
+        let rename = super::super::fsops::renameat2([
+            at,
+            c"/sys/fs/bpf/map".as_ptr() as u64,
+            at,
+            c"/data/renamed".as_ptr() as u64,
+            0,
+            0,
+        ]);
+        assert_eq!(rename, -(errno::EXDEV as i64));
         let get = |path: &std::ffi::CStr, flags: u32, path_fd: u32| {
             let mut attr = [0u32; 24];
             attr[..2].copy_from_slice(&ptr(path.as_ptr().cast()));
@@ -995,14 +1145,71 @@ mod tests {
         };
         std::fs::write(bpffs.join("forged"), b"").unwrap();
         assert_eq!(get(c"/sys/fs/bpf/forged", 0, 0), -(errno::EACCES as i64));
+        // A pin moved out of bpffs on the host is no bpffs inode.
+        std::fs::hard_link(bpffs.join("map"), root.join("data/outside")).unwrap();
+        assert_eq!(get(c"/data/outside", 0, 0), -(errno::EACCES as i64));
         for (flags, path_fd) in [(F_RDONLY | F_WRONLY, 0), (1 << 20, 0), (0, 5)] {
             assert_eq!(get(c"/sys/fs/bpf/map", flags, path_fd), -(EINVAL as i64));
         }
-        let got = get(c"/sys/fs/bpf/map", F_RDONLY, 0);
-        assert!(got >= 0, "get: {got}");
-        super::super::fs::close([got as u64, 0, 0, 0, 0, 0]);
+        // The access asked is the fd's: `map_get_sys_perms`.
+        let (key, mut value) = (0u32.to_ne_bytes(), [0u8; 8]);
+        let read = get(c"/sys/fs/bpf/map", F_RDONLY, 0);
+        assert!(read >= 0, "get: {read}");
+        assert_eq!(
+            elem(read, MAP_LOOKUP_ELEM, key.as_ptr(), value.as_mut_ptr(), 0),
+            0
+        );
+        assert_eq!(
+            elem(read, MAP_UPDATE_ELEM, key.as_ptr(), value.as_mut_ptr(), 0),
+            -(EPERM as i64)
+        );
+        let write = get(c"/sys/fs/bpf/map", F_WRONLY, 0);
+        assert!(write >= 0, "get: {write}");
+        assert_eq!(
+            elem(write, MAP_UPDATE_ELEM, key.as_ptr(), value.as_mut_ptr(), 0),
+            0
+        );
+        assert_eq!(
+            elem(write, MAP_LOOKUP_ELEM, key.as_ptr(), value.as_mut_ptr(), 0),
+            -(EPERM as i64)
+        );
+        let mut info = [0u8; 96];
+        let mut info_attr = [0u32; 24];
+        info_attr[0] = write as u32;
+        info_attr[1] = 96;
+        info_attr[2..4].copy_from_slice(&ptr(info.as_mut_ptr()));
+        assert_eq!(call(OBJ_GET_INFO_BY_FD, &mut info_attr), 0);
+        shut(read);
+        shut(write);
+        let created = create(F_RDONLY);
+        assert!(created >= 0);
+        assert_eq!(
+            elem(
+                created,
+                MAP_UPDATE_ELEM,
+                key.as_ptr(),
+                value.as_mut_ptr(),
+                0
+            ),
+            -(EPERM as i64)
+        );
+        shut(created);
+        assert_eq!(create(F_RDONLY | F_WRONLY), -(EINVAL as i64));
+        // A program's fd is read-write whatever the flags ask.
+        let mut prog = [0u32; 24];
+        prog[0] = 1;
+        prog[1] = 1;
+        let program = call(PROG_LOAD, &mut prog);
+        assert!(program >= 0);
+        assert_eq!(pin_at(c"/sys/fs/bpf/prog", program), 0);
+        let got = get(c"/sys/fs/bpf/prog", F_RDONLY, 0);
+        assert!(got >= 0, "program: {got}");
+        assert_eq!(access_of(got as i32), libc::O_RDWR);
+        shut(got);
+        shut(program);
         // The pin is its creator's, mode 0600: another uid without
-        // capabilities may not open it.
+        // capabilities may not open it, and its own pin is its own, less
+        // its umask.
         let mut identity = super::super::cred::current();
         identity.uid = [10123; 4];
         identity.gid = [10123; 4];
@@ -1014,6 +1221,28 @@ mod tests {
             get(c"/sys/fs/bpf/map", F_RDONLY, 0),
             -(errno::EACCES as i64)
         );
+        assert_eq!(open(c"/sys/fs/bpf/map", 0), -(errno::EACCES as i64));
+        super::super::pstate::umask([0o200, 0, 0, 0, 0, 0]);
+        assert_eq!(pin_at(c"/sys/fs/bpf/own", fd), 0);
+        let own = get(c"/sys/fs/bpf/own", F_RDONLY, 0);
+        assert!(own >= 0, "own pin: {own}");
+        shut(own);
+        let mut stat = [0u64; 16];
+        let stat_at = super::super::fs::newfstatat([
+            at,
+            c"/sys/fs/bpf/own".as_ptr() as u64,
+            stat.as_mut_ptr() as u64,
+            0,
+            0,
+            0,
+        ]);
+        assert_eq!(stat_at, 0);
+        // struct stat: st_mode at 16, st_uid at 24 (arm64).
+        let words: &[u8] = unsafe { std::slice::from_raw_parts(stat.as_ptr().cast(), 128) };
+        let word = |at: usize| u32::from_ne_bytes(words[at..at + 4].try_into().unwrap());
+        assert_eq!(word(16) & 0o7777, 0o400);
+        assert_eq!(word(24), 10123);
+        shut(fd);
     }
 
     fn call(cmd: u64, attr: &mut [u32]) -> i64 {

@@ -354,9 +354,14 @@ pub fn pin(pin: &Path, object: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// The object file pinned at `pin`, of those in `objects`, opened for
-/// reading and writing. A file that is no pin fails with `InvalidData`.
-pub fn open(pin: &Path, objects: &Path) -> io::Result<std::fs::File> {
+/// Removes the pin template of `object`, whose creation failed.
+pub fn remove_pin_template(object: &Path) {
+    let _ = std::fs::remove_file(template(object));
+}
+
+/// The object file pinned at `pin`, of those in `objects`. A file that is
+/// no pin fails with `InvalidData`.
+pub fn object(pin: &Path, objects: &Path) -> io::Result<std::path::PathBuf> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(pin.as_os_str().as_bytes())?;
     let mut name = [0u8; 256];
@@ -389,17 +394,17 @@ pub fn open(pin: &Path, objects: &Path) -> io::Result<std::fs::File> {
     if !matches!(parts.next(), Some(std::path::Component::Normal(_))) || parts.next().is_some() {
         return Err(not_pin());
     }
-    std::fs::File::options()
-        .read(true)
-        .write(true)
-        .open(objects.join(name))
+    Ok(objects.join(name))
 }
 
 impl Mapped {
     /// The map pinned at `path`, of the objects in `objects`.
     pub fn open(path: &Path, objects: &Path) -> io::Result<Mapped> {
         use std::os::fd::AsRawFd;
-        let file = open(path, objects)?;
+        let file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(object(path, objects)?)?;
         let len = file.metadata()?.len() as usize;
         let invalid = || {
             io::Error::new(
@@ -551,7 +556,7 @@ mod tests {
         let forged = dir.join("bpf/forged");
         std::fs::write(&forged, b"obj.map").unwrap();
         assert_eq!(
-            open(&forged, &objects).err().map(|e| e.kind()),
+            object(&forged, &objects).err().map(|e| e.kind()),
             Some(io::ErrorKind::InvalidData)
         );
         let outside = std::ffi::CString::new(forged.as_os_str().as_encoded_bytes()).unwrap();
@@ -570,7 +575,7 @@ mod tests {
             0
         );
         assert_eq!(
-            open(&forged, &objects).err().map(|e| e.kind()),
+            object(&forged, &objects).err().map(|e| e.kind()),
             Some(io::ErrorKind::InvalidData)
         );
         std::fs::remove_dir_all(&dir).unwrap();
