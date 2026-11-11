@@ -12,6 +12,7 @@ mod inputs;
 mod output;
 mod resident;
 mod shell_child;
+mod spawn;
 mod state;
 
 use std::fs;
@@ -22,6 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use args::Command as Cmd;
 use guest::Guest;
+use spawn::Stdio;
 use state::{Files, State};
 
 /// How long `pm install` may take (dexopt of a large app).
@@ -177,7 +179,8 @@ fn shell(files: &Files, command: &[String]) -> Result<ExitCode, String> {
     if let (true, Some(term)) = (argv.len() == 1, std::env::var_os("TERM")) {
         command.env("TERM", term);
     }
-    let status = shell_child::run(&mut command, &mut std::io::stderr())?;
+    let inherit = [Stdio::Inherit, Stdio::Inherit, Stdio::Inherit];
+    let status = shell_child::run(&command, inherit, &mut std::io::stderr())?;
     Ok(exit_code(status))
 }
 
@@ -324,9 +327,9 @@ fn logs(files: &Files, follow: bool, extra: &[String]) -> Result<ExitCode, Strin
         argv.push("-d");
     }
     argv.extend(extra.iter().map(String::as_str));
-    let status = guest
-        .command(&argv)
-        .status()
+    let inherit = [Stdio::Inherit, Stdio::Inherit, Stdio::Inherit];
+    let status = spawn::spawn(&guest.command(&argv), inherit)
+        .and_then(|(mut child, _)| child.wait())
         .map_err(|e| format!("linux-run: {e}"))?;
     Ok(exit_code(status))
 }

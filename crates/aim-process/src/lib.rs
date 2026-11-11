@@ -1,7 +1,8 @@
 //! macOS process responsibility for host device access.
 
-use std::ffi::{CString, OsStr, OsString};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::io;
+use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
 
 /// The process responsible for this process's macOS privacy requests.
@@ -116,6 +117,79 @@ pub fn exec(program: &OsStr, args: impl Iterator<Item = OsString>) -> io::Error 
     }
 }
 
+/// Spawn `program` with `argv` (argv[0] included) and the environment
+/// `envp` ("NAME=value"), responsible for its own privacy requests, as
+/// `std::process::Command` would spawn it otherwise: the descriptors not
+/// closed on exec are inherited, `stdio` is dup'ed onto 0, 1 and 2 (None:
+/// inherited), the signal mask is empty and SIGPIPE is default. A child
+/// that disclaims needs no re-exec of its own to take responsibility.
+pub fn spawn(
+    program: &CStr,
+    argv: &[CString],
+    envp: &[CString],
+    stdio: [Option<RawFd>; 3],
+) -> io::Result<libc::pid_t> {
+    struct Attr(libc::posix_spawnattr_t);
+    impl Drop for Attr {
+        fn drop(&mut self) {
+            unsafe { libc::posix_spawnattr_destroy(&mut self.0) };
+        }
+    }
+    struct Actions(libc::posix_spawn_file_actions_t);
+    impl Drop for Actions {
+        fn drop(&mut self) {
+            unsafe { libc::posix_spawn_file_actions_destroy(&mut self.0) };
+        }
+    }
+    let pointers = |strings: &[CString]| {
+        strings
+            .iter()
+            .map(|s| s.as_ptr().cast_mut())
+            .chain(std::iter::once(std::ptr::null_mut()))
+            .collect::<Vec<_>>()
+    };
+    // SAFETY: the attribute and file actions are owned here and destroyed
+    // after the spawn; the string arrays outlive it.
+    unsafe {
+        let mut raw = std::ptr::null_mut();
+        checked(libc::posix_spawnattr_init(&mut raw))?;
+        let mut attr = Attr(raw);
+        let mut raw = std::ptr::null_mut();
+        checked(libc::posix_spawn_file_actions_init(&mut raw))?;
+        let mut actions = Actions(raw);
+        disclaim(&mut attr.0)?;
+        let mut mask: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut mask);
+        checked(libc::posix_spawnattr_setsigmask(&mut attr.0, &mask))?;
+        libc::sigaddset(&mut mask, libc::SIGPIPE);
+        checked(libc::posix_spawnattr_setsigdefault(&mut attr.0, &mask))?;
+        checked(libc::posix_spawnattr_setflags(
+            &mut attr.0,
+            (libc::POSIX_SPAWN_SETSIGMASK | libc::POSIX_SPAWN_SETSIGDEF) as _,
+        ))?;
+        for (target, fd) in stdio.iter().enumerate() {
+            if let Some(fd) = fd {
+                checked(libc::posix_spawn_file_actions_adddup2(
+                    &mut actions.0,
+                    *fd,
+                    target as RawFd,
+                ))?;
+            }
+        }
+        let (argv, envp) = (pointers(argv), pointers(envp));
+        let mut pid = 0;
+        checked(libc::posix_spawn(
+            &mut pid,
+            program.as_ptr(),
+            &actions.0,
+            &attr.0,
+            argv.as_ptr(),
+            envp.as_ptr(),
+        ))?;
+        Ok(pid)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +241,49 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(String::from_utf8_lossy(&output.stdout).contains(&format!("responsible={pid}")));
+    }
+
+    #[test]
+    fn a_spawned_child_is_responsible_with_its_stdio_and_environment() {
+        const CHILD: &str = "spawned-responsible-child";
+        let args: Vec<_> = std::env::args_os().collect();
+        if args.iter().any(|arg| arg == CHILD) {
+            let pid = unsafe { libc::getpid() };
+            assert_eq!(responsible_pid().unwrap(), pid);
+            assert_eq!(
+                std::env::vars_os().collect::<Vec<_>>(),
+                [("AIM_TEST_DATA".into(), "spawned".into())]
+            );
+            println!("responsible={pid}");
+            return;
+        }
+        let program = std::env::current_exe().unwrap();
+        let program = CString::new(program.as_os_str().as_bytes()).unwrap();
+        let argv = [
+            program.clone(),
+            CString::new("--exact").unwrap(),
+            CString::new("tests::a_spawned_child_is_responsible_with_its_stdio_and_environment")
+                .unwrap(),
+            CString::new("--nocapture").unwrap(),
+            CString::new(CHILD).unwrap(),
+        ];
+        let envp = [CString::new("AIM_TEST_DATA=spawned").unwrap()];
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let pid = spawn(&program, &argv, &envp, [None, Some(fds[1]), None]).unwrap();
+        unsafe { libc::close(fds[1]) };
+        let mut out = String::new();
+        use std::io::Read;
+        use std::os::fd::FromRawFd;
+        unsafe { std::fs::File::from_raw_fd(fds[0]) }
+            .read_to_string(&mut out)
+            .unwrap();
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "{out}"
+        );
+        assert!(out.contains(&format!("responsible={pid}")), "{out}");
     }
 }

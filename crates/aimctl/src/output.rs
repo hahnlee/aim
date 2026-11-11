@@ -2,21 +2,20 @@
 
 use std::io::Read;
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::ExitStatus;
+
+use crate::spawn::{Spec, Stdio};
 use std::time::{Duration, Instant};
 
-pub fn run(command: &mut Command, timeout: Duration) -> Result<(ExitStatus, String), String> {
+pub fn run(command: &Spec, timeout: Duration) -> Result<(ExitStatus, String), String> {
     use std::os::fd::AsRawFd;
     let context = format!("{command:?}");
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("{context}: spawn: {error}"))?;
+    let (mut child, [_, stdout, stderr]) =
+        crate::spawn::spawn(command, [Stdio::Null, Stdio::Piped, Stdio::Piped])
+            .map_err(|error| format!("{context}: spawn: {error}"))?;
     let pid = child.id();
-    let mut stdout = child.stdout.take().expect("piped stdout");
-    let mut stderr = child.stderr.take().expect("piped stderr");
+    let mut stdout = stdout.expect("piped stdout");
+    let mut stderr = stderr.expect("piped stderr");
     let mut failure = None;
     for fd in [stdout.as_raw_fd(), stderr.as_raw_fd()] {
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
@@ -135,8 +134,8 @@ pub fn run(command: &mut Command, timeout: Duration) -> Result<(ExitStatus, Stri
 mod tests {
     use super::*;
 
-    fn sh(script: &str) -> Command {
-        let mut command = Command::new("/bin/sh");
+    fn sh(script: &str) -> Spec {
+        let mut command = Spec::new("/bin/sh");
         command.args(["-c", script]);
         command
     }
@@ -145,7 +144,7 @@ mod tests {
     fn actual_child_status_and_stderr_are_preserved() {
         assert_eq!(
             run(
-                &mut sh("printf '1\\n'; printf 'note' >&2"),
+                &sh("printf '1\\n'; printf 'note' >&2"),
                 Duration::from_secs(2)
             )
             .unwrap()
@@ -153,7 +152,7 @@ mod tests {
             "1\n"
         );
         let error = run(
-            &mut sh("printf 'partial'; printf 'query failed' >&2; exit 1"),
+            &sh("printf 'partial'; printf 'query failed' >&2; exit 1"),
             Duration::from_secs(2),
         )
         .unwrap_err();
@@ -167,7 +166,7 @@ mod tests {
             "{error}"
         );
         let error = run(
-            &mut sh("printf 'before signal' >&2; kill -TERM $$"),
+            &sh("printf 'before signal' >&2; kill -TERM $$"),
             Duration::from_secs(2),
         )
         .unwrap_err();
@@ -176,7 +175,7 @@ mod tests {
             "{error}"
         );
         let error = run(
-            &mut sh("printf 'before kill' >&2; kill -KILL $$"),
+            &sh("printf 'before kill' >&2; kill -KILL $$"),
             Duration::from_secs(2),
         )
         .unwrap_err();
@@ -187,7 +186,7 @@ mod tests {
             "{error}"
         );
         let error = run(
-            &mut sh("printf '%s' $$; exec sleep 10"),
+            &sh("printf '%s' $$; exec sleep 10"),
             Duration::from_millis(50),
         )
         .unwrap_err();
@@ -217,7 +216,7 @@ mod tests {
     #[test]
     fn inherited_writer_does_not_extend_capture_deadline() {
         let start = Instant::now();
-        let error = run(&mut sh(
+        let error = run(&sh(
             "sleep 10 & child=$!; printf 'birth='; ps -p $child -o lstart=; printf 'child=%s\\n' $child; exit 0"),
             Duration::from_millis(150)).unwrap_err();
         assert!(start.elapsed() < Duration::from_secs(2), "{error}");
@@ -245,7 +244,7 @@ mod tests {
             .trim();
         // The fixture started this descendant. Check the retained birth evidence
         // before terminating this individual PID; never signal a process group.
-        let actual = Command::new("/bin/ps")
+        let actual = std::process::Command::new("/bin/ps")
             .args(["-p", &pid.to_string(), "-o", "lstart="])
             .output()
             .unwrap();
