@@ -848,6 +848,11 @@ fn special_read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
     }
     use std::os::fd::AsRawFd;
     let actual = pin.descriptor().as_raw_fd();
+    if pin.regular_access().is_some()
+        && let Some(result) = super::private_offset::read(actual, iov)
+    {
+        return Some(result);
+    }
     Some(special_read_kernel(&pin, iov).unwrap_or_else(|| {
         errno::check(unsafe { libc::readv(actual, iov.as_ptr(), iov.len() as i32) } as i64)
     }))
@@ -1584,15 +1589,19 @@ pub fn lseek(a: [u64; 6]) -> i64 {
         };
         return description.seek(pin.descriptor(), a[1] as i64, whence);
     }
-    if pin.regular_access().is_some() {
+    if let Some(access) = pin.regular_access() {
         let whence = match a[2] as i32 {
             3 => libc::SEEK_DATA,
             4 => libc::SEEK_HOLE,
             whence => whence,
         };
-        return errno::check(unsafe {
-            libc::lseek(pin.descriptor().as_raw_fd(), a[1] as i64, whence)
-        });
+        let fd = pin.descriptor().as_raw_fd();
+        if access == libc::O_RDONLY
+            && let Some(result) = super::private_offset::seek(fd, a[1] as i64, whence)
+        {
+            return result;
+        }
+        return errno::check(unsafe { libc::lseek(fd, a[1] as i64, whence) });
     }
     // A bpf object has no llseek.
     if let Some(Kind::Bpf) = pin.kind() {

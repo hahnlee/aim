@@ -93,6 +93,7 @@ mod park;
 mod pidns;
 mod poll;
 pub(crate) mod posix_locks;
+mod private_offset;
 mod proc_mem;
 mod process;
 mod procfs;
@@ -156,6 +157,7 @@ pub use pidns::new_table as new_pid_namespace;
 pub(crate) use pidns::tids::initialize as initialize_task_ids;
 pub use pidns::watch as watch_pid_namespace;
 pub use pidns::watch_init as watch_pid_namespace_init;
+pub(crate) use private_offset::{held as private_offsets_held, release as release_private_offsets};
 pub use process::set_exe;
 pub use procfs::{StackInfo, note_stack};
 pub use pstate::kernel_release;
@@ -241,6 +243,9 @@ pub fn dispatch(ctx: &mut GuestContext) {
         }
         line.push(')');
         crate::diag!("{line} [pid={pid} tid={tid} call={call} enter]");
+    }
+    if private_offset::held() && !private_offset::keeps(nr) {
+        private_offset::release();
     }
     // A syscall a host signal interrupted is restarted when no guest
     // handler is to run for it.

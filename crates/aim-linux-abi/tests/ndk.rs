@@ -212,6 +212,11 @@ fn files() {
 }
 
 #[test]
+fn file_offsets() {
+    check("t_offset", &["/data/local/tmp"]);
+}
+
+#[test]
 fn posix_record_locks() {
     check("t_posix_locks", &[]);
 }

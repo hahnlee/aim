@@ -98,6 +98,10 @@ pub fn module_name(module: u64) -> &'static str {
 /// Entry from the host-call path of `trampoline.S`, on the host stack.
 #[unsafe(no_mangle)]
 extern "C" fn linux_abi_hostcall(module: u64, func: u64, args: u64, len: u64) -> i64 {
+    // A host call may share or read any fd: the host's offsets are exact.
+    if crate::sys::private_offsets_held() {
+        crate::sys::release_private_offsets();
+    }
     match std::panic::catch_unwind(|| call(module, func, args, len)) {
         Ok(r) => r,
         Err(_) => {
