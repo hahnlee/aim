@@ -63,36 +63,33 @@ pub fn mkdirat(a: [u64; 6]) -> i64 {
                 return -(error as i64);
             }
             // The owner keeps access on the host (see host_mode), and
-            // macOS drops S_ISVTX; the guest's mode is recorded when the
-            // host's differs.
+            // macOS drops S_ISVTX; the guest's mode is recorded with its
+            // owner.
             let want = a[2] as u32 & 0o7777;
             let mode = host_mode(want, libc::S_IFDIR);
             // SAFETY: host path.
             let res = errno::check(unsafe { libc::mkdir(r.host.as_ptr(), mode) } as i64);
             if res == 0 {
                 let host = Host::Path(&r.host);
-                if let Err(error) = attrs::created(host, || r.guest.clone()) {
-                    return -(error as i64);
-                }
-                if attrs::recording() {
+                // The host's group and other bits (its umask applied), the
+                // owner bits and S_ISVTX the guest asked for.
+                let guest_mode = if attrs::recording() {
                     let mut st: libc::stat = unsafe { std::mem::zeroed() };
                     // SAFETY: host path, local buffer.
-                    unsafe { libc::stat(r.host.as_ptr(), &mut st) };
-                    attrs::apply(host, || r.guest.clone(), &mut st);
-                    let made = st.st_mode as u32 & 0o7777;
-                    let guest = (made & (0o077 | libc::S_ISGID as u32))
-                        | (want & 0o700)
-                        | (want & libc::S_ISVTX as u32);
-                    if guest != made {
-                        attrs::record(
-                            host,
-                            || r.guest.clone(),
-                            Attr {
-                                mode: Some(guest),
-                                ..Default::default()
-                            },
-                        );
+                    if unsafe { libc::lstat(r.host.as_ptr(), &mut st) } < 0 {
+                        return -(errno::last() as i64);
                     }
+                    let made = st.st_mode as u32 & 0o7777;
+                    Some(
+                        (made & (0o077 | libc::S_ISGID as u32))
+                            | (want & 0o700)
+                            | (want & libc::S_ISVTX as u32),
+                    )
+                } else {
+                    None
+                };
+                if let Err(error) = attrs::created(host, || r.guest.clone(), guest_mode) {
+                    return -(error as i64);
                 }
                 let dir = std::path::Path::new(std::ffi::OsStr::from_bytes(r.host.as_bytes()));
                 if let Err(error) = super::cgroup::made_group(dir, &r.guest) {
@@ -121,10 +118,10 @@ pub fn mknodat(a: [u64; 6]) -> i64 {
     }
     let res = mknod_host(&r, mode);
     if res == 0 {
-        if let Err(error) = attrs::created(Host::Path(&r.host), || r.guest.clone()) {
-            return -(error as i64);
-        }
-        if let Err(error) = super::fs::record_created_mode(Host::Path(&r.host), &r.guest, mode) {
+        let host = Host::Path(&r.host);
+        if let Err(error) = super::fs::created_mode(host, mode)
+            .and_then(|mode| attrs::created(host, || r.guest.clone(), mode))
+        {
             return -(error as i64);
         }
     }
@@ -436,7 +433,7 @@ pub fn symlinkat(a: [u64; 6]) -> i64 {
             // SAFETY: host path.
             let res = errno::check(unsafe { libc::symlink(t.as_ptr(), r.host.as_ptr()) } as i64);
             if res == 0 {
-                if let Err(error) = attrs::created(Host::Path(&r.host), || r.guest.clone()) {
+                if let Err(error) = attrs::created(Host::Path(&r.host), || r.guest.clone(), None) {
                     return -(error as i64);
                 }
             }

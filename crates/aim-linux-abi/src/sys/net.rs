@@ -844,14 +844,10 @@ fn record_bound(name: &[u8]) -> Result<(), errno::Errno> {
         return Ok(());
     };
     let r = vfs::resolve(vfs::LINUX_AT_FDCWD, guest.as_bytes(), false)?;
-    super::attrs::created(super::attrs::Host::Path(&r.host), || r.guest.clone())?;
-    super::attrs::record_checked(
+    super::attrs::created(
         super::attrs::Host::Path(&r.host),
         || r.guest.clone(),
-        super::attrs::Attr {
-            mode: Some(0o777 & !super::pstate::current_umask()),
-            ..Default::default()
-        },
+        Some(0o777 & !super::pstate::current_umask()),
     )
 }
 

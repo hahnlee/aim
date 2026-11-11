@@ -83,7 +83,7 @@ pub fn open(dir: &Resolved, excl: bool, hflags: i32, mode: u64) -> i64 {
     if fd < 0 {
         return -(errno::last() as i64);
     }
-    if let Err(error) = attrs::created(Host::Fd(fd), || format!("{}/{name}", dir.guest)) {
+    if let Err(error) = attrs::created(Host::Fd(fd), || format!("{}/{name}", dir.guest), None) {
         unsafe {
             libc::close(fd);
             libc::unlink(host.as_ptr());

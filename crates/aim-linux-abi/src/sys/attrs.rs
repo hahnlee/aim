@@ -691,6 +691,17 @@ pub fn record_checked(
     guest: impl FnOnce() -> String,
     a: Attr,
 ) -> Result<(), crate::errno::Errno> {
+    record_inode(host, guest, a, true)
+}
+
+/// [`record_checked`]: `a` over what the inode has recorded, or with
+/// `merge` false, as all it has (a new inode has nothing to keep).
+fn record_inode(
+    host: Host,
+    guest: impl FnOnce() -> String,
+    a: Attr,
+    merge: bool,
+) -> Result<(), crate::errno::Errno> {
     if !recording() {
         return Ok(());
     }
@@ -703,7 +714,12 @@ pub fn record_checked(
                 return table_record_key(&device_key(&stat), a.over(previous));
             }
         }
-        if set_guest(host, a)? {
+        let stored = if merge {
+            set_guest(host, a)?
+        } else {
+            set(host, GUEST, &encode(a))?
+        };
+        if stored {
             return Ok(());
         }
         table_record(&guest(), a)
@@ -824,8 +840,14 @@ pub fn absent(host: &CStr) -> bool {
 }
 
 /// The guest created `host`: it belongs to the guest's identity, as on
-/// Linux (only under a path map).
-pub fn created(host: Host, guest: impl FnOnce() -> String) -> Result<(), crate::errno::Errno> {
+/// Linux, with `mode` where its creator gives one (else the host's), and
+/// an inherited S_ISGID (only under a path map). All of it is recorded at
+/// once.
+pub fn created(
+    host: Host,
+    guest: impl FnOnce() -> String,
+    mode: Option<u32>,
+) -> Result<(), crate::errno::Errno> {
     if !recording() {
         return Ok(());
     }
@@ -846,24 +868,15 @@ pub fn created(host: Host, guest: impl FnOnce() -> String) -> Result<(), crate::
         &mut parent_stat,
     );
     super::fscrypt::inherit(Host::Path(&parent.host), parent_stat.st_dev, host)?;
-    let mut mode = None;
+    let mut mode = mode;
     if parent_stat.st_mode & libc::S_ISGID != 0 {
         gid = parent_stat.st_gid;
-        let mut child: libc::stat = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            match host {
-                Host::Fd(fd) => libc::fstat(fd, &mut child),
-                Host::Path(path) | Host::Image(path) => libc::lstat(path.as_ptr(), &mut child),
-            }
-        };
-        if result < 0 {
-            return Err(crate::errno::last());
-        }
+        let child = host_stat(host)?;
         if child.st_mode & libc::S_IFMT == libc::S_IFDIR {
-            mode = Some((child.st_mode as u32 & 0o7777) | libc::S_ISGID as u32);
+            mode = Some(mode.unwrap_or(child.st_mode as u32 & 0o7777) | libc::S_ISGID as u32);
         }
     }
-    record_checked(
+    record_inode(
         host,
         || guest,
         Attr {
@@ -871,6 +884,7 @@ pub fn created(host: Host, guest: impl FnOnce() -> String) -> Result<(), crate::
             gid: Some(gid),
             mode,
         },
+        false,
     )
 }
 
@@ -1222,6 +1236,63 @@ mod tests {
         assert_eq!(table_lookup_key("/table-generation").uid, Some(1234));
         advance();
         assert_eq!(table_lookup_key("/table-generation").uid, Some(4321));
+    }
+
+    /// A creation records its owner and its mode in one attribute write,
+    /// with an inherited S_ISGID on a directory.
+    #[test]
+    fn a_creation_records_owner_and_mode_at_once() {
+        let (_guard, root) = crate::vfs::test_view();
+        let at = crate::vfs::LINUX_AT_FDCWD as u64;
+        let guest = |name: &str| std::ffi::CString::new(format!("/data/{name}")).unwrap();
+        let host = |name: &str| {
+            std::ffi::CString::new(root.join("data").join(name).as_os_str().as_encoded_bytes())
+                .unwrap()
+        };
+        let _ = std::fs::remove_dir_all(root.join("data/created-once"));
+        let parent = guest("created-once");
+        assert_eq!(
+            super::super::fsops::mkdirat([at, parent.as_ptr() as u64, 0o2770, 0, 0, 0]),
+            0
+        );
+        record_checked(
+            Host::Path(&host("created-once")),
+            || "/data/created-once".into(),
+            Attr {
+                gid: Some(1077),
+                mode: Some(0o2770),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (uid, _) = ids(FS);
+        let dir = guest("created-once/dir");
+        assert_eq!(
+            super::super::fsops::mkdirat([at, dir.as_ptr() as u64, 0o751, 0, 0, 0]),
+            0
+        );
+        let umask = super::super::pstate::current_umask();
+        assert_eq!(
+            guest_attr(Host::Path(&host("created-once/dir"))),
+            Some(Attr {
+                uid: Some(uid),
+                gid: Some(1077),
+                mode: Some(0o2000 | (0o751 & !umask)),
+            })
+        );
+        let file = guest("created-once/file");
+        let fd = super::super::fs::openat([at, file.as_ptr() as u64, 0o101, 0o640, 0, 0]);
+        assert!(fd >= 0, "{fd}");
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(
+            guest_attr(Host::Path(&host("created-once/file"))),
+            Some(Attr {
+                uid: Some(uid),
+                gid: Some(1077),
+                mode: Some(0o640 & !umask),
+            })
+        );
+        std::fs::remove_dir_all(root.join("data/created-once")).unwrap();
     }
 
     /// A process's threads share its lock file, so they exclude each other

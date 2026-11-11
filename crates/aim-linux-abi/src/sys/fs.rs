@@ -394,7 +394,7 @@ fn openat_host(r: &vfs::Resolved, flags: u64, mode: u64, id: &super::cred::Ident
     }
     // A file the guest creates keeps its owner's access on the host, as
     // mkdirat's does (fsops::host_mode), so its recorded metadata stays
-    // readable; the guest's mode is recorded when the host's differs.
+    // readable; the guest's mode is recorded with its owner.
     let host_create_mode = if creating && attrs::recording() {
         mode | 0o600
     } else {
@@ -420,13 +420,10 @@ fn openat_host(r: &vfs::Resolved, flags: u64, mode: u64, id: &super::cred::Ident
         }
     }
     if creating {
-        if let Err(error) = attrs::created(attrs::Host::Fd(fd), || r.guest.clone()) {
-            unsafe {
-                libc::close(fd);
-            }
-            return -(error as i64);
-        }
-        if let Err(error) = record_created_mode(attrs::Host::Fd(fd), &r.guest, mode as u32) {
+        let host = attrs::Host::Fd(fd);
+        if let Err(error) = created_mode(host, mode as u32)
+            .and_then(|mode| attrs::created(host, || r.guest.clone(), mode))
+        {
             unsafe {
                 libc::close(fd);
             }
@@ -550,13 +547,12 @@ fn openat_host(r: &vfs::Resolved, flags: u64, mode: u64, id: &super::cred::Ident
 
 /// The mode of a file the guest created with `want`, under the umask,
 /// recorded when the host's (which keeps its owner's access) differs.
-pub(super) fn record_created_mode(
-    host: attrs::Host,
-    guest: &str,
-    want: u32,
-) -> Result<(), errno::Errno> {
+/// The guest mode of a file just created at `host` with mode `want`: the
+/// host's, whose owner bits keep the owner's access (fsops::host_mode),
+/// with the owner bits `want` gives under the umask.
+pub(super) fn created_mode(host: attrs::Host, want: u32) -> Result<Option<u32>, errno::Errno> {
     if !attrs::recording() {
-        return Ok(());
+        return Ok(None);
     }
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     let got = unsafe {
@@ -568,21 +564,9 @@ pub(super) fn record_created_mode(
     if got < 0 {
         return Err(errno::last());
     }
-    attrs::apply(host, || guest.into(), &mut st);
     let made = st.st_mode as u32 & 0o7777;
     let wanted = want & 0o7777 & !super::pstate::current_umask();
-    let mode = (made & !0o700) | (wanted & 0o700);
-    if mode == made {
-        return Ok(());
-    }
-    attrs::record_checked(
-        host,
-        || guest.into(),
-        attrs::Attr {
-            mode: Some(mode),
-            ..Default::default()
-        },
-    )
+    Ok(Some((made & !0o700) | (wanted & 0o700)))
 }
 
 fn open_permissions(
@@ -3339,9 +3323,11 @@ mod dac_tests {
             ready.recv_timeout(Duration::from_secs(5)).unwrap();
             ready.recv_timeout(Duration::from_secs(5)).unwrap();
             let early = received.recv_timeout(Duration::from_millis(100)).ok();
-            attrs::created(attrs::Host::Fd(file.as_raw_fd()), || {
-                "/data/create-publication/database".into()
-            })?;
+            attrs::created(
+                attrs::Host::Fd(file.as_raw_fd()),
+                || "/data/create-publication/database".into(),
+                None,
+            )?;
             Ok(early)
         })
         .unwrap();
