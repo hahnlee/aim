@@ -47,13 +47,14 @@ pub fn pixels(dp: f64, density: u32) -> f64 {
     dp * density as f64 / DENSITY_DEFAULT as f64
 }
 
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-    fn CGMainDisplayID() -> u32;
-    fn CGDisplayCopyDisplayMode(display: u32) -> *const c_void;
-    fn CGDisplayModeGetPixelWidth(mode: *const c_void) -> usize;
-    fn CGDisplayModeGetWidth(mode: *const c_void) -> usize;
-    fn CGDisplayModeRelease(mode: *const c_void);
+aim_hostcall::dylib! {
+    static CORE_GRAPHICS = c"/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics" {
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayCopyDisplayMode(display: u32) -> *const c_void;
+        fn CGDisplayModeGetPixelWidth(mode: *const c_void) -> usize;
+        fn CGDisplayModeGetWidth(mode: *const c_void) -> usize;
+        fn CGDisplayModeRelease(mode: *const c_void);
+    }
 }
 
 #[cfg(test)]

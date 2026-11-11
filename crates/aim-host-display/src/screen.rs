@@ -16,28 +16,30 @@ struct CGRect {
     height: f64,
 }
 
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-    fn CGSessionCopyCurrentDictionary() -> *const c_void;
-    fn CGMainDisplayID() -> u32;
-    fn CGDisplayIsAsleep(display: u32) -> u32;
-    fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> *const c_void;
-    fn CGRectMakeWithDictionaryRepresentation(dict: *const c_void, rect: *mut CGRect) -> bool;
+aim_hostcall::dylib! {
+    static CORE_GRAPHICS = c"/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics" {
+        fn CGSessionCopyCurrentDictionary() -> *const c_void;
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayIsAsleep(display: u32) -> u32;
+        fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> *const c_void;
+        fn CGRectMakeWithDictionaryRepresentation(dict: *const c_void, rect: *mut CGRect) -> bool;
+    }
 }
 
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    fn CFDictionaryGetValue(dict: *const c_void, key: *const c_void) -> *const c_void;
-    fn CFStringCreateWithCString(
-        alloc: *const c_void,
-        s: *const std::ffi::c_char,
-        encoding: u32,
-    ) -> *const c_void;
-    fn CFBooleanGetValue(b: *const c_void) -> bool;
-    fn CFNumberGetValue(number: *const c_void, kind: isize, value: *mut c_void) -> bool;
-    fn CFArrayGetCount(array: *const c_void) -> isize;
-    fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
-    fn CFRelease(obj: *const c_void);
+aim_hostcall::dylib! {
+    static CORE_FOUNDATION = c"/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation" {
+        fn CFDictionaryGetValue(dict: *const c_void, key: *const c_void) -> *const c_void;
+        fn CFStringCreateWithCString(
+            alloc: *const c_void,
+            s: *const std::ffi::c_char,
+            encoding: u32,
+        ) -> *const c_void;
+        fn CFBooleanGetValue(b: *const c_void) -> bool;
+        fn CFNumberGetValue(number: *const c_void, kind: isize, value: *mut c_void) -> bool;
+        fn CFArrayGetCount(array: *const c_void) -> isize;
+        fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
+        fn CFRelease(obj: *const c_void);
+    }
 }
 
 const UTF8: u32 = 0x0800_0100;

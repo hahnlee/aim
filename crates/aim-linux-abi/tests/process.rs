@@ -372,6 +372,11 @@ fn fork_copies_private_memory_and_shares_shared_memory() {
 }
 
 #[test]
+fn fork_copies_adjacent_mappings_with_their_own_protections() {
+    check("fork_memory_runs");
+}
+
+#[test]
 fn a_parent_that_exits_right_after_fork_leaves_a_running_child() {
     check("fork_then_exit");
 }

@@ -51,6 +51,11 @@ The design is the one Cygwin uses on Windows. The parent spawns a fresh
    - nothing for an entry that was never touched. The child allocates it
      afresh.
 
+   Adjacent private entries (JIT memory aside) are copied as one: one
+   memory entry for the run, which the child maps once and then gives
+   each part its own protection: the 4,124 entries of
+   `fork_latency_with_a_large_address_space` take 10 memory entries.
+
    Copies are taken before `fork` returns, so what the parent writes
    afterwards stays its own.
 3. **State.** The layer's per-process state is written into one blob
@@ -168,3 +173,8 @@ window, binder connection, receiving and mapping the parent's memory,
 restoring the state) takes about 1 ms of the ~6 ms before it resumes the
 guest; the rest is exec and dyld. In a debug build, each mapping cost
 about 1.7 µs to snapshot in the parent and 1.2 µs to map in the child.
+Since adjacent copies are taken as one, a release fork of the 4,124
+entries above spends about 3.7 ms walking them (one `proc_pidinfo` each),
+0.6 ms making memory entries and 2.5 ms in the child mapping and
+protecting them; `fork` in that parent went from 15-18 to 10-14.5 ms
+(2026-11-11, load 9-13).

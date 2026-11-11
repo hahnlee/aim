@@ -2687,38 +2687,54 @@ pub fn load_own_mounts(text: &str) -> Result<(), Errno> {
 /// One inverse namespace view for a generated procfs read. Host aliases are
 /// resolved once per view; a later read observes mount and symlink changes.
 pub(crate) struct HostPathView {
-    mounts: Arc<Vec<(String, PathBuf)>>,
+    visible: Arc<Visible>,
     root: PathBuf,
     canonical_mounts: std::cell::OnceCell<Vec<(String, PathBuf)>>,
     canonical_root: std::cell::OnceCell<PathBuf>,
+}
+
+/// The visible mounts of a mount table, by guest and host path.
+struct Visible {
+    mounts: Vec<(String, PathBuf)>,
+    /// Those whose host path is not canonical when the table is first
+    /// seen (an alias through a symlink, or not there yet): each view
+    /// resolves them again. A canonical one stays so (`canonical_host`).
+    aliases: Vec<(String, PathBuf)>,
 }
 
 impl HostPathView {
     pub(crate) fn capture() -> Option<Self> {
         /// The visible mounts of the last mount table seen, by its
         /// generation: the table changes far less often than a stat asks.
-        static VISIBLE: Mutex<Option<(u64, Arc<Vec<(String, PathBuf)>>)>> = Mutex::new(None);
+        static VISIBLE: Mutex<Option<(u64, Arc<Visible>)>> = Mutex::new(None);
         let v = VFS.get()?;
         let mounts = v.mounts.read().unwrap();
         let mut visible = VISIBLE.lock().unwrap();
         let current = match visible.as_ref() {
             Some((generation, current)) if *generation == mounts.generation() => current.clone(),
             _ => {
-                let current: Arc<Vec<_>> = Arc::new(
-                    mounts
-                        .iter()
-                        .enumerate()
-                        .filter(|(index, _)| mounts.visible(*index))
-                        .map(|(_, m)| (m.guest.clone(), m.host.clone()))
-                        .collect(),
-                );
+                let all: Vec<_> = mounts
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| mounts.visible(*index))
+                    .map(|(_, m)| (m.guest.clone(), m.host.clone()))
+                    .collect();
+                let aliases = all
+                    .iter()
+                    .filter(|(_, host)| canonical_host(host).as_ref() != Some(host))
+                    .cloned()
+                    .collect();
+                let current = Arc::new(Visible {
+                    mounts: all,
+                    aliases,
+                });
                 *visible = Some((mounts.generation(), current.clone()));
                 current
             }
         };
         drop(visible);
         Some(Self {
-            mounts: current,
+            visible: current,
             root: v.root.clone(),
             canonical_mounts: std::cell::OnceCell::new(),
             canonical_root: std::cell::OnceCell::new(),
@@ -2735,7 +2751,8 @@ impl HostPathView {
         }
         let mut best: Option<(usize, usize, String)> = None;
         let canonical = self.canonical_mounts.get_or_init(|| {
-            self.mounts
+            self.visible
+                .aliases
                 .iter()
                 .filter_map(|(guest, path)| canonical_host(path).map(|path| (guest.clone(), path)))
                 .collect()
@@ -2750,6 +2767,7 @@ impl HostPathView {
             ("/".to_owned(), root.clone()),
         ];
         for (guest, prefix) in self
+            .visible
             .mounts
             .iter()
             .chain(canonical.iter())
@@ -4083,6 +4101,35 @@ mod tests {
         std::fs::remove_file(alias).unwrap();
         std::fs::remove_dir(before).unwrap();
         std::fs::remove_dir(after).unwrap();
+    }
+
+    #[test]
+    fn inverse_view_resolves_again_only_mounts_not_canonical() {
+        let (_view, dir) = test_view();
+        let canonical = dir.join("inverse-canonical");
+        std::fs::create_dir_all(&canonical).unwrap();
+        let canonical = canonical.canonicalize().unwrap();
+        let alias = dir.join("inverse-canonical-alias");
+        std::os::unix::fs::symlink(&canonical, &alias).unwrap();
+        for (guest, host) in [
+            ("/inverse-canonical", &canonical),
+            ("/inverse-through-alias", &alias),
+        ] {
+            add_mount(guest, host.clone(), Area::Writable, "tmpfs", "tmpfs").unwrap();
+        }
+        let read = HostPathView::capture().unwrap();
+        let aliases: Vec<&str> = read
+            .visible
+            .aliases
+            .iter()
+            .map(|(g, _)| g.as_str())
+            .collect();
+        assert!(aliases.contains(&"/inverse-through-alias"));
+        assert!(!aliases.contains(&"/inverse-canonical"));
+        assert!(remove_mount("/inverse-canonical").unwrap());
+        assert!(remove_mount("/inverse-through-alias").unwrap());
+        std::fs::remove_file(alias).unwrap();
+        std::fs::remove_dir(canonical).unwrap();
     }
 
     #[test]

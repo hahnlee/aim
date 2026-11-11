@@ -9438,7 +9438,14 @@ shipped (#722), so the scan parses every package: 0.63-1.03 s against
 0.42-0.48 s on a repeat boot, `pms_start` to `pms_ready` 0.85-1.35 s
 (host load 8-14, 2026-10-02). Between the mount and zygote-start, init runs its exec
 programs one after another (about 25-120 ms each, mostly starting
-`linux-run`). A process's POSIX lock holder (`aim-lock-holder`) starts
+`linux-run`). A short-lived program such as `vdc` or `service` spends
+about 4 ms before `linux-run`'s `main` (spawn and dyld; `linux-run`
+links only libSystem and libiconv again, 1.2 ms less per start, #3008),
+about 4.5 ms from `main` to its first guest instruction, and 6-15 ms in
+syscalls, the largest share in the linker's 40-120 opens of its
+libraries and properties and its `readlink` of `/proc/self/fd/N` after
+each (8-11 us from 34 us since a path walk no longer lists `/proc` and
+the fds, 2026-11-11). A process's POSIX lock holder (`aim-lock-holder`) starts
 at its first lock, for a process init launches as for a fork child;
 init's launches had each waited about 8 ms for one, so zygote-start
 came 0.25-0.35 s later on a warm boot (2026-11-11). The app host image
