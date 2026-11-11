@@ -289,6 +289,21 @@ fn wait_events(system: &System, timeout: i64) {
             .unwrap()
     );
 }
+/// A package change's effects: the handler task it posted and the monitor
+/// callbacks that task posts in turn (`PackageMonitorCallbackHelper`), so
+/// two barriers on the one handler see both run.
+fn wait_handled_events(system: &System) {
+    for _ in 0..2 {
+        wait_events(system, 30_000);
+    }
+}
+/// A component reset's callback: its broadcast is pending until due
+/// (`sendMessageDelayed(SEND_PENDING_BROADCAST)`), which no handler barrier
+/// sees, so this waits on the callback itself, then on what it posted.
+fn wait_delayed_change(system: &System, receive: &mpsc::Receiver<()>) {
+    receive.recv_timeout(Duration::from_secs(30)).unwrap();
+    wait_handled_events(system);
+}
 fn register_monitor(fixture: &Fixture, services: &[&dyn Service]) -> mpsc::Receiver<()> {
     let (send, receive) = mpsc::channel();
     let monitor = fixture.native.add_service(Arc::new(Monitor(send)));
@@ -690,8 +705,8 @@ fn cached_and_public_hosts_share_one_monitor_registry() {
     assert!(receive.try_recv().is_err());
     let (code, request) = enabled_request(Some("p.Main"), 2, 0);
     ok(transact(&cached, 1000, code, &request));
-    receive.recv_timeout(Duration::from_secs(2)).unwrap();
-    wait_events(&fixture.system, 2000);
+    wait_handled_events(&fixture.system);
+    receive.try_recv().unwrap();
     assert!(
         receive.try_recv().is_err(),
         "a callback registered through both handles fires once"
@@ -939,8 +954,8 @@ fn delayed_enable_publishes_before_its_single_callback() {
     let receive = register_monitor(&fixture, &[&cached]);
     let (code, request) = enabled_request(Some("p.Main"), 2, 0);
     ok(transact(&cached, 1000, code, &request));
-    receive.recv_timeout(Duration::from_secs(2)).unwrap();
-    wait_events(&fixture.system, 2000);
+    wait_handled_events(&fixture.system);
+    receive.try_recv().unwrap();
     let (_, request) = enabled_request(Some("p.Main"), 0, 1);
     ok(transact(
         &cached,
@@ -1006,8 +1021,8 @@ fn retained_enabled_setter_notifies_once(application: bool) {
             .publish_prepared_package_mutation(&bridge, &base, prepared, &dependencies, 1000)
             .unwrap();
     }
-    receive.recv_timeout(Duration::from_secs(2)).unwrap();
-    wait_events(&fixture.system, 2000);
+    wait_handled_events(&fixture.system);
+    receive.try_recv().unwrap();
     assert!(
         receive.try_recv().is_err(),
         "idempotent retained setter repeats no monitor effect"
@@ -1038,8 +1053,8 @@ fn component_reset_publishes_and_notifies_without_resetting_application() {
     for class in [Some("p.Main"), None] {
         let (code, request) = enabled_request(class, if class.is_some() { 2 } else { 3 }, 0);
         ok(transact(&cached, 1000, code, &request));
-        receive.recv_timeout(Duration::from_secs(2)).unwrap();
-        wait_events(&fixture.system, 2000);
+        wait_handled_events(&fixture.system);
+        receive.try_recv().unwrap();
         assert!(receive.try_recv().is_err());
     }
     let before_reset = fixture.system.capture_package_queries().unwrap();
@@ -1059,8 +1074,7 @@ fn component_reset_publishes_and_notifies_without_resetting_application() {
         before_reset.state().packages["p"].users[&0].disabled_components,
         ["p.Main"]
     );
-    receive.recv_timeout(Duration::from_secs(2)).unwrap();
-    wait_events(&fixture.system, 2000);
+    wait_delayed_change(&fixture.system, &receive);
     assert!(receive.try_recv().is_err());
     drop(workers);
 }
@@ -1268,7 +1282,8 @@ fn cached_host_data_clear_completes_after_session_publication_and_reports_failur
         &request,
     ));
     let base = fixture.system.capture_package_queries().unwrap();
-    event_receive.recv_timeout(Duration::from_secs(2)).unwrap();
+    wait_handled_events(&fixture.system);
+    event_receive.try_recv().unwrap();
     grants.store(true, Ordering::SeqCst);
     fixture
         .system
@@ -1325,8 +1340,7 @@ fn cached_host_data_clear_completes_after_session_publication_and_reports_failur
         (restriction.ce_data_inode, restriction.de_data_inode),
         (991, 992)
     );
-    event_receive.recv_timeout(Duration::from_secs(2)).unwrap();
-    wait_events(&fixture.system, 3000);
+    wait_delayed_change(&fixture.system, &event_receive);
     assert!(event_receive.try_recv().is_err());
     fail_clear.store(true, Ordering::SeqCst);
     ok(transact(
