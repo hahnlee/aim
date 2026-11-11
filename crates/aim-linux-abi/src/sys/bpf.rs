@@ -407,10 +407,10 @@ fn elem(cmd: u64, a: &[u64]) -> i64 {
     let r = with_map(fd, |m| {
         let h = m.h();
         // `map_get_sys_perms`: a lookup needs a readable fd, a change a
-        // writable one.
+        // writable one, and a frozen map writes through none.
         let permitted = match cmd {
             MAP_LOOKUP_ELEM | MAP_GET_NEXT_KEY => access != libc::O_WRONLY,
-            _ => access != libc::O_RDONLY,
+            _ => access != libc::O_RDONLY && h.frozen == 0,
         };
         if !permitted {
             return Err(-(EPERM as i64));
@@ -435,9 +435,6 @@ fn elem(cmd: u64, a: &[u64]) -> i64 {
             MAP_UPDATE_ELEM => {
                 let key = key?;
                 let value = guest_bytes(value_p, vlen)?;
-                if h.frozen != 0 {
-                    return Err(-(EPERM as i64));
-                }
                 let _g = m.lock();
                 if !hashed(h.ty) {
                     if flags == BPF_NOEXIST {
@@ -924,8 +921,11 @@ pub fn bpf(a: [u64; 6]) -> i64 {
         MAP_FREEZE => {
             let fd = object_fd.unwrap();
             match read_header(fd) {
-                // `map_freeze` needs a writable fd.
-                Some((h, _)) if h.kind == KIND_MAP && access_of(fd) == libc::O_RDONLY => {
+                // `map_freeze` needs a writable fd, which a frozen map
+                // has not (`map_get_sys_perms`).
+                Some((h, _))
+                    if h.kind == KIND_MAP && (access_of(fd) == libc::O_RDONLY || h.frozen != 0) =>
+                {
                     -(EPERM as i64)
                 }
                 Some((h, st)) if h.kind == KIND_MAP => {
@@ -1371,6 +1371,20 @@ mod tests {
             );
         }
         assert!(map.keys().unwrap().is_empty());
+        // A frozen map changes through no fd, before its key is read, and
+        // freezes once.
+        assert_eq!(elem(fd, MAP_UPDATE_ELEM, key(&10), vp, 0), 0);
+        let mut freeze = [0u32; 24];
+        freeze[0] = fd as u32;
+        assert_eq!(call(MAP_FREEZE, &mut freeze), 0);
+        assert_eq!(call(MAP_FREEZE, &mut freeze), -(EPERM as i64));
+        assert_eq!(
+            elem(fd, MAP_DELETE_ELEM, key(&10), std::ptr::null_mut(), 0),
+            -(EPERM as i64)
+        );
+        let bad = 1usize as *mut u8;
+        assert_eq!(elem(fd, MAP_UPDATE_ELEM, bad, bad, 0), -(EPERM as i64));
+        assert_eq!(elem(fd, MAP_LOOKUP_ELEM, key(&10), op, 0), 0);
         let mut info = [0u8; 80];
         let mut a = [0u32; 6];
         a[0] = fd as u32;
