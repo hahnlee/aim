@@ -1330,10 +1330,19 @@ mod tests {
             return;
         };
         let (_view, _dir, target) = setup();
+        std::fs::create_dir_all(_dir.join("data/bpf")).unwrap();
+        vfs::add_mount(
+            "/sys/fs/bpf",
+            _dir.join("data/bpf"),
+            vfs::Area::Writable,
+            "bpf",
+            "bpf",
+        )
+        .unwrap();
         let map = call(MAP_CREATE, &[HASH, 4, 1, 16, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert!(map >= 0);
         let kernel = Kernel::of(map as i32).unwrap();
-        let name = CString::new("/data/map-pin").unwrap();
+        let name = CString::new("/sys/fs/bpf/map-pin").unwrap();
         let pin = [name.as_ptr() as u64, map as u64, 0];
         assert_eq!(bpf([OBJ_PIN, pin.as_ptr() as u64, 24, 0, 0, 0]), 0);
         close(map);
@@ -1355,7 +1364,7 @@ mod tests {
         assert_eq!(attach_at(target, program, false), 0);
         close(program);
         close(map);
-        std::fs::remove_file(_dir.join("data/map-pin")).unwrap();
+        std::fs::remove_file(_dir.join("data/bpf/map-pin")).unwrap();
         // Another map, irrespective of any FD reuse, cannot replace this map.
         let unrelated = call(MAP_CREATE, &[HASH, 4, 1, 16, 0, 0, 0, 0, 0, 0, 0, 0]);
         Kernel::of(unrelated as i32)
