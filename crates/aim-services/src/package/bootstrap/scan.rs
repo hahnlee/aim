@@ -75,6 +75,8 @@ pub enum BootError {
 #[derive(Clone, Copy)]
 pub struct ScanPolicy<'a> {
     pub parser_cache: Option<&'a std::path::Path>,
+    /// The packages parsed before the scan, which it takes where its inputs are the same.
+    pub ahead: Option<&'a crate::package::scan::Ahead>,
     pub certificates: crate::package::scan::CertificateScanPolicy,
     pub seinfo: &'a Policy,
     pub apex_parse_flags: i32,
@@ -183,7 +185,14 @@ impl BootOwners<'_> {
     ) -> Result<SystemImageScan, BootError> {
         self.with_scan_inputs(apks, policy, |inputs| {
             SystemImageScan::first_boot_parsed(
-                || Image::parse_cached(apks, &self.apex.scan_apexes(), policy.parser_cache),
+                || {
+                    Image::parse_cached(
+                        apks,
+                        &self.apex.scan_apexes(),
+                        policy.parser_cache,
+                        policy.ahead,
+                    )
+                },
                 apks,
                 self.config,
                 inputs,
@@ -210,8 +219,13 @@ impl BootOwners<'_> {
                     message,
                 })
             })?;
-            let image = Image::parse_cached(apks, &self.apex.scan_apexes(), policy.parser_cache)
-                .map_err(SigningError::Rejected)?;
+            let image = Image::parse_cached(
+                apks,
+                &self.apex.scan_apexes(),
+                policy.parser_cache,
+                policy.ahead,
+            )
+            .map_err(SigningError::Rejected)?;
             let system =
                 owner.scan_saved_parsed_system_image(image, apks, self.config, inputs, saved)?;
             Ok(SavedSystemPhase { apex, system })
@@ -227,9 +241,13 @@ impl BootOwners<'_> {
         policy: ScanPolicy<'_>,
         data: DataBootInputs<'_>,
     ) -> Result<crate::package::scan::DataImagePackages, BootError> {
-        let image =
-            crate::package::scan::DataImage::parse_cached(apks, data.volumes, policy.parser_cache)
-                .map_err(|error| BootError::Scan(SigningError::Rejected(error)))?;
+        let image = crate::package::scan::DataImage::parse_cached(
+            apks,
+            data.volumes,
+            policy.parser_cache,
+            policy.ahead,
+        )
+        .map_err(|error| BootError::Scan(SigningError::Rejected(error)))?;
         let remove_test_base = |package: &AndroidPackage, system| {
             self.policy
                 .remove_test_base(package, system)

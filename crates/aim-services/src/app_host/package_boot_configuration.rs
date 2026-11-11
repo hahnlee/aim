@@ -10,7 +10,7 @@
 //! inventories UserManagerService gives the boot.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aim_binder_host::local::{Call, Reply, Service};
@@ -99,16 +99,9 @@ impl BootConfiguration {
 
     fn prepare_parser_cache(&self) -> Result<Option<String>, Exception> {
         let property = |name: &str| self.host.property(name);
-        if property("ro.build.type").as_deref() == Some("eng")
-            || matches!(
-                property("pm.boot.disable_package_cache").as_deref(),
-                Some("1" | "y" | "yes" | "on" | "true")
-            )
-        {
+        let Some((base, name)) = parser_cache_location(&self.host)? else {
             return Ok(None);
-        }
-        let base = self.host.data()?.join(PACKAGE_CACHE);
-        let name = super::app_data::fingerprint(property);
+        };
         let framework = self.host.root()?.join("system/framework");
         let incremental = property("ro.build.version.incremental").unwrap_or_default();
         let userdebug_eng = property("ro.build.type").as_deref() == Some("userdebug")
@@ -155,6 +148,35 @@ impl BootConfiguration {
         }
         Ok(users)
     }
+}
+
+/// The parser cache's directory and name, as [`BootConfiguration`]
+/// prepares it, without preparing it; none when the boot keeps no cache.
+pub(super) fn parser_cache_location(
+    host: &AppHost,
+) -> Result<Option<(PathBuf, String)>, Exception> {
+    let property = |name: &str| host.property(name);
+    if property("ro.build.type").as_deref() == Some("eng")
+        || matches!(
+            property("pm.boot.disable_package_cache").as_deref(),
+            Some("1" | "y" | "yes" | "on" | "true")
+        )
+    {
+        return Ok(None);
+    }
+    Ok(Some((
+        host.data()?.join(PACKAGE_CACHE),
+        super::app_data::fingerprint(property),
+    )))
+}
+
+/// The language and country a resource configuration packs for the first
+/// locale of `tags`, as [`resources`] packs them.
+pub(super) fn locale_codes(tags: &str) -> Result<([u8; 2], [u8; 2]), Exception> {
+    let first = tags.split(',').next().unwrap_or_default();
+    let (language, country) = language_and_country(first);
+    let bytes = |[a, b]: [i32; 2]| [a as u8, b as u8];
+    Ok((bytes(pack(&language, b'a')?), bytes(pack(&country, b'0')?)))
 }
 
 /// `ResourcesManager`'s `RESOURCES_SDK_INT`: the SDK, one more before its

@@ -3070,6 +3070,7 @@ fn verify_boot_scan(
     };
     let policy = || ScanPolicy {
         parser_cache: None,
+        ahead: None,
         certificates: Default::default(),
         seinfo: &seinfo,
         apex_parse_flags: crate::package::parse::PARSE_IS_SYSTEM_DIR,

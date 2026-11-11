@@ -77,7 +77,9 @@ pub use seinfo::{SeInfoCompatibility, SeInfoScan, SeInfoSetting, SeInfoState};
 mod uids;
 mod validate;
 pub use identity::Identity;
-pub use image::{Apex, Code, DataCode, DataImage, Image, Kind, Location, Partition, Rejected};
+pub use image::{
+    Ahead, Apex, Code, DataCode, DataImage, Image, Kind, Location, Partition, Rejected,
+};
 pub use setting::{NewSetting, SettingMetadata, SettingUpdate, User, UserPolicy};
 pub use signing::{
     NewPackageOutcome, SharedUidMigration, SigningError, SigningOutcome, SigningScan,

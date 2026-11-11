@@ -25,7 +25,15 @@ pub(super) struct Entry {
 impl Cache {
     /// No prepared directory or image identity means a cold parse.
     pub fn open(apks: &Apks, directory: Option<&Path>) -> Option<Self> {
-        let dir = directory?.to_owned();
+        let cache = Self::existing(apks, directory?)?;
+        fs::create_dir_all(&cache.dir).ok()?;
+        Some(cache)
+    }
+
+    /// The cache `dir` holds or will hold, read without being made: its
+    /// entries are found only once the boot owner prepared it.
+    pub fn existing(apks: &Apks, dir: &Path) -> Option<Self> {
+        let dir = dir.to_owned();
         let image = fs::read((apks.files)("/.identity")?).ok()?;
         let exe = fs::metadata(std::env::current_exe().ok()?).ok()?;
         let p = &apks.platform;
@@ -58,7 +66,6 @@ impl Cache {
                 split.name, split.new_permissions, split.target_sdk
             ));
         }
-        fs::create_dir_all(&dir).ok()?;
         Some(Self { dir, base })
     }
 
@@ -73,6 +80,11 @@ impl Cache {
             path: self.dir.join(format!("{name}-{flags}-{}", java_hash(path))),
             stamp: key.finalize().into(),
         })
+    }
+
+    /// Whether `entry` keys the same inputs as `other`.
+    pub fn same(entry: &Entry, other: &Entry) -> bool {
+        entry.stamp == other.stamp
     }
 
     pub fn read(&self, entry: &Entry, path: &str) -> Option<AndroidPackage> {
