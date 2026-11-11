@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <pthread.h>
+#include <sys/socket.h>
+#include <string.h>
 static sigjmp_buf jump;
 static volatile uintptr_t address;
 static volatile sig_atomic_t armed;
@@ -102,5 +104,19 @@ int main(void) {
  CHECK(address==(uintptr_t)(map+32768));
  unsigned char *shrunk=mremap(map,49152,16384,0);CHECK(shrunk==map);CHECK(map[17]==91);CHECK(munmap(map,16384)==0);
  CHECK(fork_while_paging()==0);
+ // Results written into a verified page not faulted in yet, under the
+ // descriptor table's lock: the page is faulted in before it.
+ {
+  int fd=open("/data/verity-data",O_RDONLY);CHECK(fd>=0);
+  unsigned char *p=mmap(0,16384,PROT_READ|PROT_WRITE,MAP_PRIVATE,fd,0);CHECK(p!=MAP_FAILED);CHECK(close(fd)==0);
+  CHECK(p[17]==37);CHECK(madvise(p,16384,MADV_DONTNEED)==0);
+  int *sv=(int *)(p+64);CHECK(socketpair(AF_UNIX,SOCK_STREAM,0,sv)==0);CHECK(sv[0]>=0&&sv[1]>=0&&p[17]==37);
+  CHECK(close(sv[0])==0&&close(sv[1])==0);
+  CHECK(madvise(p,16384,MADV_DONTNEED)==0);
+  int mem=open("/proc/self/mem",O_RDONLY);CHECK(mem>=0);
+  static const char marker[8]="verity!";
+  CHECK(pread(mem,p+128,8,(off_t)(uintptr_t)marker)==8);CHECK(memcmp(p+128,marker,8)==0&&p[17]==37);
+  CHECK(close(mem)==0);CHECK(munmap(p,16384)==0);
+ }
  puts("VERITY_MMAP_SIGBUS_ADDRESS_COW_PASS");return 0;
 }

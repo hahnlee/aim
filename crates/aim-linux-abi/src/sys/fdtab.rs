@@ -721,6 +721,10 @@ fn retire(kind: Option<Kind>) {
     });
     drop(kind);
 }
+/// Whether this thread has a memfd reclaim waiting for its lifecycle lock.
+pub(super) fn reclaim_pending() -> bool {
+    RECLAIM_MEMFDS.get()
+}
 /// Keep the retired Binder open description through its close flush, without
 /// nesting private allocation or performing IPC under the lifecycle lock.
 pub(crate) struct CloseAdmission {

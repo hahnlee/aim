@@ -176,7 +176,10 @@ pub(super) fn reclaim_closed() {
 
 /// Retry only objects with no descriptors, including private syscall pins.
 /// Keep the converted contents while a view could receive its fd again.
-fn reclaim() {
+/// A fork child runs it once its descriptors are restored: a memfd whose
+/// last descriptor the parent closed while it forked comes with no
+/// descriptor and no view.
+pub(super) fn reclaim() {
     let _guard = RECLAIM.lock().unwrap();
     with(|m| {
         m.retain(|_, f| {

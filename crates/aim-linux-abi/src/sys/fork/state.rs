@@ -339,6 +339,7 @@ pub fn restore(r: &mut Reader) -> bool {
     if !restore_descriptors(r) {
         return false;
     }
+    memfd::reclaim();
     super::super::posix_locks::reset_fork();
     r.stage("posix-admission");
     if let Err(error) = super::super::posix_locks::attach_fork() {

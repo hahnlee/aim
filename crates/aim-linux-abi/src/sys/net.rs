@@ -1187,6 +1187,11 @@ pub fn socketpair(a: [u64; 6]) -> i64 {
         Err(e) => return e,
     };
     let mut fds = [0i32; 2];
+    // The result is written under the fd lifecycle lock, which a fault
+    // into a verified page must not need: fault `sv` in first.
+    if let Err(error) = super::user_memory::prepare_write(sv, std::mem::size_of_val(&fds)) {
+        return -(error as i64);
+    }
     // SAFETY: socketpair into a local array.
     if unsafe { libc::socketpair(libc::AF_UNIX, host_ty, 0, fds.as_mut_ptr()) } < 0 {
         return -(errno::last() as i64);

@@ -215,6 +215,27 @@ pub fn rw(fd: i32, open: Open, iov: &[libc::iovec], pos: Option<u64>, write: boo
         if own && open.epoch != epoch() {
             return Ok(0);
         }
+        // The caller's buffers are copied under the position lock, which
+        // holds the fd lifecycle lock: a fault into a verified page must
+        // not need it, so they are faulted in first. The transfer stops
+        // at the first one that cannot be (EFAULT if that is the first).
+        let mut usable = 0;
+        for vector in iov {
+            let (base, len) = (vector.iov_base as u64, vector.iov_len);
+            let prepared = if write {
+                user_memory::prepare_read(base, len)
+            } else {
+                user_memory::prepare_write(base, len)
+            };
+            if let Err(error) = prepared {
+                if usable == 0 {
+                    return Err(error);
+                }
+                break;
+            }
+            usable += 1;
+        }
+        let iov = &iov[..usable];
         let (guard, mut at, failed) = loop {
             let guard = PositionLock::new(fd)?;
             let at = pos

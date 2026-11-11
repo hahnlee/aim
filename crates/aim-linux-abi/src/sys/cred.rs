@@ -637,9 +637,9 @@ pub fn capable(cap: u32) -> bool {
     read(|id| id.capable(cap))
 }
 
-/// Fork: the identity, the process table, this process's open entry (the
-/// child closes the copy it inherits) and the forking thread's nice value
-/// (the child's main thread has it).
+/// Fork: the identity, the process table and the forking thread's nice
+/// value (the child's main thread has it). The open entry is not
+/// inherited: the child opens its own.
 pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
     w.str(&current().to_text());
     w.opt(BY_PID.get(), |w, d| w.path(d));

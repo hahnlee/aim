@@ -752,6 +752,8 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
     }
     let port = new_port()?;
     let spawned = spawn(exe, runtime, &fds, &transfers, port);
+    // Its reclaim would wait for the epoch this thread holds.
+    debug_assert!(!fdtab::reclaim_pending());
     drop(fd_guard);
     drop(own);
 
