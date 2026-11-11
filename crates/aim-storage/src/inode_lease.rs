@@ -2,13 +2,19 @@
 //! Admission is always acquired before the writer lock. Only final descriptor
 //! close releases a lease: explicitly unlocking would revoke surviving aliases.
 //!
-//! A lease directory holds one lock file per device and kind
-//! (`<dev>.writers`, ...). An inode's lock of a kind is the byte at its slot
-//! (a hash of its whole identity, so a reused inode number is another
-//! inode) of that file, held as an open-file-description lock: each lease
-//! opens the file for itself, its lock goes with that open file (aliases,
-//! fork, SCM_RIGHTS) and ends at its final close, as a flock would. The
-//! open file's position is the slot, which tells what it holds.
+//! A lease directory holds lock files by device, kind and shard
+//! (`<dev>.writers.<shard>`, ...). An inode's lock of a kind is the byte at
+//! its slot (a hash of its whole identity, so a reused inode number is
+//! another inode) of the file of its shard (the slot's top byte), held as
+//! an open-file-description lock: each lease opens the file for itself,
+//! its lock goes with that open file (aliases, fork, SCM_RIGHTS) and ends
+//! at its final close, as a flock would. The open file's position is the
+//! slot, which tells what it holds. The kernel scans a file's locks on
+//! every lock operation, so the 256 shards keep each list to a share of
+//! the device's held leases. Exclusion is by slot, so two inodes whose
+//! 62-bit slots collide (a chance of 2^-62 a pair) share their locks: a
+//! writer of one is refused while the other is denied, and an admission
+//! or offset lock of one waits for the other's.
 use crate::private_fd::PrivateFd;
 use std::{
     fs::{self, File, OpenOptions},
@@ -262,9 +268,16 @@ impl Inode {
     pub fn directory(&self) -> &Path {
         &self.0.directory.path
     }
-    /// An open file of the device's `kind` lock file, at this inode's slot.
+    /// An open file of the `kind` lock file of this inode's device and
+    /// shard, at its slot.
     fn lock_file(&self, kind: &str) -> io::Result<PrivateFd> {
-        let name = std::ffi::CString::new(format!("{:x}.{kind}", self.identity().dev)).unwrap();
+        let identity = self.identity();
+        let name = std::ffi::CString::new(format!(
+            "{:x}.{kind}.{:02x}",
+            identity.dev,
+            identity.slot() >> 54
+        ))
+        .unwrap();
         let fd = PrivateFd::allocate(|| {
             // Opens racing an O_CREAT of the same new name can fail with
             // ENOENT on Darwin: only one creates it, the others open it.
@@ -1049,7 +1062,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .file_name()
                 .to_string_lossy()
-                .ends_with(".admission")
+                .contains(".admission.")
         }));
     }
     /// Inodes of one device share its lock files but not their locks: a
@@ -1096,10 +1109,17 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         names.sort();
         let dev = fixture.inode.identity().dev;
-        assert_eq!(
-            names,
-            ["admission", "denials", "writers"].map(|kind| format!("{dev:x}.{kind}"))
-        );
+        let mut expected = [&fixture.inode, &other]
+            .into_iter()
+            .flat_map(|inode| {
+                let shard = inode.identity().slot() >> 54;
+                ["admission", "denials", "writers"]
+                    .map(|kind| format!("{dev:x}.{kind}.{shard:02x}"))
+            })
+            .collect::<Vec<_>>();
+        expected.sort();
+        expected.dedup();
+        assert_eq!(names, expected);
     }
     #[test]
     fn canonical_directory_and_lock_nodes_reject_symlink_redirection() {
@@ -1113,10 +1133,11 @@ pub(crate) mod tests {
                 .raw_os_error(),
             Some(libc::ELOOP)
         );
-        let target = fixture
-            .inode
-            .directory()
-            .join(format!("{:x}.writers", fixture.inode.identity().dev));
+        let target = fixture.inode.directory().join(format!(
+            "{:x}.writers.{:02x}",
+            fixture.inode.identity().dev,
+            fixture.inode.identity().slot() >> 54
+        ));
         std::os::unix::fs::symlink(fixture.path.join("source"), &target).unwrap();
         assert!(fixture.inode.admission().unwrap().writer().is_err());
     }

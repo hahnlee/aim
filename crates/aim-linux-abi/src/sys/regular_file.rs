@@ -699,10 +699,10 @@ mod offset_tests {
             .filter(|kept| *kept == path || kept.starts_with(&locks))
             .collect::<Vec<_>>();
         assert_eq!(kept.len(), 3, "{kept:?}");
-        assert!(
-            kept.iter()
-                .any(|kept| kept.extension().is_some_and(|suffix| suffix == "offset"))
-        );
+        assert!(kept.iter().any(|kept| {
+            kept.file_name()
+                .is_some_and(|name| name.to_string_lossy().contains(".offset."))
+        }));
         drop(description);
     }
 }

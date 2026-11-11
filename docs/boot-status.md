@@ -4136,7 +4136,7 @@ confirms retained private COW bytes through a private Mach alias, blocked guest
 access, bounded waiter wakeup and released VM epoch. Separate inode leases now
 let read-only ENABLE callers share write denial while competing for the distinct
 ENABLE slot; eight primitive tests pass with writer/alias/SCM lifetime checks.
-The lease directory holds one lock file per device and kind; an inode's
+The lease directory holds lock files by device, kind and one of 256 shards; an inode's
 lease is the open-file-description lock of the byte at a hash of its whole
 identity, so a regular file's creation no longer makes three lock files
 (#3013).
