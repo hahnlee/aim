@@ -7,7 +7,7 @@ use crate::package::{
         seinfo::{Partition, Policy, Signing},
     },
     pkg::AndroidPackage,
-    settings::{FLAG_SYSTEM, PRIVATE_FLAG_PRIVILEGED},
+    settings::{FLAG_SYSTEM, PRIVATE_FLAG_PRIVILEGED, Package},
 };
 use std::{collections::BTreeMap, sync::Arc};
 crate::install_mutator_seinfo_apply!();
@@ -86,50 +86,67 @@ fn inputs(owner: &SigningScan) -> Result<BTreeMap<String, Input>, String> {
 }
 
 fn active_inputs(owner: &SigningScan) -> Result<BTreeMap<String, Input>, String> {
+    let settings: BTreeMap<&str, &Package> = owner
+        .settings
+        .packages
+        .iter()
+        .rev()
+        .map(|setting| (setting.name.as_str(), setting))
+        .collect();
     owner
         .loaded
         .iter()
         .map(|(name, code)| {
-            let setting = owner
-                .settings
-                .packages
-                .iter()
-                .find(|p| &p.name == name)
-                .ok_or_else(|| format!("seInfo code has no active setting: {name}"))?;
-            let shared = if setting.shared_user {
-                let Some(Owner::SharedUser(group_name)) =
-                    owner.identities.ids.get(setting.uid_owner_id())
-                else {
-                    return Err(format!("seInfo shared UID owner differs: {name}"));
-                };
-                let group = owner
-                    .identities
-                    .shared_users
-                    .get(group_name)
-                    .filter(|group| {
-                        Some(group.app_id) == setting.shared_app_id() && group.has_package(name)
-                    })
-                    .ok_or_else(|| format!("seInfo shared UID membership differs: {name}"))?;
-                Some((
-                    group_name.clone(),
-                    group.seinfo_target_sdk(),
-                    group.private_flags & PRIVATE_FLAG_PRIVILEGED != 0,
-                ))
-            } else {
-                None
-            };
-            Ok((
-                name.clone(),
-                Input {
-                    code: code.clone(),
-                    flags: setting.flags,
-                    private_flags: setting.private_flags,
-                    app_id: setting.uid_owner_id(),
-                    shared,
-                },
-            ))
+            let setting = settings.get(name.as_str()).copied();
+            Ok((name.clone(), active_input(owner, name, code, setting)?))
         })
         .collect()
+}
+
+/// One package's entry of [`active_inputs`], for a scan of that package.
+fn active_package_input(owner: &SigningScan, name: &str) -> Result<Option<Input>, String> {
+    let Some(code) = owner.loaded.get(name) else {
+        return Ok(None);
+    };
+    let setting = owner.settings.packages.iter().find(|p| p.name == name);
+    active_input(owner, name, code, setting).map(Some)
+}
+
+fn active_input(
+    owner: &SigningScan,
+    name: &str,
+    code: &Arc<LoadedPackage>,
+    setting: Option<&Package>,
+) -> Result<Input, String> {
+    let setting = setting.ok_or_else(|| format!("seInfo code has no active setting: {name}"))?;
+    let shared = if setting.shared_user {
+        let Some(Owner::SharedUser(group_name)) = owner.identities.ids.get(setting.uid_owner_id())
+        else {
+            return Err(format!("seInfo shared UID owner differs: {name}"));
+        };
+        let group = owner
+            .identities
+            .shared_users
+            .get(group_name)
+            .filter(|group| {
+                Some(group.app_id) == setting.shared_app_id() && group.has_package(name)
+            })
+            .ok_or_else(|| format!("seInfo shared UID membership differs: {name}"))?;
+        Some((
+            group_name.clone(),
+            group.seinfo_target_sdk(),
+            group.private_flags & PRIVATE_FLAG_PRIVILEGED != 0,
+        ))
+    } else {
+        None
+    };
+    Ok(Input {
+        code: code.clone(),
+        flags: setting.flags,
+        private_flags: setting.private_flags,
+        app_id: setting.uid_owner_id(),
+        shared,
+    })
 }
 
 fn partition(input: &Input) -> Partition {
@@ -212,9 +229,8 @@ impl SigningScan {
         name: &str,
         id: i32,
     ) -> Result<(), String> {
-        let current = active_inputs(self)?
-            .remove(name)
-            .ok_or("converted APEX seInfo input is missing")?;
+        let current =
+            active_package_input(self, name)?.ok_or("converted APEX seInfo input is missing")?;
         let previous = self
             .seinfo
             .as_mut()
@@ -316,9 +332,7 @@ impl SigningScan {
         if self.pending_metadata.contains(name) {
             return Err("scan metadata is not finalized".into());
         }
-        let current = active_inputs(self)?;
-        let input = current
-            .get(name)
+        let input = &active_package_input(self, name)?
             .ok_or_else(|| "seInfo scan has no active code".to_string())?;
         let old = self.seinfo.as_ref();
         let override_label = match setting {
@@ -406,9 +420,7 @@ impl SigningScan {
     }
 
     pub(super) fn seinfo_setting_for_scan(&self, name: &str) -> Result<SeInfoSetting, String> {
-        let current = active_inputs(self)?;
-        let input = current
-            .get(name)
+        let input = &active_package_input(self, name)?
             .ok_or_else(|| "seInfo scan has no active code".to_string())?;
         let previous = self
             .seinfo
