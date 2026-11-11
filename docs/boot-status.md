@@ -1112,9 +1112,13 @@ lookups, 11,000 before); a query capture projects its packages with the
 snapshot's validated legacy reader; roles, `notifyPackageUse` and known
 packages check visibility with the queries' retained AppsFilter, and the
 boot's permission and GID queries read the image's declarations in place;
-app standby's idle check informs the restriction owner once per check. The
-initial scan takes 0.19-0.21 s fresh and 0.26-0.31 s warm, the
-construction 0.30 s and 0.22-0.27 s. Branch perf/boot-2 on main
+app standby's idle check informs the restriction owner once per check. A
+query capture whose system owners change (roles, keysets, the launch,
+archive, metadata and instant registry owners) keeps its packages'
+projections and derives only what reads those owners, also when it is
+published as a new generation of an unchanged scan (#2995). The initial
+scan takes 0.14 s fresh and 0.19 s warm, the construction 0.23 s and
+0.15-0.16 s (2026-11-11, load 3-9). Branch perf/boot-2 on main
 `a3638eae3` (2026-11-11), timed from `aimctl start` on throwaway data
 directories at 1-minute load 4-9 (a build that also logs its stage times):
 `sys.boot_completed` at 5.10, 5.19 and 6.20 s fresh and 3.53, 3.55 and
