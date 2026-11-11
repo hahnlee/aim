@@ -6,46 +6,48 @@ use std::path::PathBuf;
 
 type CFTypeRef = *const c_void;
 
-#[link(name = "IOKit", kind = "framework")]
-unsafe extern "C" {
-    fn IOServiceMatching(name: *const c_char) -> CFTypeRef;
-    fn IOBSDNameMatching(main_port: u32, options: u32, name: *const c_char) -> CFTypeRef;
-    fn IOServiceGetMatchingService(main_port: u32, matching: CFTypeRef) -> u32;
-    fn IOServiceGetMatchingServices(main_port: u32, matching: CFTypeRef, existing: *mut u32)
-    -> i32;
-    fn IOIteratorNext(iterator: u32) -> u32;
-    fn IOIteratorIsValid(iterator: u32) -> i32;
-    fn IOIteratorReset(iterator: u32);
-    fn IOObjectRelease(object: u32) -> i32;
-    fn IOObjectConformsTo(object: u32, class: *const c_char) -> i32;
-    fn IORegistryEntryGetChildIterator(entry: u32, plane: *const c_char, iterator: *mut u32)
-    -> i32;
-    fn IORegistryEntryGetParentEntry(entry: u32, plane: *const c_char, parent: *mut u32) -> i32;
-    fn IORegistryEntryCreateCFProperty(
-        entry: u32,
-        key: CFTypeRef,
-        allocator: CFTypeRef,
-        options: u32,
-    ) -> CFTypeRef;
+aim_hostcall::dylib! {
+    static IO_KIT = c"/System/Library/Frameworks/IOKit.framework/IOKit" {
+        fn IOServiceMatching(name: *const c_char) -> CFTypeRef;
+        fn IOBSDNameMatching(main_port: u32, options: u32, name: *const c_char) -> CFTypeRef;
+        fn IOServiceGetMatchingService(main_port: u32, matching: CFTypeRef) -> u32;
+        fn IOServiceGetMatchingServices(main_port: u32, matching: CFTypeRef, existing: *mut u32)
+        -> i32;
+        fn IOIteratorNext(iterator: u32) -> u32;
+        fn IOIteratorIsValid(iterator: u32) -> i32;
+        fn IOIteratorReset(iterator: u32);
+        fn IOObjectRelease(object: u32) -> i32;
+        fn IOObjectConformsTo(object: u32, class: *const c_char) -> i32;
+        fn IORegistryEntryGetChildIterator(entry: u32, plane: *const c_char, iterator: *mut u32)
+        -> i32;
+        fn IORegistryEntryGetParentEntry(entry: u32, plane: *const c_char, parent: *mut u32) -> i32;
+        fn IORegistryEntryCreateCFProperty(
+            entry: u32,
+            key: CFTypeRef,
+            allocator: CFTypeRef,
+            options: u32,
+        ) -> CFTypeRef;
+    }
 }
 
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    static kCFBooleanTrue: CFTypeRef;
-    fn CFRelease(cf: CFTypeRef);
-    fn CFGetTypeID(cf: CFTypeRef) -> usize;
-    fn CFStringGetTypeID() -> usize;
-    fn CFNumberGetTypeID() -> usize;
-    fn CFNumberGetValue(number: CFTypeRef, kind: isize, value: *mut c_void) -> bool;
-    fn CFStringCreateWithCString(alloc: CFTypeRef, s: *const c_char, encoding: u32) -> CFTypeRef;
-    fn CFStringGetCString(s: CFTypeRef, buf: *mut c_char, len: isize, encoding: u32) -> bool;
-    fn CFURLCreateWithString(alloc: CFTypeRef, s: CFTypeRef, base: CFTypeRef) -> CFTypeRef;
-    fn CFURLGetFileSystemRepresentation(
-        url: CFTypeRef,
-        resolve: bool,
-        buf: *mut u8,
-        len: isize,
-    ) -> bool;
+aim_hostcall::dylib! {
+    static CORE_FOUNDATION = c"/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation" {
+        static kCFBooleanTrue: CFTypeRef;
+        fn CFRelease(cf: CFTypeRef);
+        fn CFGetTypeID(cf: CFTypeRef) -> usize;
+        fn CFStringGetTypeID() -> usize;
+        fn CFNumberGetTypeID() -> usize;
+        fn CFNumberGetValue(number: CFTypeRef, kind: isize, value: *mut c_void) -> bool;
+        fn CFStringCreateWithCString(alloc: CFTypeRef, s: *const c_char, encoding: u32) -> CFTypeRef;
+        fn CFStringGetCString(s: CFTypeRef, buf: *mut c_char, len: isize, encoding: u32) -> bool;
+        fn CFURLCreateWithString(alloc: CFTypeRef, s: CFTypeRef, base: CFTypeRef) -> CFTypeRef;
+        fn CFURLGetFileSystemRepresentation(
+            url: CFTypeRef,
+            resolve: bool,
+            buf: *mut u8,
+            len: isize,
+        ) -> bool;
+    }
 }
 
 const UTF8: u32 = 0x0800_0100;
@@ -91,7 +93,7 @@ impl Cf {
 
     fn is_true(&self) -> bool {
         // SAFETY: kCFBooleanTrue is a constant of CoreFoundation.
-        self.0 == unsafe { kCFBooleanTrue }
+        self.0 == unsafe { *kCFBooleanTrue() }
     }
 }
 

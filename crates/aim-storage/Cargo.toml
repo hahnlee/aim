@@ -8,6 +8,7 @@ description = "Case-sensitive APFS disk images for the guest: the compressed sys
 
 [dependencies]
 aim-android-xml = { path = "../aim-android-xml" }
+aim-hostcall.workspace = true
 libc.workspace = true
 sha2.workspace = true
 
