@@ -6346,7 +6346,7 @@ fn verify_native_module_resources(directory: &std::path::Path, cache_files: &[st
         ..Default::default()
     };
     let owner = Owner::load(
-        &state,
+        &std::sync::Arc::new(state),
         &platform,
         Config {
             language: *b"en",

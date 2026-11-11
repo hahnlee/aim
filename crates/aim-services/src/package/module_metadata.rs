@@ -123,7 +123,7 @@ impl Owner {
     /// Like systemReady, this freezes text in the applied configuration.
     /// The file resolver must map accepted guest APK paths to the owned image/data.
     pub fn load(
-        state: &State,
+        state: &std::sync::Arc<State>,
         platform: &Platform,
         config: Config,
         files: &dyn Fn(&str) -> Result<PathBuf, String>,
@@ -151,7 +151,7 @@ impl Owner {
             owner.diagnostic = Some("no configured module metadata provider".into());
             return Ok(owner);
         }
-        let filter = super::apps_filter::AppsFilter::new(
+        let filter = super::apps_filter::AppsFilter::latest(
             state,
             &super::apps_filter::Config {
                 force_system_packages_queryable: state.system.force_system_packages_queryable,
@@ -161,7 +161,7 @@ impl Owner {
         .map_err(|e| format!("module provider visibility: {e:?}"))?;
         let query = super::query::Query {
             state,
-            filter: &filter,
+            filter: filter.as_ref(),
             calling_uid: 1000,
         };
         match query
