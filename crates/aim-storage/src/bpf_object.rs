@@ -32,6 +32,8 @@ pub const HEADER: usize = 128;
 pub const SLOT_EMPTY: u32 = 0;
 pub const SLOT_USED: u32 = 1;
 pub const SLOT_DELETED: u32 = 2;
+/// The guest's page: a ring buffer's positions and data are whole ones.
+pub const PAGE: usize = 16384;
 
 /// The header at the end of an object file.
 #[repr(C)]
@@ -55,16 +57,40 @@ pub struct Header {
 }
 const _: () = assert!(std::mem::size_of::<Header>() == HEADER);
 
-impl Header {
-    /// Whether this is the header of a map whose file is `len` bytes: its
-    /// data before it, and its elements, as its parameters lay them out,
-    /// inside its data.
-    pub fn fits_map(&self, len: usize) -> bool {
-        self.magic == MAGIC
-            && self.kind == KIND_MAP
-            && (self.data_len as usize).checked_add(HEADER) == Some(len)
-            && elements_len(self.ty, self.key_size, self.value_size, self.max_entries)
-                .is_some_and(|n| n <= self.data_len as usize)
+/// What a map's header says of its elements, as `bpf(BPF_MAP_CREATE)` set
+/// it: fixed for the map's life.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Params {
+    pub ty: u32,
+    pub key_size: u32,
+    pub value_size: u32,
+    pub max_entries: u32,
+    pub flags: u32,
+}
+
+impl Params {
+    /// The parameters of the map whose file is `len` bytes, with its
+    /// header at its end, read once: its data before the header, and its
+    /// elements, as its parameters lay them out, inside its data.
+    ///
+    /// # Safety
+    /// `header` is the last [`HEADER`] bytes of a live mapping of the file.
+    unsafe fn read(header: *const Header, len: usize) -> Option<Params> {
+        // SAFETY: one copy of the header; what is checked is the copy.
+        let h = unsafe { std::ptr::read_volatile(header) };
+        let p = Params {
+            ty: h.ty,
+            key_size: h.key_size,
+            value_size: h.value_size,
+            max_entries: h.max_entries,
+            flags: h.flags,
+        };
+        (h.magic == MAGIC
+            && h.kind == KIND_MAP
+            && (h.data_len as usize).checked_add(HEADER) == Some(len)
+            && elements_len(p.ty, p.key_size, p.value_size, p.max_entries)
+                .is_some_and(|n| n <= h.data_len as usize))
+        .then_some(p)
     }
 }
 
@@ -107,10 +133,15 @@ pub fn ncpu() -> usize {
 /// are none.
 pub fn elements_len(ty: u32, key_size: u32, value_size: u32, max_entries: u32) -> Option<usize> {
     Some(if ty == RINGBUF {
-        if !max_entries.is_power_of_two() || key_size != 0 || value_size != 0 {
+        // `ringbuf_map_alloc`: a page-aligned power of two.
+        if !max_entries.is_power_of_two()
+            || (max_entries as usize) < PAGE
+            || key_size != 0
+            || value_size != 0
+        {
             return None;
         }
-        2 * 16384 + max_entries as usize
+        2 * PAGE + max_entries as usize
     } else if hashed(ty) || arrayed(ty) {
         if max_entries == 0 || value_size == 0 || key_size == 0 || (!hashed(ty) && key_size != 4) {
             return None;
@@ -147,11 +178,14 @@ pub enum NoSlot {
 pub const BPF_NOEXIST: u64 = 1;
 pub const BPF_EXIST: u64 = 2;
 
-/// A map file mapped into a process.
+/// A map file mapped into a process. Its parameters are those its header
+/// had when it was mapped: whatever later writes the shared header, the map
+/// reaches only the elements they laid out inside the file.
 #[derive(Clone, Copy)]
 pub struct Map {
     base: u64,
     header: *const Header,
+    params: Params,
 }
 
 // SAFETY: the mapping lives as long as its owner keeps it; access goes
@@ -159,42 +193,73 @@ pub struct Map {
 unsafe impl Send for Map {}
 
 impl Map {
-    /// The map whose data starts at `base`, with its header at `header`.
+    /// The map file of `len` bytes mapped at `base`, if its header lays out
+    /// its elements inside it.
     ///
     /// # Safety
-    /// Both point into a live shared mapping of a whole map file.
-    pub unsafe fn from_raw(base: u64, header: *const Header) -> Map {
-        Map { base, header }
+    /// `base` is a live shared mapping of the whole file.
+    pub unsafe fn from_raw(base: u64, len: usize) -> Option<Map> {
+        let header = (base as usize + len.checked_sub(HEADER)?) as *const Header;
+        // SAFETY: the header at the end of the mapping.
+        let params = unsafe { Params::read(header, len) }?;
+        Some(Map {
+            base,
+            header,
+            params,
+        })
     }
 
-    pub fn h(&self) -> &Header {
+    pub fn params(&self) -> Params {
+        self.params
+    }
+
+    fn h(&self) -> &Header {
         // SAFETY: a live shared mapping of a checked object file.
         unsafe { &*self.header }
     }
 
+    /// Whether `BPF_MAP_FREEZE` froze the map.
+    pub fn frozen(&self) -> bool {
+        // SAFETY: the header's word, which only a freeze changes.
+        unsafe { std::ptr::read_volatile(&raw const self.h().frozen) != 0 }
+    }
+
     /// Bytes of one value as userspace sees it.
     pub fn value_len(&self) -> usize {
-        let h = self.h();
-        if percpu(h.ty) {
-            round8(h.value_size) * ncpu()
+        if percpu(self.params.ty) {
+            round8(self.params.value_size) * ncpu()
         } else {
-            h.value_size as usize
+            self.params.value_size as usize
         }
     }
 
     fn slot_len(&self) -> usize {
-        8 + round8(self.h().key_size) + round8(self.value_len() as u32)
+        8 + round8(self.params.key_size) + round8(self.value_len() as u32)
     }
 
+    /// The map's lock, which holds its holder's pid. A holder that is no
+    /// live process (one that died holding it) leaves it to the next.
     pub fn lock(&self) -> Guard<'_> {
         let l = &self.h().lock;
-        while l
-            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
+        let me = std::process::id();
+        let mut spins = 0u32;
+        loop {
+            let holder = match l.compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed)
+            {
+                Ok(_) => return Guard(l),
+                Err(holder) => holder,
+            };
+            spins = spins.wrapping_add(1);
+            if holder != 0
+                && spins % 1024 == 0
+                && !alive(holder)
+                && l.compare_exchange(holder, me, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok()
+            {
+                return Guard(l);
+            }
             std::thread::yield_now();
         }
-        Guard(l)
     }
 
     pub fn slot(&self, i: usize) -> *mut u8 {
@@ -203,10 +268,9 @@ impl Map {
 
     /// The array element or hash slot value for `key`, if present.
     pub fn find(&self, key: &[u8]) -> Option<*mut u8> {
-        let h = self.h();
-        if !hashed(h.ty) {
+        if !hashed(self.params.ty) {
             let i = u32::from_ne_bytes(key.try_into().ok()?) as usize;
-            if i >= h.max_entries as usize {
+            if i >= self.params.max_entries as usize {
                 return None;
             }
             return Some((self.base as usize + i * round8(self.value_len() as u32)) as *mut u8);
@@ -216,34 +280,44 @@ impl Map {
 
     pub fn value_of(&self, i: usize) -> *mut u8 {
         // SAFETY: inside slot i.
-        unsafe { self.slot(i).add(8 + round8(self.h().key_size)) }
+        unsafe { self.slot(i).add(8 + round8(self.params.key_size)) }
     }
 
     /// The slot to store `key` in under `flags`, taking a free one for a
     /// new key. Under the lock.
     pub fn claim(&self, key: &[u8], flags: u64) -> Result<usize, NoSlot> {
-        let h = self.h();
+        let count = &self.h().count;
         match self.probe(key) {
             Ok(_) if flags == BPF_NOEXIST => Err(NoSlot::Exists),
             Ok(i) => Ok(i),
             Err(_) if flags == BPF_EXIST => Err(NoSlot::Missing),
-            Err(Some(i)) if h.count.load(Ordering::Relaxed) < h.max_entries => {
+            Err(Some(i)) if count.load(Ordering::Relaxed) < self.params.max_entries => {
                 let s = self.slot(i);
-                // SAFETY: a free slot of the mapping.
+                // SAFETY: a free slot of the mapping, and a key of its size.
                 unsafe {
                     std::ptr::copy_nonoverlapping(key.as_ptr(), s.add(8), key.len());
                     (s as *mut u32).write(SLOT_USED);
                 }
-                h.count.fetch_add(1, Ordering::Relaxed);
+                count.fetch_add(1, Ordering::Relaxed);
                 Ok(i)
             }
             Err(_) => Err(NoSlot::Full),
         }
     }
 
+    /// Deletes the element in used slot `i`. Under the lock.
+    pub fn remove(&self, i: usize) {
+        // SAFETY: slot i of the mapping.
+        unsafe { (self.slot(i) as *mut u32).write(SLOT_DELETED) };
+        self.h().count.fetch_sub(1, Ordering::Relaxed);
+    }
+
     /// The slot of `key` (Ok), or the first free slot on its probe path.
     pub fn probe(&self, key: &[u8]) -> Result<usize, Option<usize>> {
-        let n = self.h().max_entries as usize;
+        if key.len() != self.params.key_size as usize {
+            return Err(None);
+        }
+        let n = self.params.max_entries as usize;
         let start = fnv(key) as usize % n;
         let mut free = None;
         for step in 0..n {
@@ -270,7 +344,7 @@ impl Map {
 
     /// A copy of the value of `key`, as BPF_MAP_LOOKUP_ELEM gives it.
     pub fn lookup(&self, key: &[u8]) -> Option<Vec<u8>> {
-        if key.len() != self.h().key_size as usize {
+        if key.len() != self.params.key_size as usize {
             return None;
         }
         let _g = self.lock();
@@ -283,7 +357,7 @@ impl Map {
     /// change or disappear before a subsequent lookup.
     pub fn keys(&self) -> io::Result<Vec<Vec<u8>>> {
         let _g = self.lock();
-        let h = self.h();
+        let h = self.params;
         if arrayed(h.ty) {
             return Ok((0..h.max_entries)
                 .map(|i| i.to_ne_bytes().to_vec())
@@ -313,6 +387,16 @@ impl Drop for Guard<'_> {
     fn drop(&mut self) {
         self.0.store(0, Ordering::Release);
     }
+}
+
+/// Whether `pid` names a live process that may hold a lock: neither the
+/// kernel's (0) nor launchd (1), which map no objects.
+fn alive(pid: u32) -> bool {
+    // SAFETY: a signal-0 probe sends nothing.
+    pid > 1
+        && pid <= i32::MAX as u32
+        && (unsafe { libc::kill(pid as i32, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
 }
 
 fn fnv(b: &[u8]) -> u64 {
@@ -475,20 +559,13 @@ impl Mapped {
         if base == libc::MAP_FAILED {
             return Err(io::Error::last_os_error());
         }
-        let header = (base as usize + len - HEADER) as *const Header;
-        // SAFETY: the header at the end of the mapping.
-        let h = unsafe { &*header };
-        let mapped = Mapped {
-            map: Map {
-                base: base as u64,
-                header,
-            },
-            len,
-        };
-        if !h.fits_map(len) {
+        // SAFETY: the shared mapping of the whole file made above.
+        let Some(map) = (unsafe { Map::from_raw(base as u64, len) }) else {
+            // SAFETY: the mapping made above.
+            unsafe { libc::munmap(base, len) };
             return Err(invalid());
-        }
-        Ok(mapped)
+        };
+        Ok(Mapped { map, len })
     }
 
     pub fn map(&self) -> &Map {
@@ -636,6 +713,63 @@ mod tests {
             object(&forged, &objects).err().map(|e| e.kind()),
             Some(io::ErrorKind::InvalidData)
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_mapped_map_keeps_its_parameters_and_frees_a_dead_holders_lock() {
+        let dir = std::env::temp_dir().join(format!("aim-bpf-header-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = file(&dir, 2);
+        let objects = objects_beside(&dir.join("bpf"));
+        let m = Mapped::open(&path, &objects).unwrap();
+        let map = m.map();
+        {
+            let _g = map.lock();
+            for k in [1u32, 2] {
+                map.claim(&k.to_ne_bytes(), 0).unwrap();
+            }
+        }
+        // Another writer of the shared header: more entries and a wider
+        // key than the file holds, no count, and a lock no live process
+        // holds.
+        let backing = objects.join("obj.map");
+        let mut bytes = std::fs::read(&backing).unwrap();
+        let at = bytes.len() - HEADER;
+        let dead = std::process::Command::new("true")
+            .spawn()
+            .and_then(|mut child| child.wait().map(|_| child.id()))
+            .unwrap();
+        for (offset, value) in [(16, 64), (24, 1 << 30), (36, dead), (40, 0)] {
+            bytes[at + offset..at + offset + 4].copy_from_slice(&value.to_ne_bytes());
+        }
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&backing)
+            .unwrap();
+        std::os::unix::fs::FileExt::write_all_at(&file, &bytes[at..], at as u64).unwrap();
+        assert_eq!(
+            map.params(),
+            Params {
+                ty: HASH,
+                key_size: 4,
+                value_size: 8,
+                max_entries: 2,
+                flags: 0
+            }
+        );
+        let mut keys = map.keys().unwrap();
+        keys.sort();
+        assert_eq!(keys, [1u32, 2].map(|k| k.to_ne_bytes().to_vec()));
+        {
+            let _g = map.lock();
+            assert_eq!(map.claim(&3u32.to_ne_bytes(), 0), Err(NoSlot::Full));
+            assert_eq!(map.probe(&[0; 64]), Err(None));
+        }
+        // A word that names no process is no holder either.
+        std::os::unix::fs::FileExt::write_all_at(&file, &1u32.to_ne_bytes(), at as u64 + 36)
+            .unwrap();
+        assert_eq!(map.lookup(&9u32.to_ne_bytes()), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

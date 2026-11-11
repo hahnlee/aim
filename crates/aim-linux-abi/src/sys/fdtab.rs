@@ -69,6 +69,9 @@ pub enum Kind {
     Cgroup(Arc<super::cgroup::Open>),
     /// A pidfd (`wait`): a kqueue.
     PidFd(Arc<super::wait::PidFd>),
+    /// A bpf map, program or type information (`bpf`): an anon inode,
+    /// which its object file stands for, with no read, write or seek.
+    Bpf,
 }
 
 pub(super) struct PathProof(std::os::fd::OwnedFd);
@@ -1334,6 +1337,7 @@ pub(super) fn adopt_untyped(fd: i32) {
     net::adopt(fd);
     memfd::adopt(fd);
     super::ashmem::adopt(fd);
+    super::bpf::adopt(fd);
     random::adopt(fd);
     super::kmsg::adopt(fd);
     super::cgroup::adopt(fd);
@@ -1410,6 +1414,7 @@ pub fn anon_name(fd: i32) -> Option<String> {
             | Kind::Knob(_)
             | Kind::Random
             | Kind::Ashmem
+            | Kind::Bpf
             | Kind::ProxyFile
             | Kind::Kmsg(_)
             | Kind::Cgroup(_)
@@ -1987,6 +1992,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             | Kind::SyncFile
             | Kind::Random
             | Kind::Ashmem
+            | Kind::Bpf
             | Kind::ProxyFile
             | Kind::ProcMem(_)
             | Kind::Path(_) => std::ptr::null(),
@@ -2073,6 +2079,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::SyncFile => w.u32(7),
             Kind::Random => w.u32(8),
             Kind::Ashmem => w.u32(13),
+            Kind::Bpf => w.u32(22),
             Kind::ProxyFile => w.u32(9),
             Kind::ProcMem(_) => w.u32(16),
             Kind::Path(path) => {
@@ -2133,6 +2140,7 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             7 => Kind::SyncFile,
             8 => Kind::Random,
             13 => Kind::Ashmem,
+            22 => Kind::Bpf,
             9 => Kind::ProxyFile,
             18 => {
                 let shared = r.i32();

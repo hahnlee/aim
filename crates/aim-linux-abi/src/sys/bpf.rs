@@ -28,7 +28,7 @@ use std::ffi::CString;
 use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::AtomicU32;
 
 use super::fdtab;
 use crate::errno::{self, E2BIG, EBADF, EEXIST, EFAULT, EINVAL, ENOENT, EPERM};
@@ -98,7 +98,9 @@ fn create_object(mut header: Header, data_len: usize, initial: Option<&[u8]>, ac
     let object = std::path::Path::new(std::ffi::OsStr::from_bytes(&tmpl[..tmpl.len() - 1]));
     let result = (|| {
         let fd = file.as_raw_fd();
-        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+            || unsafe { libc::fchflags(fd, MARK) } < 0
+        {
             return Err(errno::last());
         }
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
@@ -169,7 +171,12 @@ fn file_access(flags: u32) -> Result<i32, i64> {
         _ => Err(-(EINVAL as i64)),
     }
 }
-/// Duplicate a fully initialized private description into a new guest slot.
+/// `st_flags` of an object file: neither ashmem's, a memfd's nor a
+/// dma-buf's, which all have UF_NODUMP.
+const MARK: u32 = libc::UF_HIDDEN | libc::UF_OPAQUE;
+
+/// Duplicate a fully initialized private description into a new guest
+/// slot, an object's (`fdtab::Kind::Bpf`) before the guest can reach it.
 fn publish_object(private: i32) -> i64 {
     publish_object_with(private, fdtab::publish_typed_guest)
 }
@@ -179,15 +186,101 @@ fn publish_object_with(private: i32, publish: impl FnOnce(i32) -> Result<(), err
     if fd < 0 {
         return -(errno::last() as i64);
     }
+    fdtab::insert(fd, fdtab::Kind::Bpf);
     match publish(fd) {
         Ok(()) => fd as i64,
         Err(error) => {
+            fdtab::on_close(fd);
             unsafe {
                 libc::close(fd);
             }
             -(error as i64)
         }
     }
+}
+
+/// An object's fd that arrived (by exec, binder or `SCM_RIGHTS`) as a
+/// plain fd.
+pub(super) fn adopt(fd: i32) {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fstat into a local buffer.
+    if unsafe { libc::fstat(fd, &mut st) } == 0
+        && st.st_mode & libc::S_IFMT == libc::S_IFREG
+        && st.st_flags & (MARK | libc::UF_NODUMP) == MARK
+        && is_object(fd)
+    {
+        fdtab::insert(fd, fdtab::Kind::Bpf);
+    }
+}
+
+/// `BPF_F_MMAPABLE`.
+const F_MMAPABLE: u32 = 1 << 10;
+/// The kernel's ENOTSUPP, which `bpf_map_mmap` returns for maps without
+/// an mmap.
+const ENOTSUPP: i64 = 524;
+
+/// `bpf_map_mmap`: the pieces of object file `fd` that a guest mmap of
+/// `len` bytes (whole pages) at offset `offset` maps, in order, as (file
+/// offset, length). Only an mmapable array's values and a ring buffer's
+/// position pages and data are mapped, never the header after them; a ring
+/// buffer's data follows itself again, as the kernel maps it twice so that
+/// a record that wraps reads whole.
+pub(super) fn mmap_pieces(
+    fd: i32,
+    offset: u64,
+    len: u64,
+    write: bool,
+    shared: bool,
+) -> Result<Vec<(u64, u64)>, i64> {
+    // `do_mmap`: the file's access, then whether it maps at all.
+    let access = access_of(fd);
+    if access == libc::O_WRONLY || shared && write && access == libc::O_RDONLY {
+        return Err(-(errno::EACCES as i64));
+    }
+    let (h, st) = read_header(fd).ok_or(-(EBADF as i64))?;
+    if h.kind != KIND_MAP {
+        return Err(-(errno::ENODEV as i64));
+    }
+    let map = mapped(fd)?;
+    let p = map.params();
+    if !matches!(p.ty, ARRAY | RINGBUF) {
+        return Err(-ENOTSUPP);
+    }
+    if !shared {
+        return Err(-(EINVAL as i64));
+    }
+    if write && map.frozen() {
+        return Err(-(EPERM as i64));
+    }
+    if write && p.flags & F_RDONLY_PROG != 0 {
+        return Err(-(errno::EACCES as i64));
+    }
+    let data = (st.st_size as u64).saturating_sub(HEADER as u64);
+    let end = offset.checked_add(len).ok_or(-(EINVAL as i64))?;
+    if p.ty == ARRAY {
+        // `array_map_mmap`.
+        if p.flags & F_MMAPABLE == 0 || end > data {
+            return Err(-(EINVAL as i64));
+        }
+        return Ok(vec![(offset, len)]);
+    }
+    // `ringbuf_map_mmap_kern`: only the consumer page is writable.
+    if write && (offset != 0 || len != PAGE as u64) {
+        return Err(-(EPERM as i64));
+    }
+    let size = p.max_entries as u64;
+    if end > data + size {
+        return Err(-(EINVAL as i64));
+    }
+    let again = offset.max(data);
+    let mut pieces = Vec::new();
+    if offset < data {
+        pieces.push((offset, end.min(data) - offset));
+    }
+    if end > data {
+        pieces.push((again - size, end - again));
+    }
+    Ok(pieces)
 }
 
 /// The header of object file `fd`, if it is one.
@@ -265,18 +358,15 @@ fn mapped(fd: i32) -> Result<Map, i64> {
             if base == libc::MAP_FAILED {
                 return Err(-(errno::last() as i64));
             }
-            let header = (base as usize + len - HEADER) as *const Header;
             // The layer reaches the elements its header lays out: only
             // inside the file.
-            // SAFETY: the header at the end of the mapping.
-            if !unsafe { &*header }.fits_map(len) {
+            // SAFETY: the mapping of the whole file, kept for the process.
+            let Some(map) = (unsafe { Map::from_raw(base as u64, len) }) else {
                 // SAFETY: the mapping made above.
                 unsafe { libc::munmap(base, len) };
                 return Err(-(EINVAL as i64));
-            }
-            // SAFETY: the mapping of the whole checked file, kept for the
-            // process.
-            e.insert(unsafe { Map::from_raw(base as u64, header) })
+            };
+            e.insert(map)
         }
     };
     Ok(*map)
@@ -307,24 +397,24 @@ impl Kernel {
     /// The value of `key`.
     pub(super) fn lookup(&self, key: &[u8]) -> Option<Vec<u8>> {
         let m = &self.0;
-        if key.len() != m.h().key_size as usize {
+        if key.len() != m.params().key_size as usize {
             return None;
         }
         let _g = m.lock();
         let v = m.find(key)?;
         // SAFETY: the value in the mapping.
-        Some(unsafe { std::slice::from_raw_parts(v, m.h().value_size as usize) }.to_vec())
+        Some(unsafe { std::slice::from_raw_parts(v, m.params().value_size as usize) }.to_vec())
     }
 
     /// Run `f` on the value of `key`, created zeroed (BPF_NOEXIST) when the
     /// map has no such key and room for it. False: no such element.
     pub(super) fn update(&self, key: &[u8], f: impl FnOnce(&mut [u8])) -> bool {
         let m = &self.0;
-        if key.len() != m.h().key_size as usize {
+        if key.len() != m.params().key_size as usize {
             return false;
         }
         let _g = m.lock();
-        let v = if hashed(m.h().ty) {
+        let v = if hashed(m.params().ty) {
             match m.probe(key) {
                 Ok(i) => m.value_of(i),
                 Err(_) => match m.claim(key, BPF_NOEXIST) {
@@ -344,7 +434,7 @@ impl Kernel {
             }
         };
         // SAFETY: the value in the mapping, under the map's lock.
-        f(unsafe { std::slice::from_raw_parts_mut(v, m.h().value_size as usize) });
+        f(unsafe { std::slice::from_raw_parts_mut(v, m.params().value_size as usize) });
         true
     }
 }
@@ -373,7 +463,7 @@ fn map_create(attr: &[u32]) -> i64 {
     }
     // The elements, in whole pages.
     let Some(data_len) = elements_len(ty, key_size, value_size, max_entries)
-        .and_then(|len| len.checked_next_multiple_of(16384))
+        .and_then(|len| len.checked_next_multiple_of(PAGE))
     else {
         return -(EINVAL as i64);
     };
@@ -405,12 +495,12 @@ fn elem(cmd: u64, a: &[u64]) -> i64 {
     let (key_p, value_p, flags) = (a[1], a[2], a[3]);
     let access = access_of(fd);
     let r = with_map(fd, |m| {
-        let h = m.h();
+        let h = m.params();
         // `map_get_sys_perms`: a lookup needs a readable fd, a change a
         // writable one, and a frozen map writes through none.
         let permitted = match cmd {
             MAP_LOOKUP_ELEM | MAP_GET_NEXT_KEY => access != libc::O_WRONLY,
-            _ => access != libc::O_RDONLY && h.frozen == 0,
+            _ => access != libc::O_RDONLY && !m.frozen(),
         };
         if !permitted {
             return Err(-(EPERM as i64));
@@ -461,9 +551,7 @@ fn elem(cmd: u64, a: &[u64]) -> i64 {
                 }
                 let _g = m.lock();
                 let i = m.probe(&key).map_err(|_| -(ENOENT as i64))?;
-                // SAFETY: the used slot i.
-                unsafe { (m.slot(i) as *mut u32).write(SLOT_DELETED) };
-                h.count.fetch_sub(1, Ordering::Relaxed);
+                m.remove(i);
                 Ok(0)
             }
             MAP_GET_NEXT_KEY => {
@@ -1506,5 +1594,120 @@ mod tests {
         );
         // SAFETY: closing the map fd.
         assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+    }
+
+    /// A map's fd is an anon inode's: no read, write, seek, truncation,
+    /// allocation or attribute change reaches its file, whose header stays
+    /// as the map was made, and it stays an object's fd as a plain fd.
+    #[test]
+    fn object_fds_reach_no_file() {
+        use super::super::{fs, fsops, mem};
+        const ESPIPE: i64 = 29;
+        let mut create = [0u32; 24];
+        create[..5].copy_from_slice(&[HASH, 4, 4, 4, 0]);
+        let fd = call(MAP_CREATE, &mut create);
+        assert!(fd >= 0);
+        assert!(matches!(fdtab::get(fd as i32), Some(fdtab::Kind::Bpf)));
+        let (_, st) = read_header(fd as i32).unwrap();
+        let at = st.st_size - HEADER as i64 + std::mem::offset_of!(Header, max_entries) as i64;
+        let many = (1u32 << 30).to_ne_bytes();
+        let (bytes, fd) = (many.as_ptr() as u64, fd as u64);
+        assert_eq!(fs::pwrite64([fd, bytes, 4, at as u64, 0, 0]), -ESPIPE);
+        assert_eq!(fs::write([fd, bytes, 4, 0, 0, 0]), -(EINVAL as i64));
+        let mut out = [0u8; 4];
+        let out = out.as_mut_ptr() as u64;
+        assert_eq!(fs::read([fd, out, 4, 0, 0, 0]), -(EINVAL as i64));
+        assert_eq!(fs::pread64([fd, out, 4, 0, 0, 0]), -ESPIPE);
+        assert_eq!(fs::lseek([fd, at as u64, 0, 0, 0, 0]), -ESPIPE);
+        assert_eq!(fsops::ftruncate([fd, 0, 0, 0, 0, 0]), -(EINVAL as i64));
+        assert_eq!(
+            fsops::fallocate([fd, 0, 0, 16384, 0, 0]),
+            -(errno::ENODEV as i64)
+        );
+        assert_eq!(
+            fsops::fchmod([fd, 0, 0, 0, 0, 0]),
+            -(errno::EOPNOTSUPP as i64)
+        );
+        assert_eq!(
+            fsops::fchown([fd, 0, 0, 0, 0, 0]),
+            -(errno::EOPNOTSUPP as i64)
+        );
+        let whole = st.st_size as u64;
+        assert_eq!(mem::mmap([0, whole, 3, 1, fd, 0]), -ENOTSUPP);
+        let (h, after) = read_header(fd as i32).unwrap();
+        assert_eq!((h.max_entries, after.st_size), (4, st.st_size));
+        let plain = unsafe { libc::fcntl(fd as i32, libc::F_DUPFD_CLOEXEC, 0) };
+        assert!(plain >= 0 && fdtab::get(plain).is_none());
+        fdtab::adopt(plain);
+        assert!(matches!(fdtab::get(plain), Some(fdtab::Kind::Bpf)));
+        fdtab::on_close(plain);
+        unsafe { libc::close(plain) };
+        assert_eq!(fs::close([fd, 0, 0, 0, 0, 0]), 0);
+    }
+
+    /// mmap maps an mmapable array's values and a ring buffer's pages, its
+    /// data twice over, and never the header after them.
+    #[test]
+    fn mmap_maps_only_mappable_data() {
+        use super::super::mem;
+        let page = PAGE as u64;
+        let context: crate::context::GuestContext = unsafe { std::mem::zeroed() };
+        let unmap = |at: i64, len: u64| {
+            assert_eq!(mem::munmap(&context, [at as u64, len, 0, 0, 0, 0]), 0);
+        };
+        let mut create = [0u32; 24];
+        create[..5].copy_from_slice(&[ARRAY, 4, 8, 4, 0]);
+        let plain = call(MAP_CREATE, &mut create) as u64;
+        assert_eq!(mem::mmap([0, page, 1, 1, plain, 0]), -(EINVAL as i64));
+        create[4] = F_MMAPABLE;
+        let fd = call(MAP_CREATE, &mut create);
+        assert!(fd >= 0);
+        let fd = fd as u64;
+        assert_eq!(mem::mmap([0, page, 3, 2, fd, 0]), -(EINVAL as i64));
+        assert_eq!(mem::mmap([0, 2 * page, 1, 1, fd, 0]), -(EINVAL as i64));
+        let at = mem::mmap([0, page, 3, 1, fd, 0]);
+        assert!(at > 0, "{at}");
+        // SAFETY: element 1 of the mapping.
+        unsafe { ((at as u64 + 8) as *mut u64).write(77) };
+        let (key, mut value) = (1u32, 0u64);
+        assert_eq!(
+            elem(
+                fd as i64,
+                MAP_LOOKUP_ELEM,
+                (&raw const key).cast(),
+                (&raw mut value).cast(),
+                0
+            ),
+            0
+        );
+        assert_eq!(value, 77);
+        unmap(at, page);
+        let mut ring = [0u32; 24];
+        ring[..5].copy_from_slice(&[RINGBUF, 0, 0, PAGE as u32, 0]);
+        let rb = call(MAP_CREATE, &mut ring);
+        assert!(rb >= 0);
+        let rb = rb as u64;
+        let consumer = mem::mmap([0, page, 3, 1, rb, 0]);
+        assert!(consumer > 0, "{consumer}");
+        unmap(consumer, page);
+        assert_eq!(mem::mmap([0, 3 * page, 3, 1, rb, page]), -(EPERM as i64));
+        assert_eq!(mem::mmap([0, 4 * page, 1, 1, rb, page]), -(EINVAL as i64));
+        let mark = 0x5au8;
+        // SAFETY: the first byte of the ring buffer's data.
+        assert_eq!(
+            unsafe { libc::pwrite(rb as i32, (&raw const mark).cast(), 1, 2 * PAGE as i64) },
+            1
+        );
+        let producer = mem::mmap([0, 3 * page, 1, 1, rb, page]);
+        assert!(producer > 0, "{producer}");
+        // SAFETY: the data's two mappings.
+        unsafe {
+            assert_eq!(((producer as u64 + page) as *const u8).read(), mark);
+            assert_eq!(((producer as u64 + 2 * page) as *const u8).read(), mark);
+        }
+        unmap(producer, 3 * page);
+        for fd in [plain, fd, rb] {
+            assert_eq!(super::super::fs::close([fd, 0, 0, 0, 0, 0]), 0);
+        }
     }
 }

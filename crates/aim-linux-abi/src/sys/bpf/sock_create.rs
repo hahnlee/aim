@@ -211,7 +211,7 @@ impl Program {
                 0x85 if imm == 1 => {
                     let map = self.maps.get(&(r[1] as usize)).ok_or(EINVAL)?;
                     let at = usize::try_from(r[2]).map_err(|_| EACCES)?;
-                    let len = map.0.h().key_size as usize;
+                    let len = map.0.params().key_size as usize;
                     if at == 0 {
                         return Err(EACCES);
                     }
