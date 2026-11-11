@@ -1,6 +1,14 @@
 //! Cross-process inode admission and open-description writer leases.
 //! Admission is always acquired before the writer lock. Only final descriptor
 //! close releases a lease: explicitly unlocking would revoke surviving aliases.
+//!
+//! A lease directory holds one lock file per device and kind
+//! (`<dev>.writers`, ...). An inode's lock of a kind is the byte at its slot
+//! (a hash of its whole identity, so a reused inode number is another
+//! inode) of that file, held as an open-file-description lock: each lease
+//! opens the file for itself, its lock goes with that open file (aliases,
+//! fork, SCM_RIGHTS) and ends at its final close, as a flock would. The
+//! open file's position is the slot, which tells what it holds.
 use crate::private_fd::PrivateFd;
 use std::{
     fs::{self, File, OpenOptions},
@@ -33,6 +41,13 @@ impl Identity {
             birth_seconds: stat.st_birthtime,
             birth_nanoseconds: stat.st_birthtime_nsec,
         })
+    }
+    /// The lock byte of this identity in its device's lock files: the
+    /// first 62 bits of a SHA-256 of all but the device.
+    fn slot(self) -> i64 {
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(&self.to_bytes()[8..]);
+        (u64::from_le_bytes(digest[..8].try_into().unwrap()) >> 2) as i64
     }
     pub fn name(self) -> String {
         format!(
@@ -180,19 +195,39 @@ fn lease_directory(given: &Path) -> io::Result<Arc<LeaseDirectory>> {
     directories.push(directory.clone());
     Ok(directory)
 }
-fn locked(fd: BorrowedFd<'_>, operation: i32) -> io::Result<()> {
+/// Darwin's open-file-description locks (sys/fcntl.h, private).
+const F_OFD_SETLK: i32 = 90;
+const F_OFD_SETLKW: i32 = 91;
+
+/// `flock(fd, operation)` of the byte at `slot`: LOCK_SH, LOCK_EX or
+/// LOCK_UN, with LOCK_NB answering EBUSY where another open file holds it.
+fn locked(fd: BorrowedFd<'_>, slot: i64, operation: i32) -> io::Result<()> {
+    let mut range: libc::flock = unsafe { std::mem::zeroed() };
+    range.l_type = match operation & !libc::LOCK_NB {
+        libc::LOCK_SH => libc::F_RDLCK,
+        libc::LOCK_EX => libc::F_WRLCK,
+        _ => libc::F_UNLCK,
+    };
+    range.l_whence = libc::SEEK_SET as i16;
+    range.l_start = slot;
+    range.l_len = 1;
+    let command = if operation & libc::LOCK_NB != 0 {
+        F_OFD_SETLK
+    } else {
+        F_OFD_SETLKW
+    };
     loop {
-        if unsafe { libc::flock(fd.as_raw_fd(), operation) } == 0 {
+        if unsafe { libc::fcntl(fd.as_raw_fd(), command, &range) } == 0 {
             return Ok(());
         }
         let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::Interrupted {
-            continue;
+        match error.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EAGAIN | libc::EACCES) if command == F_OFD_SETLK => {
+                return Err(io::Error::from_raw_os_error(libc::EBUSY));
+            }
+            _ => return Err(error),
         }
-        if operation & libc::LOCK_NB != 0 && error.kind() == io::ErrorKind::WouldBlock {
-            return Err(io::Error::from_raw_os_error(libc::EBUSY));
-        }
-        return Err(error);
     }
 }
 impl Inode {
@@ -227,43 +262,26 @@ impl Inode {
     pub fn directory(&self) -> &Path {
         &self.0.directory.path
     }
-    fn lock_file(&self, suffix: &str) -> io::Result<PrivateFd> {
-        let name =
-            std::ffi::CString::new(format!("{}.{}", self.identity().name(), suffix)).unwrap();
+    /// An open file of the device's `kind` lock file, at this inode's slot.
+    fn lock_file(&self, kind: &str) -> io::Result<PrivateFd> {
+        let name = std::ffi::CString::new(format!("{:x}.{kind}", self.identity().dev)).unwrap();
         let fd = PrivateFd::allocate(|| {
+            // Opens racing an O_CREAT of the same new name can fail with
+            // ENOENT on Darwin: only one creates it, the others open it.
+            let directory = self.0.directory.descriptor.as_raw_fd();
             let flags = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC;
-            let mut fd = unsafe {
-                libc::openat(
-                    self.0.directory.descriptor.as_raw_fd(),
-                    name.as_ptr(),
-                    flags,
-                )
-            };
-            if fd < 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() != io::ErrorKind::NotFound {
-                    return Err(error);
-                }
+            let mut fd = unsafe { libc::openat(directory, name.as_ptr(), flags) };
+            if fd < 0 && io::Error::last_os_error().kind() == io::ErrorKind::NotFound {
                 fd = unsafe {
                     libc::openat(
-                        self.0.directory.descriptor.as_raw_fd(),
+                        directory,
                         name.as_ptr(),
                         flags | libc::O_CREAT | libc::O_EXCL,
                         0o600,
                     )
                 };
-                if fd < 0 {
-                    let error = io::Error::last_os_error();
-                    if error.kind() != io::ErrorKind::AlreadyExists {
-                        return Err(error);
-                    }
-                    fd = unsafe {
-                        libc::openat(
-                            self.0.directory.descriptor.as_raw_fd(),
-                            name.as_ptr(),
-                            flags,
-                        )
-                    };
+                if fd < 0 && io::Error::last_os_error().kind() == io::ErrorKind::AlreadyExists {
+                    fd = unsafe { libc::openat(directory, name.as_ptr(), flags) };
                 }
             }
             if fd < 0 {
@@ -279,14 +297,20 @@ impl Inode {
         if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
             return Err(io::Error::from_raw_os_error(libc::EINVAL));
         }
+        if unsafe { libc::lseek(fd.as_raw_fd(), self.slot(), libc::SEEK_SET) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
         Ok(fd)
+    }
+    fn slot(&self) -> i64 {
+        self.identity().slot()
     }
     pub fn admission(&self) -> io::Result<Admission> {
         if Identity::from_fd(self.source())? != self.identity() {
             return Err(io::Error::from_raw_os_error(libc::ESTALE));
         }
         let metadata = self.lock_file("admission")?;
-        locked(metadata.as_fd(), libc::LOCK_EX)?;
+        locked(metadata.as_fd(), self.slot(), libc::LOCK_EX)?;
         Ok(Admission {
             inode: self.clone(),
             _metadata: metadata,
@@ -320,7 +344,7 @@ impl Inode {
         }
         *held = true;
         drop(held);
-        if let Err(error) = locked(descriptor.as_fd(), libc::LOCK_EX) {
+        if let Err(error) = locked(descriptor.as_fd(), self.slot(), libc::LOCK_EX) {
             *offset.held.lock().unwrap_or_else(|e| e.into_inner()) = false;
             offset.released.notify_one();
             return Err(error);
@@ -329,19 +353,22 @@ impl Inode {
             inode: self.clone(),
         })
     }
-    /// Adopt the actual carrier under admission and verify its lock-file inode.
+    /// Adopt the actual carrier under admission and verify that it is an
+    /// open file of the writers lock file at this inode's slot.
     pub fn adopt_writer(&self, carrier: OwnedFd) -> io::Result<WriterLease> {
         self.adopt_private_writer(PrivateFd::adopt(carrier)?)
     }
     pub fn adopt_private_writer(&self, carrier: PrivateFd) -> io::Result<WriterLease> {
         let admission = self.admission()?;
         let expected = self.lock_file("writers")?;
-        if Identity::from_fd(carrier.as_fd())? != Identity::from_fd(expected.as_fd())? {
+        if Identity::from_fd(carrier.as_fd())? != Identity::from_fd(expected.as_fd())?
+            || unsafe { libc::lseek(carrier.as_raw_fd(), 0, libc::SEEK_CUR) } != self.slot()
+        {
             return Err(io::Error::from_raw_os_error(libc::EINVAL));
         }
         let denial = admission.inode.lock_file("denials")?;
-        locked(denial.as_fd(), libc::LOCK_EX | libc::LOCK_NB)?;
-        locked(carrier.as_fd(), libc::LOCK_SH | libc::LOCK_NB)?;
+        locked(denial.as_fd(), self.slot(), libc::LOCK_EX | libc::LOCK_NB)?;
+        locked(carrier.as_fd(), self.slot(), libc::LOCK_SH | libc::LOCK_NB)?;
         Ok(WriterLease {
             inode: admission.inode.clone(),
             descriptor: carrier,
@@ -357,9 +384,17 @@ impl Admission {
     }
     pub fn writer(&self) -> io::Result<WriterLease> {
         let denial = self.inode.lock_file("denials")?;
-        locked(denial.as_fd(), libc::LOCK_EX | libc::LOCK_NB)?;
+        locked(
+            denial.as_fd(),
+            self.inode.slot(),
+            libc::LOCK_EX | libc::LOCK_NB,
+        )?;
         let descriptor = self.inode.lock_file("writers")?;
-        locked(descriptor.as_fd(), libc::LOCK_SH | libc::LOCK_NB)?;
+        locked(
+            descriptor.as_fd(),
+            self.inode.slot(),
+            libc::LOCK_SH | libc::LOCK_NB,
+        )?;
         Ok(WriterLease {
             inode: self.inode.clone(),
             descriptor,
@@ -369,9 +404,17 @@ impl Admission {
     /// Admission serializes the probe and retained denial with writer admission.
     pub fn deny_writers(&self) -> io::Result<ExclusiveLease> {
         let writers = self.inode.lock_file("writers")?;
-        locked(writers.as_fd(), libc::LOCK_EX | libc::LOCK_NB)?;
+        locked(
+            writers.as_fd(),
+            self.inode.slot(),
+            libc::LOCK_EX | libc::LOCK_NB,
+        )?;
         let descriptor = self.inode.lock_file("denials")?;
-        locked(descriptor.as_fd(), libc::LOCK_SH | libc::LOCK_NB)?;
+        locked(
+            descriptor.as_fd(),
+            self.inode.slot(),
+            libc::LOCK_SH | libc::LOCK_NB,
+        )?;
         Ok(ExclusiveLease {
             inode: self.inode.clone(),
             descriptor,
@@ -379,7 +422,11 @@ impl Admission {
     }
     pub fn enable_slot(&self) -> io::Result<EnableSlot> {
         let descriptor = self.inode.lock_file("enable")?;
-        locked(descriptor.as_fd(), libc::LOCK_EX | libc::LOCK_NB)?;
+        locked(
+            descriptor.as_fd(),
+            self.inode.slot(),
+            libc::LOCK_EX | libc::LOCK_NB,
+        )?;
         Ok(ExclusiveLease {
             inode: self.inode.clone(),
             descriptor,
@@ -387,7 +434,11 @@ impl Admission {
     }
     pub fn exclusive(&self) -> io::Result<ExclusiveLease> {
         let descriptor = self.inode.lock_file("writers")?;
-        locked(descriptor.as_fd(), libc::LOCK_EX | libc::LOCK_NB)?;
+        locked(
+            descriptor.as_fd(),
+            self.inode.slot(),
+            libc::LOCK_EX | libc::LOCK_NB,
+        )?;
         Ok(ExclusiveLease {
             inode: self.inode.clone(),
             descriptor,
@@ -420,7 +471,7 @@ impl Drop for OffsetLock {
         let mut held = offset.held.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(descriptor) = offset.descriptor.get() {
             // An unlock of a lock this open file holds cannot block.
-            if let Err(error) = locked(descriptor.as_fd(), libc::LOCK_UN) {
+            if let Err(error) = locked(descriptor.as_fd(), self.inode.slot(), libc::LOCK_UN) {
                 eprintln!(
                     "aim-storage: unlocking the offset lock of {}: {error}",
                     self.inode.identity().name()
@@ -1001,6 +1052,55 @@ pub(crate) mod tests {
                 .ends_with(".admission")
         }));
     }
+    /// Inodes of one device share its lock files but not their locks: a
+    /// reused inode number is another identity, and a writer carrier of
+    /// one inode is no carrier of another.
+    #[test]
+    fn inodes_of_a_device_lock_their_own_slots() {
+        let fixture = Fixture::new();
+        let other = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(fixture.path.join("other"))
+            .unwrap();
+        let other = Inode::open(fixture.inode.directory(), other.as_fd()).unwrap();
+        let writer = fixture.inode.admission().unwrap().writer().unwrap();
+        let exclusive = other.admission().unwrap().exclusive().unwrap();
+        busy(fixture.inode.admission().unwrap().exclusive());
+        assert_eq!(
+            other
+                .admission()
+                .unwrap()
+                .writer()
+                .err()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::EBUSY)
+        );
+        assert_eq!(
+            other
+                .adopt_private_writer(writer.try_clone().unwrap().into_private_fd())
+                .err()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::EINVAL)
+        );
+        drop((writer, exclusive));
+        let mut reused = fixture.inode.identity();
+        reused.birth_nanoseconds = (reused.birth_nanoseconds + 1) % 1_000_000_000;
+        assert_ne!(reused.slot(), fixture.inode.identity().slot());
+        let mut names = fs::read_dir(fixture.inode.directory())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+        let dev = fixture.inode.identity().dev;
+        assert_eq!(
+            names,
+            ["admission", "denials", "writers"].map(|kind| format!("{dev:x}.{kind}"))
+        );
+    }
     #[test]
     fn canonical_directory_and_lock_nodes_reject_symlink_redirection() {
         let fixture = Fixture::new();
@@ -1016,7 +1116,7 @@ pub(crate) mod tests {
         let target = fixture
             .inode
             .directory()
-            .join(format!("{}.writers", fixture.inode.identity().name()));
+            .join(format!("{:x}.writers", fixture.inode.identity().dev));
         std::os::unix::fs::symlink(fixture.path.join("source"), &target).unwrap();
         assert!(fixture.inode.admission().unwrap().writer().is_err());
     }
