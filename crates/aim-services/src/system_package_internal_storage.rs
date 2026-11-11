@@ -223,30 +223,34 @@ impl System {
         prepared: BootAppData,
     ) -> Result<()> {
         let leaf = self.internal_storage_leaf()?;
-        leaf.call(
-            storage_api::FIXUP_DATA,
-            |p| {
-                p.write_string16(None);
-                p.write_i32(3);
-            },
-            |_| Ok(()),
-        )?;
+        crate::boot_trace::timed("fixupAppData", || {
+            leaf.call(
+                storage_api::FIXUP_DATA,
+                |p| {
+                    p.write_string16(None);
+                    p.write_i32(3);
+                },
+                |_| Ok(()),
+            )
+        })?;
         let apply_device = leaf.call(
             storage_api::APPLY_DEFAULT_DEVICE_STORAGE,
             |_| {},
             |r| r.read_bool(),
         )?;
-        self.reconcile_apps_data_volumes(
-            &leaf,
-            vec![None],
-            0,
-            prepared.flags,
-            true,
-            Some(false),
-            Some(&prepared.deferred),
-            prepared.encrypted,
-            apply_device,
-        )
+        crate::boot_trace::timed("deferred reconcileAppsData", || {
+            self.reconcile_apps_data_volumes(
+                &leaf,
+                vec![None],
+                0,
+                prepared.flags,
+                true,
+                Some(false),
+                Some(&prepared.deferred),
+                prepared.encrypted,
+                apply_device,
+            )
+        })
         .map(|_| ())
     }
     fn reconcile_apps_data_volumes(
