@@ -781,10 +781,10 @@ fn obj_get(path: u64, file_flags: u32, path_fd: u32) -> i64 {
         return -(errno::EACCES as i64);
     }
     let host = std::path::Path::new(std::ffi::OsStr::from_bytes(r.host.as_bytes()));
-    let file = match object(host, &objects_dir())
-        .and_then(|path| PrivateFile::allocate(|| open_object(&path, access)))
-    {
-        Ok(file) => file,
+    let (file, path) = match object(host, &objects_dir()).and_then(|path| {
+        PrivateFile::allocate(|| open_object(&path, access)).map(|file| (file, path))
+    }) {
+        Ok(opened) => opened,
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
             return -(errno::EACCES as i64);
         }
@@ -795,10 +795,8 @@ fn obj_get(path: u64, file_flags: u32, path_fd: u32) -> i64 {
             publish_object(file.as_raw_fd())
         }
         // `bpf_prog_new_fd`: a program's fd is read-write whatever the
-        // flags asked.
-        Some(_) => match object(host, &objects_dir())
-            .and_then(|path| PrivateFile::allocate(|| open_object(&path, libc::O_RDWR)))
-        {
+        // flags asked: of the object opened, not what the path names by now.
+        Some(_) => match PrivateFile::allocate(|| open_object(&path, libc::O_RDWR)) {
             Ok(file) => publish_object(file.as_raw_fd()),
             Err(error) => -(io_errno(error) as i64),
         },

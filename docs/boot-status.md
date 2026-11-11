@@ -9472,8 +9472,12 @@ objects take 0.12 s, what the Mac's own calls cost (0.29 us per `lseek`,
 inode, instead of a hard link to its object: a clone of the object's
 template, which names it in a host attribute the guest cannot set, made
 whole in one call for about a third of a link's cost on the Mac. The bpffs
-area makes no other files and opens a pin as no file, and BPF_OBJ_GET
-checks its flags and the caller's access to the pin (#418, #561).
+area makes no other files and opens a pin as no file; no link or rename
+moves a pin out of it or gives an object fd a name, and no
+`/proc/self/fd` link reopens an object (ENXIO). BPF_OBJ_GET checks its
+flags and the caller's access to the pin, a frozen map changes through no
+fd, and a map is mapped only when its header lays its elements out inside
+its file (#418, #561).
 
 ## Debugging
 
