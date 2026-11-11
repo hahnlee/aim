@@ -179,18 +179,22 @@ impl System {
             return Ok(effects);
         }
         let registry = self.package_preferred_registry(bridge)?;
-        let stages = if target_user == -1 {
-            registry
-                .prepare_clear_all(Some(package))
-                .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?
-        } else {
-            let Some(snapshot) = registry.snapshot(target_user).map_err(|error| {
-                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.0)
-            })?
-            else {
-                return Ok(effects);
-            };
-            registry
+        let commit =
+            |stage| self.try_commit_package_preferred_stage(bridge, &registry, stage, false);
+        if target_user == -1 {
+            effects.changed_users = registry.clear_all(Some(package), commit)?;
+            return Ok(effects);
+        }
+        let Some(snapshot) = registry
+            .snapshot(target_user)
+            .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.0))?
+        else {
+            return Ok(effects);
+        };
+        // A stage another publication superseded is prepared again on the
+        // current resolver, as the original's clear runs under mLock.
+        loop {
+            let Some(stage) = registry
                 .prepare_mutation(
                     target_user,
                     snapshot.generation,
@@ -200,13 +204,13 @@ impl System {
                 )
                 .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?
                 .stage
-                .into_iter()
-                .collect()
-        };
-        for stage in stages {
-            let user = stage.user;
-            self.commit_package_preferred_stage(bridge, &registry, stage, false)?;
-            effects.changed_users.push(user);
+            else {
+                break;
+            };
+            if commit(stage)? {
+                effects.changed_users.push(target_user);
+                break;
+            }
         }
         Ok(effects)
     }

@@ -3586,7 +3586,7 @@ impl System {
                             "mutation preferred owner stopped",
                         )
                     })?;
-                    system.commit_package_preferred_stage(
+                    system.try_commit_package_preferred_stage(
                         &preferred_bridge,
                         &registry,
                         stage,
