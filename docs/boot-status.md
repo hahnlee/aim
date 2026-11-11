@@ -1099,9 +1099,12 @@ and construction (#2421): three matched warm second boots reduce median raw scan
 from 2.028 to 1.214 s; median `boot_completed` is 6.216 s
 against 6.978 s before (2026-10-30). The image scan parses every scan
 directory's packages in one parallel batch and takes the results in scan
-order, and a boot-scanned package's owner is staged once (it was cloned three
-times per package); the system image scan takes 1.4-1.7 s fresh and
-0.27-0.35 s warm; the APEX modules are parsed and verified in parallel.
+order. A rejected saved package is rolled back from an undo record of the
+entries its scan writes, not a copy of the whole scan owner per package, and
+keyset registration and seInfo assignment change the owner in place (#2996);
+the system image scan takes 1.10-1.15 s fresh and 0.15-0.19 s warm (from
+0.28-0.53 s warm, 2026-11-11, load 9-12); the APEX modules are parsed and
+verified in parallel.
 The in-process services read properties from the areas mapped once, with
 bionic's serial protocol, and the package boot's live property capture is
 reused until the global property serial changes (a boot makes about 4,500
@@ -1109,9 +1112,13 @@ lookups, 11,000 before); a query capture projects its packages with the
 snapshot's validated legacy reader; roles, `notifyPackageUse` and known
 packages check visibility with the queries' retained AppsFilter, and the
 boot's permission and GID queries read the image's declarations in place;
-app standby's idle check informs the restriction owner once per check. The
-initial scan takes 0.19-0.21 s fresh and 0.26-0.31 s warm, the
-construction 0.30 s and 0.22-0.27 s. Branch perf/boot-2 on main
+app standby's idle check informs the restriction owner once per check. A
+query capture whose system owners change (roles, keysets, the launch,
+archive, metadata and instant registry owners) keeps its packages'
+projections and derives only what reads those owners, also when it is
+published as a new generation of an unchanged scan (#2995). The initial
+scan takes 0.14 s fresh and 0.19 s warm, the construction 0.23 s and
+0.15-0.16 s (2026-11-11, load 3-9). Branch perf/boot-2 on main
 `a3638eae3` (2026-11-11), timed from `aimctl start` on throwaway data
 directories at 1-minute load 4-9 (a build that also logs its stage times):
 `sys.boot_completed` at 5.10, 5.19 and 6.20 s fresh and 3.53, 3.55 and

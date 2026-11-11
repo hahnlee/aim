@@ -22,6 +22,41 @@ struct PropertyGroup {
     name: String,
     packages: Vec<(String, Vec<Property>)>,
 }
+/// One package's registration state before [`Registry::register`] replaces
+/// it, so a rejected scan restores the registry without copying it (#2996).
+pub(in crate::package) struct Undo {
+    name: String,
+    source: Option<Arc<LoadedPackage>>,
+    committed: usize,
+    order: Vec<(usize, String)>,
+    instruments: Vec<(usize, RegisteredInstrumentation)>,
+    providers: Vec<(usize, RegisteredProvider)>,
+    declaration: Option<Vec<Provider>>,
+    authority_objects: Vec<RegisteredProvider>,
+    base_authority_objects: std::collections::BTreeSet<usize>,
+    authorities: Vec<(String, usize)>,
+    properties: Vec<PropertyGroup>,
+}
+
+/// The entries of `values` that `owned` selects, at their positions.
+fn entries<T: Clone>(values: &[T], owned: impl Fn(&T) -> bool) -> Vec<(usize, T)> {
+    values
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| owned(value))
+        .map(|(at, value)| (at, value.clone()))
+        .collect()
+}
+
+/// Put back what [`entries`] saved. Registration removes and appends only
+/// selected entries, so the others kept their relative order.
+fn restore<T>(values: &mut Vec<T>, saved: Vec<(usize, T)>, owned: impl Fn(&T) -> bool) {
+    values.retain(|value| !owned(value));
+    for (at, value) in saved {
+        values.insert(at, value);
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Registry {
     sources: BTreeMap<String, Arc<LoadedPackage>>,
@@ -178,6 +213,46 @@ impl Registry {
         packages.sort_by_key(|(name, _)| super::info::java_hash(name));
         packages
     }
+    /// What [`Self::register`] of `name` changes. The authority and property
+    /// tables are renumbered and regrouped by it, so they are kept whole.
+    pub(in crate::package) fn undo_record(&self, name: &str) -> Undo {
+        Undo {
+            name: name.into(),
+            source: self.sources.get(name).cloned(),
+            committed: self.committed_packages.len(),
+            order: entries(&self.package_order, |n| n == name),
+            instruments: entries(&self.instruments, |i| i.package == name),
+            providers: entries(&self.providers, |p| p.package == name),
+            declaration: self.declaration_providers.get(name).cloned(),
+            authority_objects: self.authority_objects.clone(),
+            base_authority_objects: self.base_authority_objects.clone(),
+            authorities: self.authorities.clone(),
+            properties: self.properties.clone(),
+        }
+    }
+
+    pub(in crate::package) fn roll_back(&mut self, undo: Undo) {
+        let name = undo.name.as_str();
+        match undo.source {
+            Some(source) => self.sources.insert(name.into(), source),
+            None => self.sources.remove(name),
+        };
+        self.committed_packages.truncate(undo.committed);
+        restore(&mut self.package_order, undo.order, |n| n == name);
+        restore(&mut self.instruments, undo.instruments, |i| {
+            i.package == name
+        });
+        restore(&mut self.providers, undo.providers, |p| p.package == name);
+        match undo.declaration {
+            Some(declaration) => self.declaration_providers.insert(name.into(), declaration),
+            None => self.declaration_providers.remove(name),
+        };
+        self.authority_objects = undo.authority_objects;
+        self.base_authority_objects = undo.base_authority_objects;
+        self.authorities = undo.authorities;
+        self.properties = undo.properties;
+    }
+
     /// Replacement removes the old registration before admitting the new code.
     pub fn register(&mut self, code: Arc<LoadedPackage>) -> Result<(), String> {
         let package = &code.package;

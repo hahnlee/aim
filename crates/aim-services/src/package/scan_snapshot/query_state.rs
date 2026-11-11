@@ -492,27 +492,13 @@ impl Capture {
         self: &Arc<Self>,
         owner: Arc<crate::package::archive::Owner>,
     ) -> Result<PackageUpdate, String> {
-        let update = self.prepare_package_update(self.scan.owner().clone())?;
-        let mut context = (*update.capture.context).clone();
-        context.system.archive_owner = Some(owner);
-        let capture = Self::new(update.store.capture(), context)?;
-        Ok(PackageUpdate {
-            store: update.store,
-            capture,
-        })
+        self.prepare_system_update(|system| system.archive_owner = Some(owner))
     }
     pub(crate) fn prepare_launch_owner(
         self: &Arc<Self>,
         owner: Arc<crate::package::launch::Owner>,
     ) -> Result<PackageUpdate, String> {
-        let update = self.prepare_package_update(self.scan.owner().clone())?;
-        let mut context = (*update.capture.context).clone();
-        context.system.launch_sender = Some(owner);
-        let capture = Self::new(update.store.capture(), context)?;
-        Ok(PackageUpdate {
-            store: update.store,
-            capture,
-        })
+        self.prepare_system_update(|system| system.launch_sender = Some(owner))
     }
     pub fn preferred_record_tokens(
         &self,
@@ -1071,23 +1057,8 @@ impl Capture {
         self: &Arc<Self>,
         owner: Arc<crate::package::app_metadata::Owner>,
     ) -> Result<PackageUpdate, String> {
-        let version = self
-            .scan
-            .version()
-            .checked_add(1)
-            .ok_or("package version exhausted")?;
-        let store = super::Store::new_replica_after(
-            &self.scan,
-            self.scan.owner().clone(),
-            self.scan.usage().clone(),
-            version,
-        )
-        .map_err(|error| format!("app metadata publication: {error:?}"))?;
-        let mut context = (*self.context).clone();
-        context.scan_version = version;
-        context.system.app_metadata_files = Some(owner);
-        let capture = Self::new(store.capture(), context)?;
-        Ok(PackageUpdate { store, capture })
+        self.prepare_system_update(|system| system.app_metadata_files = Some(owner))
+            .map_err(|error| format!("app metadata publication: {error}"))
     }
 
     /// The full native boot owner calls this after resolution policy is ready.
@@ -1098,9 +1069,9 @@ impl Capture {
         }
         let package = select_permission_controller(&self.state)?
             .ok_or("there must be exactly one permissions manager")?;
-        let mut context = (*self.context).clone();
-        context.system.permission_controller_package = Some(Some(package));
-        Self::new(self.scan.clone(), context)
+        self.with_system(|system| {
+            system.permission_controller_package = Some(Some(package));
+        })
     }
 
     /// systemReady binds real provider resource metadata to this generation.
@@ -1118,9 +1089,9 @@ impl Capture {
             files,
             apex,
         )?;
-        let mut context = (*self.context).clone();
-        context.system.module_metadata = Some(Arc::new(owner));
-        Self::new(self.scan.clone(), context)
+        self.with_system(|system| {
+            system.module_metadata = Some(Arc::new(owner));
+        })
     }
 
     pub fn select_configured_roles(
@@ -1129,19 +1100,19 @@ impl Capture {
         config: crate::package::parse::resources::Config,
     ) -> Result<Arc<Self>, String> {
         let roles = crate::package::roles::Owner::load(&self.state, platform, config)?;
-        let mut context = (*self.context).clone();
-        context.system.roles = Some(Arc::new(roles));
-        Self::new(self.scan.clone(), context)
+        self.with_system(|system| {
+            system.roles = Some(Arc::new(roles));
+        })
     }
 
     pub fn bind_instant_registry(
         self: &Arc<Self>,
         owner: Arc<crate::package::instant::Owner>,
     ) -> Result<Arc<Self>, String> {
-        let mut context = (*self.context).clone();
-        context.system.instant_access = Some(Arc::new(owner.snapshot()));
-        context.system.instant_registry = Some(owner);
-        Self::new(self.scan.clone(), context)
+        self.with_system(|system| {
+            system.instant_access = Some(Arc::new(owner.snapshot()));
+            system.instant_registry = Some(owner);
+        })
     }
 
     /// Retain the actual original RoleManager leaf before default permission
@@ -1157,11 +1128,11 @@ impl Capture {
             .roles
             .as_ref()
             .ok_or("configured role owner unavailable")?;
-        let mut context = (*self.context).clone();
-        context.system.roles = Some(Arc::new(
-            roles.with_browser_source(crate::package::roles::BrowserSource::original(bridge)),
-        ));
-        Self::new(self.scan.clone(), context)
+        self.with_system(|system| {
+            system.roles = Some(Arc::new(roles.with_browser_source(
+                crate::package::roles::BrowserSource::original(bridge),
+            )));
+        })
     }
 
     pub fn prepare_known_packages(
@@ -1182,33 +1153,20 @@ impl Capture {
             config,
             overlay_signature_package,
         )?;
-        let mut context = (*self.context).clone();
-        context.system.roles = Some(Arc::new(roles));
-        Self::new(self.scan.clone(), context)
+        self.with_system(|system| {
+            system.roles = Some(Arc::new(roles));
+        })
     }
 
     pub(crate) fn prepare_instant_registry_update(
         self: &Arc<Self>,
         owner: Arc<crate::package::instant::Owner>,
     ) -> Result<PackageUpdate, String> {
-        let version = self
-            .scan
-            .version()
-            .checked_add(1)
-            .ok_or("package version exhausted")?;
-        let store = super::Store::new_replica_after(
-            &self.scan,
-            self.scan.owner().clone(),
-            self.scan.usage().clone(),
-            version,
-        )
-        .map_err(|error| format!("instant registry publication: {error:?}"))?;
-        let mut context = (*self.context).clone();
-        context.scan_version = version;
-        context.system.instant_access = Some(Arc::new(owner.snapshot()));
-        context.system.instant_registry = Some(owner);
-        let capture = Self::new(store.capture(), context)?;
-        Ok(PackageUpdate { store, capture })
+        self.prepare_system_update(|system| {
+            system.instant_access = Some(Arc::new(owner.snapshot()));
+            system.instant_registry = Some(owner);
+        })
+        .map_err(|error| format!("instant registry publication: {error}"))
     }
 
     pub fn prepare_instant_components(
@@ -1225,9 +1183,9 @@ impl Capture {
             debuggable,
             eng_build,
         )?;
-        let mut context = (*self.context).clone();
-        context.system.instant_components = Some(Arc::new(owner));
-        Self::new(self.scan.clone(), context)
+        self.with_system(|system| {
+            system.instant_components = Some(Arc::new(owner));
+        })
     }
 
     pub fn load_page_size_compat_resources(
@@ -1236,9 +1194,9 @@ impl Capture {
         config: crate::package::parse::resources::Config,
     ) -> Result<Arc<Self>, String> {
         let owner = crate::package::page_size_compat::Owner::load(platform, config)?;
-        let mut context = (*self.context).clone();
-        context.system.page_size_compat = Some(Arc::new(owner));
-        Self::new(self.scan.clone(), context)
+        self.with_system(|system| {
+            system.page_size_compat = Some(Arc::new(owner));
+        })
     }
 
     pub fn refresh_role_resources(
@@ -1252,22 +1210,82 @@ impl Capture {
             .roles
             .as_ref()
             .ok_or("configured role owner unavailable")?;
-        let mut context = (*self.context).clone();
-        context.system.roles = Some(Arc::new(current.refresh_resources(platform, config)?));
-        Self::new(self.scan.clone(), context)
+        let roles = current.refresh_resources(platform, config)?;
+        self.with_system(|system| {
+            system.roles = Some(Arc::new(roles));
+        })
     }
 
     pub fn prepare_keysets(
         self: &Arc<Self>,
         process: Arc<aim_binder_host::local::LocalProcess>,
     ) -> Result<Arc<Self>, String> {
-        let mut context = (*self.context).clone();
-        if context.system.key_set_tokens.is_some() {
+        if self.context.system.key_set_tokens.is_some() {
             return Err("keyset token owner already prepared".into());
         }
-        context.system.key_set_tokens =
-            Some(Arc::new(crate::package::keysets::Tokens::new(process)));
-        Self::new(self.scan.clone(), context)
+        self.with_system(|system| {
+            system.key_set_tokens = Some(Arc::new(crate::package::keysets::Tokens::new(process)));
+        })
+    }
+
+    /// The next generation of this capture's unchanged scan: what
+    /// [`Self::prepare_package_update`] of the same owner publishes, keeping
+    /// the packages' projections as a usage-only update does (#2995). Its
+    /// system owners are changed next, which derives what reads them.
+    pub(crate) fn prepare_unchanged_update(self: &Arc<Self>) -> Result<PackageUpdate, String> {
+        if self.scan.replica_validated {
+            self.prepare_usage_update(self.scan.usage().clone())
+        } else {
+            self.prepare_package_update(self.scan.owner().clone())
+        }
+    }
+
+    /// [`Self::prepare_unchanged_update`] with the system owners `change` sets.
+    pub(crate) fn prepare_system_update(
+        self: &Arc<Self>,
+        change: impl FnOnce(&mut model::System),
+    ) -> Result<PackageUpdate, String> {
+        let update = self.prepare_unchanged_update()?;
+        Ok(PackageUpdate {
+            capture: update.capture.with_system(change)?,
+            store: update.store,
+        })
+    }
+
+    /// This capture with its system owners changed. A package's projection
+    /// reads the scan, the users and the package's own inputs, never the
+    /// system owners, so the projections are kept and only what reads the
+    /// system owners is derived again, as [`Self::new`] would (#2995).
+    fn with_system(
+        self: &Arc<Self>,
+        change: impl FnOnce(&mut model::System),
+    ) -> Result<Arc<Self>, String> {
+        let mut context = (*self.context).clone();
+        change(&mut context.system);
+        let mut state = (*self.state).clone();
+        state.system = context.system.clone();
+        state
+            .system
+            .settings_package_order
+            .clone_from(&self.state.system.settings_package_order);
+        state.platform = context.platform.clone();
+        #[cfg(test)]
+        let whole = Self::new(self.scan.clone(), context.clone())?;
+        let capture = Self::complete(
+            self.scan.clone(),
+            state,
+            self.domains.clone(),
+            Arc::new(context),
+        )?;
+        #[cfg(test)]
+        assert!(
+            capture.state == whole.state
+                && capture.context.system == whole.context.system
+                && capture.context.platform == whole.context.platform
+                && capture.frozen == whole.frozen,
+            "a system owner change differs from a whole capture"
+        );
+        Ok(capture)
     }
 
     pub fn new(scan: Arc<Snapshot>, mut context: Context) -> Result<Arc<Self>, String> {
@@ -1456,6 +1474,17 @@ impl Capture {
             system: context.system,
             platform: context.platform,
         };
+        Self::complete(scan, state, domains, source)
+    }
+
+    /// What reads the system owners: the platform's application, the
+    /// resolver selection and the frozen packages.
+    fn complete(
+        scan: Arc<Snapshot>,
+        mut state: model::State,
+        domains: Option<Arc<NativeDomains>>,
+        mut source: Arc<Context>,
+    ) -> Result<Arc<Self>, String> {
         if let Some(setting) = state
             .packages
             .get("android")
@@ -2158,9 +2187,9 @@ impl Capture {
         self: &Arc<Self>,
         owner: Arc<crate::package::launch::Owner>,
     ) -> Result<Arc<Self>, String> {
-        let mut context = (*self.context).clone();
-        context.system.launch_sender = Some(owner);
-        Self::new(self.scan.clone(), context)
+        self.with_system(|system| {
+            system.launch_sender = Some(owner);
+        })
     }
 }
 impl Capture {
@@ -2758,6 +2787,35 @@ mod permission_delta_tests {
         scan_snapshot::Store,
     };
     const NAME: &str = "p.tree.dynamic";
+
+    /// A system owner change keeps the packages' projections, and a new
+    /// generation of an unchanged scan keeps them too; each derives the rest
+    /// as a whole capture does (`with_system` also asserts this itself).
+    #[test]
+    fn system_owner_changes_keep_the_projections_of_a_whole_capture() {
+        crate::system::with_discovery_session(|host, _, _| {
+            let source = host.package_capture().unwrap();
+            let changed = source
+                .with_system(|system| system.page_size_compat = None)
+                .unwrap();
+            let mut context = (*source.context).clone();
+            context.system.page_size_compat = None;
+            let whole = Capture::new(source.scan.clone(), context).unwrap();
+            assert_eq!(changed.state, whole.state);
+            let update = source
+                .prepare_system_update(|system| system.archive_owner = None)
+                .unwrap();
+            assert_eq!(update.capture.scan.version(), source.scan.version() + 1);
+            assert_eq!(update.capture.scan.owner(), source.scan.owner());
+            assert_eq!(update.capture.state.generation, source.state.generation + 1);
+            assert_eq!(update.capture.state.packages, source.state.packages);
+            let mut context = (*source.context).clone();
+            context.scan_version = update.capture.scan.version();
+            context.system.archive_owner = None;
+            let whole = Capture::new(update.capture.scan.clone(), context).unwrap();
+            assert_eq!(update.capture.state, whole.state);
+        });
+    }
 
     fn base(source: &Capture, shared: bool) -> Arc<Capture> {
         let mut settings = source.scan.owner().settings.clone();

@@ -103,9 +103,7 @@ impl System {
             if latest.state().system.module_metadata.is_some() {
                 return Err(fail("module metadata owner already initialized".into()));
             }
-            let mut update = latest
-                .prepare_package_update(latest.scan().owner().clone())
-                .map_err(fail)?;
+            let mut update = latest.prepare_unchanged_update().map_err(fail)?;
             update.capture = update
                 .capture
                 .load_module_metadata(&apks.platform, config, &files, &apex)

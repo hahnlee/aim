@@ -349,7 +349,7 @@ impl SigningScan {
             target,
             partition(input),
         );
-        let mut next = old.cloned().unwrap_or(Assignments {
+        let next = self.seinfo.get_or_insert_with(|| Assignments {
             inputs: BTreeMap::new(),
             labels: BTreeMap::new(),
         });
@@ -361,8 +361,40 @@ impl SigningScan {
                 override_label,
             },
         );
-        self.seinfo = Some(next);
         Ok(())
+    }
+}
+
+/// One package's assignment before a scan of it, `None` with no assignments.
+pub(super) struct Undo(Option<(Option<Input>, Option<SeInfoState>)>);
+
+impl SigningScan {
+    pub(super) fn seinfo_undo_record(&self, name: &str) -> Undo {
+        Undo(self.seinfo.as_ref().map(|state| {
+            (
+                state.inputs.get(name).cloned(),
+                state.labels.get(name).cloned(),
+            )
+        }))
+    }
+
+    pub(super) fn roll_back_seinfo(&mut self, name: &str, undo: Undo) {
+        let Some((input, label)) = undo.0 else {
+            self.seinfo = None;
+            return;
+        };
+        let state = self
+            .seinfo
+            .as_mut()
+            .expect("a package scan keeps the seInfo assignments");
+        match input {
+            Some(input) => state.inputs.insert(name.into(), input),
+            None => state.inputs.remove(name),
+        };
+        match label {
+            Some(label) => state.labels.insert(name.into(), label),
+            None => state.labels.remove(name),
+        };
     }
 }
 

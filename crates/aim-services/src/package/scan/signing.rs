@@ -22,6 +22,8 @@ use crate::package::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+mod undo;
+
 /// SharedUidMigration permits only these two strategies in the pinned image.
 /// The owner supplies image policy; this does not read a host environment flag.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
