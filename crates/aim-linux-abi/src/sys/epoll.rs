@@ -131,7 +131,8 @@ struct Interest {
     /// The shutdowns ([`super::net::unconnected`]) an edge-triggered
     /// interest in an unconnected TCP socket was reported at since its
     /// last change: only a `shutdown` queues it again (`sk_state_change`)
-    /// until the socket leaves `TCP_CLOSE`.
+    /// until the socket leaves `TCP_CLOSE`. Some(0) once an edge-triggered
+    /// interest in a bpf map was reported ([`polled_maps`]).
     reported: Option<u32>,
 }
 
@@ -389,6 +390,10 @@ fn changes(
     old: Option<&Interest>,
     new: Option<&Interest>,
 ) -> Vec<libc::kevent> {
+    // A bpf map's file is regular, which a knote always finds readable:
+    // its knotes stay disabled, dropping with the fd, and its readiness is
+    // the map's poll, read each wait ([`polled_maps`]).
+    let map = matches!(fdtab::get(fd), Some(Kind::Bpf));
     let mut v = Vec::new();
     for (filter, want) in [
         (
@@ -403,7 +408,7 @@ fn changes(
         if let Some(n) = new.filter(|n| want(n)) {
             let hangup = filter == libc::EVFILT_READ && n.hangup_only();
             let mut f = libc::EV_ADD;
-            f |= if n.disabled || filter == libc::EVFILT_READ && !n.wants_read() && !hangup {
+            f |= if n.disabled || map || filter == libc::EVFILT_READ && !n.wants_read() && !hangup {
                 libc::EV_DISABLE
             } else {
                 libc::EV_ENABLE
@@ -519,10 +524,12 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
     if fd == epfd {
         return -(EINVAL as i64);
     }
-    if matches!(st.st_mode & libc::S_IFMT, libc::S_IFREG | libc::S_IFDIR) {
+    let kind = fdtab::get(fd);
+    // A bpf object's file is regular; a map's polls (`bpf_map_poll`).
+    let map = matches!(kind, Some(Kind::Bpf)) && super::bpf::poll(fd).is_some();
+    if !map && matches!(st.st_mode & libc::S_IFMT, libc::S_IFREG | libc::S_IFDIR) {
         return -(EPERM as i64);
     }
-    let kind = fdtab::get(fd);
     let new = if op != EPOLL_CTL_DEL {
         // SAFETY: guest struct epoll_event (arm64: u32 events, u64 data at 8).
         let raw = user_read!(ev, [u64; 2]);
@@ -805,6 +812,33 @@ fn kept_interests(ep: &Epoll) -> Vec<(i32, super::net::Kept)> {
         .collect()
 }
 
+/// The armed interests of `epfd`'s `ep` in a bpf map with events its
+/// poll ([`super::bpf::poll`]) reports now, which no knote fires for:
+/// read on each wait, as `ep_send_events` polls a level-triggered item
+/// again, and once for an edge-triggered one after its change, as no
+/// producer runs to wake it again.
+fn polled_maps(ep: &Epoll, epfd: i32) -> Vec<(i32, u32)> {
+    let interests: Vec<(i32, Interest)> = ep
+        .interest
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, i)| !i.disabled && !i.edge_reported(0))
+        .map(|(fd, i)| (*fd, *i))
+        .collect();
+    interests
+        .into_iter()
+        .filter_map(|(fd, i)| {
+            if !matches!(fdtab::get(fd), Some(Kind::Bpf)) {
+                return None;
+            }
+            let events = super::bpf::poll(fd)? & (i.events | EPOLLERR | EPOLLHUP);
+            // An fd closed since, whose knote is gone, reports nothing.
+            (events != 0 && registered(epfd, fd, &i)).then_some((fd, events))
+        })
+        .collect()
+}
+
 /// Milliseconds for poll(2), rounded up, -1 for none.
 fn poll_ms(timeout: Option<libc::timespec>) -> i32 {
     timeout.map_or(-1, |t| {
@@ -851,7 +885,12 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
         // changed them, or reported or disabled one, since the last wait.
         let signals = signal_interests(&ep);
         let kept = kept_interests(&ep);
-        let wait = if kept.is_empty() { left } else { Some(zero) };
+        let maps = polled_maps(&ep, epfd);
+        let wait = if kept.is_empty() && maps.is_empty() {
+            left
+        } else {
+            Some(zero)
+        };
         let polling = if signals.is_empty() {
             None
         } else {
@@ -911,13 +950,13 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
         }
         // SAFETY: the kernel filled n entries.
         unsafe { kevs.set_len(n as usize) };
-        let (found, rearm) = ready(&ep, &kevs, maxevents as usize, &signals, &kept);
+        let (found, rearm) = ready(&ep, &kevs, maxevents as usize, &signals, &kept, &maps);
         apply(epfd, &rearm);
         // An inotify fd that woke the wait with nothing to read, or an
         // unconnected socket another waiter reported or a change removed
         // since it was found: wait on.
         if !found.is_empty()
-            || !woke && kept.is_empty()
+            || !woke && kept.is_empty() && maps.is_empty()
             || left.is_some_and(|t| t.tv_sec == 0 && t.tv_nsec == 0)
         {
             break found;
@@ -943,13 +982,15 @@ fn now_ns() -> i64 {
 /// would otherwise not fire again), and the one-shot ones whose readiness
 /// was stale, which `ep_item_poll` leaves armed. The `signals` interests
 /// are read as the waiter reads them, whether their socket fired or not,
-/// and the `unconnected` ones as `tcp_poll` reports them.
+/// the `unconnected` ones as `tcp_poll` reports them, and the `maps` as
+/// their poll does.
 fn ready(
     ep: &Epoll,
     kevs: &[libc::kevent],
     limit: usize,
     signals: &[(i32, Arc<super::signalfd::SignalFd>, u64)],
     kept: &[(i32, super::net::Kept)],
+    maps: &[(i32, u32)],
 ) -> (Vec<(i32, u32, u64)>, Vec<libc::kevent>) {
     let mut out: Vec<(i32, u32, u64)> = Vec::with_capacity(kevs.len().min(limit));
     let mut rearm = Vec::new();
@@ -1095,6 +1136,21 @@ fn ready(
         if i.events & EPOLLONESHOT != 0 {
             i.disabled = true;
             rearm.extend(changes(fd, None, None, Some(&*i)));
+        }
+        out.push((fd, b, i.data));
+    }
+    for &(fd, b) in maps {
+        let Some(i) = interest.get_mut(&fd) else {
+            continue;
+        };
+        // Read again under the lock: another waiter may have reported it.
+        if i.disabled || i.edge_reported(0) || out.len() == limit {
+            continue;
+        }
+        i.reported = Some(0);
+        // Its knotes stay disabled ([`changes`]).
+        if i.events & EPOLLONESHOT != 0 {
+            i.disabled = true;
         }
         out.push((fd, b, i.data));
     }

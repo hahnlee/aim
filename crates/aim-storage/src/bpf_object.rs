@@ -225,6 +225,28 @@ impl Map {
         unsafe { std::ptr::read_volatile(&raw const self.h().frozen) != 0 }
     }
 
+    /// A ring buffer's bytes its consumer has yet to read: the producer
+    /// position less the consumer's (`ringbuf_avail_data_sz`). None for
+    /// other maps.
+    pub fn ring_available(&self) -> Option<u64> {
+        if self.params.ty != RINGBUF {
+            return None;
+        }
+        // SAFETY: the consumer and producer pages that start a ring
+        // buffer's elements, which `elements_len` lays out in the file.
+        let (consumer, producer) = unsafe {
+            (
+                &*(self.base as *const AtomicU64),
+                &*((self.base + PAGE as u64) as *const AtomicU64),
+            )
+        };
+        Some(
+            producer
+                .load(Ordering::Acquire)
+                .wrapping_sub(consumer.load(Ordering::Acquire)),
+        )
+    }
+
     /// Bytes of one value as userspace sees it.
     pub fn value_len(&self) -> usize {
         if percpu(self.params.ty) {
