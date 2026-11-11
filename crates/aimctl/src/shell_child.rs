@@ -1,15 +1,16 @@
 //! Retain the inner shell status before aimctl maps signals to exit codes (#1311).
 use aim_storage::process_namespace::ProcessIdentity;
-use std::{
-    io::Write,
-    os::unix::process::ExitStatusExt,
-    process::{Command, ExitStatus},
-};
+use std::{io::Write, os::unix::process::ExitStatusExt, process::ExitStatus};
 
-pub fn run(command: &mut Command, diagnostic: &mut dyn Write) -> Result<ExitStatus, String> {
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("linux-run: spawn: {e}"))?;
+use crate::spawn::{Spec, Stdio};
+
+pub fn run(
+    command: &Spec,
+    stdio: [Stdio; 3],
+    diagnostic: &mut dyn Write,
+) -> Result<ExitStatus, String> {
+    let (mut child, _) =
+        crate::spawn::spawn(command, stdio).map_err(|e| format!("linux-run: spawn: {e}"))?;
     let pid = child.id();
     // Retain the birth before wait reaps the child. Even an exited, unreaped
     // child still has kernel metadata; no later PID lookup can replace it.
@@ -33,12 +34,12 @@ pub fn run(command: &mut Command, diagnostic: &mut dyn Write) -> Result<ExitStat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Stdio;
 
     fn invoke(script: &str) -> (ExitStatus, String) {
         let mut diagnostic = Vec::new();
         let status = run(
-            Command::new("/bin/sh").args(["-c", script]),
+            Spec::new("/bin/sh").args(["-c", script]),
+            [Stdio::Inherit, Stdio::Inherit, Stdio::Inherit],
             &mut diagnostic,
         )
         .unwrap();
@@ -72,11 +73,16 @@ mod tests {
         let (mut reader, writer) = UnixStream::pair().unwrap();
         reader.set_nonblocking(true).unwrap();
         let child_writer = writer.try_clone().unwrap();
-        let mut command = Command::new("/bin/sh");
+        let mut command = Spec::new("/bin/sh");
         command.args(["-c", "printf partial; exit 137"]);
-        command.stdout(Stdio::from(std::os::fd::OwnedFd::from(child_writer)));
+        let stdout = Stdio::Fd(std::os::fd::OwnedFd::from(child_writer));
         let mut receipt = Vec::new();
-        let status = run(&mut command, &mut receipt).unwrap();
+        let status = run(
+            &command,
+            [Stdio::Inherit, stdout, Stdio::Inherit],
+            &mut receipt,
+        )
+        .unwrap();
         assert_eq!(status.code(), Some(137));
         assert!(!receipt.is_empty());
         let mut bytes = [0; 7];

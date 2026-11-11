@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
 use std::time::Duration;
 
+use crate::spawn::Spec;
 use crate::state::{Files, State};
 
 /// The running guest: a program run through linux-run with its root,
@@ -34,13 +35,17 @@ impl Guest {
     /// `argv` (a guest program and its arguments) run in the guest with
     /// init's global environment, as adbd's shell inherits it; before
     /// init's first `export`, with linux-run's default one.
-    pub fn command(&self, argv: &[&str]) -> Command {
-        let mut command = Command::new(&self.linux_run);
+    pub fn command(&self, argv: &[&str]) -> Spec {
+        let mut command = Spec::new(&self.linux_run);
         if let Ok(environ) = std::fs::read_to_string(&self.environ) {
-            command
-                .env_clear()
-                .envs(environ.lines().filter_map(|l| l.split_once('=')))
-                .arg("--inherit-env");
+            command.env = Some(
+                environ
+                    .lines()
+                    .filter_map(|l| l.split_once('='))
+                    .map(|(k, v)| (k.into(), v.into()))
+                    .collect(),
+            );
+            command.arg("--inherit-env");
         }
         command
             .arg("--root")
@@ -57,7 +62,7 @@ impl Guest {
 
     /// Capture a command within its deadline and reap only its own child PID.
     pub fn output(&self, argv: &[&str], timeout: Duration) -> Result<(ExitStatus, String), String> {
-        crate::output::run(&mut self.command(argv), timeout)
+        crate::output::run(&self.command(argv), timeout)
     }
 
     /// App launches require the system user to be unlocking: agent startup
@@ -169,9 +174,13 @@ mod tests {
         let stored = State::parse(&original.to_text()).unwrap();
         let guest = Guest::of(&files, &stored).unwrap();
         let command = guest.command(&["/system/bin/getprop", "sys.boot_completed"]);
-        assert_eq!(command.get_program(), "/selected-runtime/linux-run");
+        assert_eq!(
+            command.program,
+            std::path::Path::new("/selected-runtime/linux-run")
+        );
         let args = command
-            .get_args()
+            .args
+            .iter()
             .map(|arg| arg.to_string_lossy())
             .collect::<Vec<_>>();
         assert!(

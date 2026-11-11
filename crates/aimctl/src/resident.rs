@@ -449,12 +449,10 @@ fn sweep_memfds(inputs: &crate::inputs::Inputs, deadline: Instant) -> Result<(),
     if Instant::now() >= deadline {
         return Err("memfd cleanup deadline reached".into());
     }
-    let mut child = Command::new(inputs.program("linux-run"))
-        .arg("--sweep-memfds")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
+    let mut command = crate::spawn::Spec::new(inputs.program("linux-run"));
+    command.arg("--sweep-memfds");
+    use crate::spawn::Stdio as Io;
+    let (mut child, _) = crate::spawn::spawn(&command, [Io::Null, Io::Null, Io::Inherit])
         .map_err(|error| format!("memfd cleanup: {error}"))?;
     loop {
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
