@@ -26,19 +26,60 @@ struct Event {
     on: String,
 }
 
-struct Trace {
+/// One boot's events; the process's is behind [`start`] and [`between`].
+pub struct Trace {
     epoch: Instant,
     events: Vec<Event>,
 }
 
+impl Trace {
+    pub fn new(epoch: Instant) -> Self {
+        Self {
+            epoch,
+            events: Vec::new(),
+        }
+    }
+
+    /// Records `what`, on `lane`, from `from` until `to`, waiting on `on`.
+    pub fn record(&mut self, lane: &str, what: &str, on: &str, from: Instant, to: Instant) {
+        if self.events.len() >= LIMIT {
+            return;
+        }
+        self.events.push(Event {
+            start: from.saturating_duration_since(self.epoch),
+            end: to.saturating_duration_since(self.epoch),
+            lane: lane.to_string(),
+            what: what.to_string(),
+            on: on.to_string(),
+        });
+    }
+
+    /// A line per event, `START END LANE WHAT ON` separated by tabs, times
+    /// in microseconds since the epoch, in recording order.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for e in &self.events {
+            let clean = |s: &str| s.replace(['\t', '\n'], " ");
+            let _ = writeln!(
+                out,
+                "{}\t{}\t{}\t{}\t{}",
+                e.start.as_micros(),
+                e.end.as_micros(),
+                clean(&e.lane),
+                clean(&e.what),
+                clean(&e.on),
+            );
+        }
+        out
+    }
+}
+
 static TRACE: Mutex<Option<Trace>> = Mutex::new(None);
 
-/// Starts a new trace (a boot, or the boot after a reboot) at `epoch`.
+/// Starts the process's trace anew (a boot, or the boot after a reboot)
+/// at `epoch`.
 pub fn start(epoch: Instant) {
-    *TRACE.lock().unwrap() = Some(Trace {
-        epoch,
-        events: Vec::new(),
-    });
+    *TRACE.lock().unwrap() = Some(Trace::new(epoch));
 }
 
 /// Records `what`, on `lane`, from `from` until now, waiting on `on`.
@@ -48,17 +89,9 @@ pub fn span(lane: &str, what: &str, on: &str, from: Instant) {
 
 /// Records `what`, on `lane`, from `from` until `to`, waiting on `on`.
 pub fn between(lane: &str, what: &str, on: &str, from: Instant, to: Instant) {
-    let mut trace = TRACE.lock().unwrap();
-    let Some(trace) = trace.as_mut().filter(|t| t.events.len() < LIMIT) else {
-        return;
-    };
-    trace.events.push(Event {
-        start: from.saturating_duration_since(trace.epoch),
-        end: to.saturating_duration_since(trace.epoch),
-        lane: lane.to_string(),
-        what: what.to_string(),
-        on: on.to_string(),
-    });
+    if let Some(trace) = TRACE.lock().unwrap().as_mut() {
+        trace.record(lane, what, on, from, to);
+    }
 }
 
 /// Records an instant `what` on `lane`.
@@ -83,62 +116,47 @@ pub fn timed<T>(what: &str, f: impl FnOnce() -> T) -> T {
     result
 }
 
-/// The trace so far: a line per event, `START END LANE WHAT ON` separated
-/// by tabs, times in microseconds since the epoch, in recording order.
-pub fn render() -> String {
-    let trace = TRACE.lock().unwrap();
-    let mut out = String::new();
-    for e in trace.iter().flat_map(|t| &t.events) {
-        let clean = |s: &str| s.replace(['\t', '\n'], " ");
-        let _ = writeln!(
-            out,
-            "{}\t{}\t{}\t{}\t{}",
-            e.start.as_micros(),
-            e.end.as_micros(),
-            clean(&e.lane),
-            clean(&e.what),
-            clean(&e.on),
-        );
-    }
-    out
-}
-
 /// Writes the trace to `path`, replacing what an earlier write wrote.
 pub fn write(path: &std::path::Path) -> std::io::Result<()> {
-    std::fs::write(path, render())
+    let trace = TRACE.lock().unwrap();
+    std::fs::write(path, trace.as_ref().map(Trace::render).unwrap_or_default())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// One test owns the process-wide trace.
     #[test]
-    fn events_render_from_the_epoch_and_a_new_boot_starts_empty() {
+    fn events_render_from_the_epoch_in_recording_order() {
         let epoch = Instant::now();
-        start(epoch);
-        span("init", "exec\tx", "lane:svc/x", epoch);
-        std::thread::Builder::new()
+        let mut trace = Trace::new(epoch);
+        let later = epoch + Duration::from_micros(1500);
+        trace.record("init", "exec\tx", "lane:svc/x", epoch, later);
+        trace.record("svc/x", "set a=b", "", later, later);
+        assert_eq!(
+            trace.render(),
+            "0\t1500\tinit\texec x\tlane:svc/x\n1500\t1500\tsvc/x\tset a=b\t\n"
+        );
+    }
+
+    #[test]
+    fn a_trace_drops_events_past_its_limit() {
+        let epoch = Instant::now();
+        let mut trace = Trace::new(epoch);
+        for _ in 0..=LIMIT {
+            trace.record("init", "x", "", epoch, epoch);
+        }
+        assert_eq!(trace.render().lines().count(), LIMIT);
+    }
+
+    #[test]
+    fn a_named_thread_is_its_own_lane() {
+        let lane = std::thread::Builder::new()
             .name("app-host boot".into())
-            .spawn(|| timed("package boot", || ()))
+            .spawn(thread_lane)
             .unwrap()
             .join()
             .unwrap();
-        mark("svc/x", "set a=b", "");
-        let lines: Vec<Vec<String>> = render()
-            .lines()
-            .map(|l| l.split('\t').map(str::to_string).collect())
-            .collect();
-        assert_eq!(lines.len(), 3);
-        assert_eq!(lines[0][0], "0");
-        assert_eq!(lines[0][2..], ["init", "exec x", "lane:svc/x"]);
-        assert_eq!(lines[1][2..], ["app-host boot", "package boot", ""]);
-        assert_eq!(lines[2][2..], ["svc/x", "set a=b", ""]);
-        assert_eq!(lines[2][0], lines[2][1]);
-        let at = |line: &[String], i: usize| line[i].parse::<u128>().unwrap();
-        assert!(at(&lines[1], 0) <= at(&lines[1], 1));
-        assert!(at(&lines[1], 1) <= at(&lines[2], 0));
-        start(Instant::now());
-        assert_eq!(render(), "");
+        assert_eq!(lane, "app-host boot");
     }
 }

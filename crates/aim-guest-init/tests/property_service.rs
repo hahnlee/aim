@@ -212,7 +212,7 @@ fn setprop2_over_the_socket_updates_the_areas() {
     let decoded = aim_guest_init::props::decode_persistent_properties(&persisted).unwrap();
     assert!(decoded.contains(&("persist.test.value".to_string(), "42".to_string())));
     boot.executor
-        .set_host_property("persist.sys.locale", "en-US")
+        .set_host_property("persist.sys.locale", "en-US", "mac")
         .unwrap();
     let persisted = std::fs::read(root.join("data/data/property/persistent_properties")).unwrap();
     let decoded = aim_guest_init::props::decode_persistent_properties(&persisted).unwrap();

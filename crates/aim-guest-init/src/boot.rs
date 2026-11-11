@@ -1086,13 +1086,10 @@ impl Boot {
                             ready
                         }),
                         Box::new(move |name, value| {
-                            let set = format!("set {name}={value}");
-                            boot_trace::mark(&boot_trace::thread_lane(), &set, "");
-                            drop(
-                                sets.lock()
-                                    .unwrap()
-                                    .send(PropertyEvent::Host(name.to_string(), value.to_string())),
-                            )
+                            let lane = boot_trace::thread_lane();
+                            let set =
+                                PropertyEvent::Host(name.to_string(), value.to_string(), lane);
+                            drop(sets.lock().unwrap().send(set))
                         }),
                         Box::new(move || {
                             crate::unixsock::connect_at(&socket_dir, APP_HOST_ZYGOTE_RELAY)
@@ -1505,9 +1502,11 @@ impl Boot {
     fn handle_event(&mut self, event: PropertyEvent) {
         match event {
             PropertyEvent::Set(request) => self.handle_set_request(request),
-            PropertyEvent::Host(name, value) => {
-                self.set_host_property(&name, &value);
-                if name == "sys.boot_completed" && value == "1" {
+            PropertyEvent::Host(name, value, lane) => {
+                if self.set_host_property(&name, &value, &lane)
+                    && name == "sys.boot_completed"
+                    && value == "1"
+                {
                     self.write_boot_trace();
                 }
             }
@@ -1517,11 +1516,14 @@ impl Boot {
 
     /// Sets a property for the host, as init sets one, and runs its
     /// triggers.
-    fn set_host_property(&mut self, name: &str, value: &str) {
-        if let Err(error) = self.executor.set_host_property(name, value) {
+    /// Returns whether it was set.
+    fn set_host_property(&mut self, name: &str, value: &str, lane: &str) -> bool {
+        let result = self.executor.set_host_property(name, value, lane);
+        if let Err(error) = &result {
             self.report.log.push(format!("{name}={value}: {error}"));
         }
         self.pump_outbox();
+        result.is_ok()
     }
 
     /// Writes the boot's trace (`aim_services::boot_trace`) to the logs.

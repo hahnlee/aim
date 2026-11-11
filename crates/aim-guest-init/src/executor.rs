@@ -178,18 +178,18 @@ impl GuestExecutor {
             Some(service) => format!("svc/{service}"),
             None => "init".to_string(),
         };
-        boot_trace::mark(&lane, &format!("set {name}={value}"), "");
         let outcome = self.props.borrow_mut().init_set(name, value);
-        self.finish_property_set(outcome)
+        self.finish_property_set(outcome, &lane)
     }
 
     /// A native service's SystemProperties.set, including persistent storage.
-    pub fn set_host_property(&mut self, name: &str, value: &str) -> Result<(), String> {
+    /// `lane` is the setter's in the boot's trace.
+    pub fn set_host_property(&mut self, name: &str, value: &str, lane: &str) -> Result<(), String> {
         let outcome = self.props.borrow_mut().builtin_set(name, value);
-        self.finish_property_set(outcome)
+        self.finish_property_set(outcome, lane)
     }
 
-    fn finish_property_set(&mut self, outcome: SetOutcome) -> Result<(), String> {
+    fn finish_property_set(&mut self, outcome: SetOutcome, lane: &str) -> Result<(), String> {
         if !outcome.is_success() {
             return Err(outcome.error.unwrap_or_default());
         }
@@ -199,6 +199,7 @@ impl GuestExecutor {
             .any(|e| matches!(e, SetEffect::Persist { .. }));
         for effect in outcome.effects {
             if let SetEffect::Changed { name, value } = effect {
+                boot_trace::mark(lane, &format!("set {name}={value}"), "");
                 self.outbox
                     .push_back(Outgoing::PropertyChanged(name, value));
             }

@@ -599,14 +599,16 @@ sets). `ON` is what an event waited on: `property:NAME=VALUE`,
 other end.
 
 ```
-tools/boot-trace.py DATA              # the critical path to sys.boot_completed=1
+tools/boot-trace.py DATA              # (or DATA.run) the critical path to sys.boot_completed=1
 tools/boot-trace.py --to NAME=VALUE DATA
 tools/boot-trace.py --timeline DATA   # every event, by start
 ```
 
 The critical path is walked back from the property's set: on a lane to
 the event that ended last before it, and from a wait along its edge to the
-lane that ended it, when that came after the wait began. Consecutive
+lane that ended it, when that came after the wait began; the wait's
+own step is then only the time from that end to its wake, so the steps
+add up to the set's time. Consecutive
 steps under 5 ms on one lane are one line, and the totals per lane
 follow. Not traced yet: the layer's own stages (exec, fork) and binder
 waits for a service, so a guest service's time before its property set

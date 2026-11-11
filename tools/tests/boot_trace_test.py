@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -43,6 +44,25 @@ class CriticalPath(unittest.TestCase):
             ("boot", "finish booting"),
             ("boot", "set sys.boot_completed=1"),
         ])
+
+    def test_the_steps_add_up_to_the_target_without_overlapping(self):
+        trace = boot_trace.Trace(boot_trace.parse(TRACE))
+        target = trace.latest_set("sys.boot_completed=1", float("inf"))
+        steps = trace.critical_path(target)
+        self.assertEqual(sum(end - start for start, end, *_ in steps), target.end)
+        for (_, end, *_), (start, *_) in zip(steps, steps[1:]):
+            self.assertEqual(end, start)
+        # init's wait counts until svc/a set the property, then wakes.
+        self.assertIn((8000, 9000, "init", "wait on property:a.ready=true"), steps)
+
+    def test_twenty_thousand_events_take_well_under_a_second(self):
+        lines = [f"{i * 10}\t{i * 10 + 5}\tinit\tcommand {i}\t" for i in range(20000)]
+        lines.append("200000\t200000\tinit\tset done=1\t")
+        trace = boot_trace.Trace(boot_trace.parse("\n".join(lines)))
+        started = time.monotonic()
+        steps = trace.critical_path(trace.latest_set("done=1", float("inf")))
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertEqual(sum(end - start for start, end, *_ in steps), 200000)
 
     def test_a_wait_without_a_recorded_set_goes_on_along_its_lane(self):
         trace = boot_trace.Trace(boot_trace.parse(

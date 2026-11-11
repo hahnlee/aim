@@ -55,8 +55,8 @@ impl SetRequest {
 pub enum PropertyEvent {
     Set(SetRequest),
     /// A property the host sets: the Mac's settings (`mac::watch`) and the
-    /// app host's.
-    Host(String, String),
+    /// app host's; its name, value and setter's trace lane.
+    Host(String, String, String),
     /// SIGCHLD: a child may have exited; the loop reaps it.
     ChildExited,
 }

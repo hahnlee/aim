@@ -11,10 +11,11 @@ of N=V (any of `&&`-joined terms), `lane:L` to lane L at the wait's end,
 `stage:S` to the latest span named S. Time on a lane between its events
 is named after the span that encloses it, else `(untraced)`.
 
-Usage: boot-trace.py [--to NAME=VALUE] [--timeline] DATA_OR_TRACE
+Usage: boot-trace.py [--to NAME=VALUE] [--timeline] DATA|DATA.run|TRACE
 """
 
 import argparse
+import bisect
 import os
 import sys
 from collections import defaultdict
@@ -55,11 +56,30 @@ class Trace:
         self.events = events
         self.lanes = defaultdict(list)
         self.sets = defaultdict(list)
+        self.named = defaultdict(list)
         for e in events:
             self.lanes[e.lane].append(e)
+            self.named[e.what].append(e)
             s = e.set_of()
             if s:
                 self.sets[s[0]].append((e.end, s[1], e))
+        # Each lane by (end, start, -index), so the latest event to end is
+        # last, and its spans by start with the latest end so far.
+        self.ends = {}
+        self.spans = {}
+        for lane, lane_events in self.lanes.items():
+            lane_events.sort(key=self.key)
+            self.ends[lane] = [e.end for e in lane_events]
+            spans = sorted((e for e in lane_events if e.end > e.start), key=lambda e: e.start)
+            reach, latest = [], 0
+            for e in spans:
+                latest = max(latest, e.end)
+                reach.append(latest)
+            self.spans[lane] = (spans, [e.start for e in spans], reach)
+
+    @staticmethod
+    def key(e):
+        return (e.end, e.start, -e.index)
 
     def latest_set(self, terms, before):
         best = None
@@ -74,29 +94,34 @@ class Trace:
 
     def pick(self, lane, before, used):
         """The latest event of `lane` that ended by `before`, innermost."""
-        events = [e for e in self.lanes.get(lane, []) if e.index not in used]
-        candidates = [e for e in events if e.end <= before]
-        if not candidates:
+        events = self.lanes.get(lane, [])
+        i = bisect.bisect_right(self.ends.get(lane, []), before) - 1
+        while i >= 0 and events[i].index in used:
+            i -= 1
+        if i < 0:
             # Else the span the walk is in (a service started by a command).
-            within = [e for e in events if e.start < before < e.end]
+            within = [e for e in events if e.start < before < e.end and e.index not in used]
             return min(within, key=lambda e: e.end - e.start, default=None)
-        key = lambda e: (e.end, e.start, -e.index)
-        best = max(candidates, key=key)
-        while True:
-            inner = [
-                e for e in candidates
-                if e.end - e.start < best.end - best.start
-                and e.start >= best.start and best.start < e.end <= best.end
-            ]
-            if not inner:
-                return best
-            best = max(inner, key=key)
+        best = events[i]
+        # Down to the latest event to end within it, while there is one.
+        j = i - 1
+        while j >= 0 and events[j].end > best.start:
+            e = events[j]
+            if (e.index not in used and e.start >= best.start
+                    and e.end - e.start < best.end - best.start):
+                best = e
+            j -= 1
+        return best
 
     def enclosing(self, lane, at):
-        spans = [e for e in self.lanes.get(lane, []) if e.start <= at < e.end]
-        if not spans:
-            return "(running)" if lane.startswith("svc/") else "(untraced)"
-        return min(spans, key=lambda e: e.end - e.start).what
+        """The innermost span of `lane` around `at`."""
+        spans, starts, reach = self.spans.get(lane, ([], [], []))
+        j = bisect.bisect_right(starts, at) - 1
+        while j >= 0 and reach[j] > at:
+            if spans[j].end > at:
+                return spans[j].what
+            j -= 1
+        return "(running)" if lane.startswith("svc/") else "(untraced)"
 
     def edge(self, e):
         """Where a walk goes from `e`: (lane, before), or None to go on.
@@ -109,10 +134,7 @@ class Trace:
             return e.on[len("lane:"):], e.end
         elif e.on.startswith("stage:"):
             name = e.on[len("stage:"):]
-            runs = [
-                x for x in self.events
-                if x.what == name and e.start <= x.end <= e.end and x is not e
-            ]
+            runs = [x for x in self.named.get(name, []) if e.start <= x.end <= e.end]
             if runs:
                 run = max(runs, key=lambda x: x.end)
                 return run.lane, run.end
@@ -132,12 +154,15 @@ class Trace:
                 label = self.enclosing(lane, (e.end + before) // 2)
                 steps.append((e.end, before, lane, label))
             label = e.what if not e.on else f"{e.what} on {e.on}"
-            steps.append((e.start, min(e.end, before), lane, label))
+            end = min(e.end, before)
             jump = self.edge(e)
             if jump is None:
+                steps.append((e.start, end, lane, label))
                 before = e.start
             else:
-                lane, before = jump
+                # The wait's time until its other end is that end's lane's.
+                lane, before = jump[0], min(jump[1], end)
+                steps.append((max(e.start, before), end, e.lane, label))
         steps.reverse()
         if steps[0][0] > 0:
             steps.insert(0, (0, steps[0][0], "", "(before the trace's first event on the path)"))
@@ -152,9 +177,9 @@ def ms(us):
     return f"{us / 1000:9.1f}"
 
 
-def print_path(trace, target):
+def print_path(trace, target, to):
     steps = trace.critical_path(target)
-    print(f"critical path to {target.what[4:]} at {target.end / 1e6:.3f} s ({target.lane})")
+    print(f"critical path to {to} at {target.end / 1e6:.3f} s ({target.lane})")
     print(f"{'start ms':>9} {'took ms':>9}  lane: what")
     by_lane = defaultdict(int)
     # Runs of short steps on one lane are a line each.
@@ -189,11 +214,17 @@ def main(argv):
     parser.add_argument("--timeline", action="store_true")
     parser.add_argument("path")
     args = parser.parse_args(argv)
-    path = args.path
+    path = args.path.rstrip("/")
     if os.path.isdir(path):
-        path = path.rstrip("/") + ".run/logs/boot-trace"
-    with open(path) as f:
-        trace = Trace(parse(f.read()))
+        # DATA, or its runtime directory DATA.run.
+        run = path if path.endswith(".run") else path + ".run"
+        path = os.path.join(run, "logs", "boot-trace")
+    try:
+        with open(path) as f:
+            trace = Trace(parse(f.read()))
+    except OSError as error:
+        print(f"boot-trace: {error}", file=sys.stderr)
+        return 1
     if args.timeline:
         print_timeline(trace)
         return 0
@@ -201,7 +232,7 @@ def main(argv):
     if target is None:
         print(f"{path}: no set of {args.to}", file=sys.stderr)
         return 1
-    print_path(trace, target)
+    print_path(trace, target, args.to)
     return 0
 
 
