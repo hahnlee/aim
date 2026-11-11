@@ -724,7 +724,11 @@ fn obj_pin(path: u64, fd: i32, file_flags: u32, path_fd: u32) -> i64 {
             id.gid[super::attrs::FS]
         };
         if id.uid[super::attrs::FS] != 0 || gid != 0 {
-            super::attrs::created(super::attrs::Host::Path(&r.host), || r.guest.clone())?;
+            super::attrs::created(
+                super::attrs::Host::Path(&r.host),
+                || r.guest.clone(),
+                Some(mode),
+            )?;
         }
         Ok(())
     })();
