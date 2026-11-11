@@ -262,6 +262,25 @@ impl System {
         stage: Stage,
         memory_only: bool,
     ) -> Result<()> {
+        if self.try_commit_package_preferred_stage(bridge, registry, stage, memory_only)? {
+            Ok(())
+        } else {
+            Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "preferred stage no longer current",
+            ))
+        }
+    }
+
+    /// False when another publication superseded `stage` before anything of
+    /// it was written; the caller may prepare it again on the current state.
+    pub fn try_commit_package_preferred_stage(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        registry: &Arc<Registry>,
+        stage: Stage,
+        memory_only: bool,
+    ) -> Result<bool> {
         let fail = |error: String| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error);
         self.check_package_bootstrap(bridge)?;
         let persistence = self
@@ -290,7 +309,9 @@ impl System {
                         .is_some_and(|owner| Arc::ptr_eq(owner, &persistence))
             })
             .ok_or_else(|| fail("preferred publication owner changed".into()))?;
-        registry.validate(&stage).map_err(&fail)?;
+        if registry.validate(&stage).is_err() {
+            return Ok(false);
+        }
         let preview = registry.preview(&stage).map_err(&fail)?;
         let bytes = disk.preview_preferred_stage(&stage).map_err(&fail)?;
         let commit = current
@@ -306,9 +327,26 @@ impl System {
             .queries
             .as_ref()
             .ok_or_else(|| fail("preferred query owner unavailable".into()))?;
-        let update = capture
-            .prepare_preferred_update(handle, &[(stage.user, bytes)])
-            .map_err(&fail)?;
+        let documents = [(stage.user, bytes)];
+        // An installation that persisted a newer scan is completing its query
+        // projection under the install gate; it projects from the view.
+        let canonical_ahead = current
+            .snapshots
+            .as_ref()
+            .is_some_and(|snapshots| !Arc::ptr_eq(capture.scan(), &snapshots.capture()));
+        let publication = if canonical_ahead {
+            Publication::View(
+                capture
+                    .with_preferred_view(handle, &documents)
+                    .map_err(&fail)?,
+            )
+        } else {
+            Publication::Update(
+                capture
+                    .prepare_preferred_update(handle, &documents)
+                    .map_err(&fail)?,
+            )
+        };
         let written = if memory_only {
             disk.apply_preferred_stage_in_memory(&stage)
                 .map_err(&fail)?;
@@ -320,18 +358,28 @@ impl System {
             return Err(fail(written.unwrap_err().to_string()));
         }
         registry.publish(stage).map_err(&fail)?;
-        let update = current.publish_update(update)?;
-        current.set_queries(Some(update.capture.clone()));
-        if let Some(page) = &current.version_page {
-            page.publish(update.capture.scan().version());
+        match publication {
+            Publication::Update(update) => {
+                let update = current.publish_update(update)?;
+                current.set_queries(Some(update.capture.clone()));
+                if let Some(page) = &current.version_page {
+                    page.publish(update.capture.scan().version());
+                }
+                state.version = update.capture.scan().version();
+            }
+            Publication::View(view) => current.set_queries(Some(view)),
         }
-        state.version = update.capture.scan().version();
         drop(state);
         drop(disk);
         let invalidated = bridge
             .invalidate_package_info_cache()
             .map_err(|error| fail(format!("preferred cache owner: {error:?}")));
         written.map_err(|error| fail(error.to_string()))?;
-        invalidated
+        invalidated.map(|()| true)
     }
+}
+
+enum Publication {
+    Update(crate::package::scan_snapshot::query_state::PackageUpdate),
+    View(Arc<crate::package::scan_snapshot::query_state::Capture>),
 }
