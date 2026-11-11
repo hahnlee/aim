@@ -551,10 +551,16 @@ static CONTEXTS: std::sync::Mutex<Option<HashMap<(i32, u64), ((i64, i64), Option
 const CONTEXTS_MAX: usize = 1 << 14;
 
 /// The context of the directory `dir`, whose host lstat `stat` is where
-/// the caller has one.
+/// the caller has one; else it takes one, which costs far less than the
+/// read it saves.
 fn directory_context(dir: &CStr, stat: Option<&libc::stat>) -> Option<Vec<u8>> {
-    let Some(stat) = stat else {
-        return context(Host::Path(dir));
+    let taken;
+    let stat = match stat {
+        Some(stat) => stat,
+        None => {
+            taken = host_stat(Host::Path(dir)).ok()?;
+            &taken
+        }
     };
     let key = (stat.st_dev, stat.st_ino);
     let ctime = (stat.st_ctime, stat.st_ctime_nsec);
@@ -1383,6 +1389,81 @@ mod tests {
         assert_eq!(call(&dir, SET_POLICY, &mut policy.clone(), &root()), 0);
         assert_eq!(remove(&dir, second, false, &root()), Ok(0));
         assert_eq!(open_at("later/new", 0o101), errno(ENOKEY));
+        std::fs::remove_dir_all(&host).unwrap();
+    }
+
+    /// The lock of a directory read without a stat of it (a walk's start,
+    /// or after a symlink or `..`) follows a policy set and its key's
+    /// removal and return after an earlier read.
+    #[test]
+    fn a_lock_read_without_a_stat_follows_the_policy_and_its_key() {
+        let (_guard, view) = crate::vfs::test_view();
+        let host = view.join("data/fscrypt-tests");
+        let _ = std::fs::remove_dir_all(&host);
+        std::fs::create_dir_all(&host).unwrap();
+        let first = populate(view, "locked", &[0x5a; 64]);
+        assert_eq!(remove(&open(view, "locked"), first, false, &root()), Ok(0));
+        mkdir("later");
+        let path = CString::new(host.join("later").as_os_str().as_bytes()).unwrap();
+        assert!(matches!(path_lock(&path, None), Ok(Lock::Plain)));
+        let dir = open(view, "later");
+        let raw = [0x6b; 64];
+        let second = add(&dir, &raw, &root()).unwrap();
+        let policy = v2(1, 4, 0x2, second);
+        assert_eq!(call(&dir, SET_POLICY, &mut policy.clone(), &root()), 0);
+        assert!(matches!(path_lock(&path, None), Ok(Lock::Unlocked)));
+        assert_eq!(remove(&dir, second, false, &root()), Ok(0));
+        assert!(matches!(path_lock(&path, None), Ok(Lock::Locked(..))));
+        add(&dir, &raw, &root()).unwrap();
+        assert!(matches!(path_lock(&path, None), Ok(Lock::Unlocked)));
+        std::fs::remove_dir_all(&host).unwrap();
+    }
+
+    /// A walk relative to a directory fd opened inside a directory that has
+    /// since been locked looks its entries up by no-key names, and by
+    /// plaintext ones once the key is back.
+    #[test]
+    fn a_walk_from_a_descriptor_in_a_locked_directory_takes_no_key_names() {
+        let (_guard, view) = crate::vfs::test_view();
+        let host = view.join("data/fscrypt-tests");
+        let _ = std::fs::remove_dir_all(&host);
+        std::fs::create_dir_all(&host).unwrap();
+        let raw = [0x5a; 64];
+        let identifier = populate(view, "shut", &raw);
+        let sub = guest("shut/sub");
+        let fd = super::super::fs::openat([AT, sub.as_ptr() as u64, 0o40000, 0, 0, 0]);
+        assert!(fd >= 0, "{fd}");
+        let at = |name: &str| {
+            super::super::fs::stat_at(fd as i32, name.as_bytes(), 0x100)
+                .map(|stat| (stat.st_mode & libc::S_IFMT) as u32)
+        };
+        let create = |name: &CStr| {
+            let fd =
+                super::super::fs::openat([fd as u64, name.as_ptr() as u64, 0o101, 0o644, 0, 0]);
+            if fd >= 0 {
+                assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+                return 0;
+            }
+            fd
+        };
+        assert_eq!(at("inner"), Ok(libc::S_IFREG as u32));
+        let dir = open(view, "shut");
+        assert_eq!(remove(&dir, identifier, false, &root()), Ok(0));
+        assert_eq!(at("inner"), Err(errno(errno::ENOENT)));
+        let names = list("shut");
+        let sub = names
+            .iter()
+            .find(|name| kind(&format!("shut/{name}")) == Ok(libc::S_IFDIR as u32))
+            .unwrap();
+        let inner = list(&format!("shut/{sub}"));
+        assert_eq!(inner.len(), 1);
+        assert_eq!(at(&inner[0]), Ok(libc::S_IFREG as u32));
+        assert_eq!(create(c"new"), errno(ENOKEY));
+        add(&dir, &raw, &root()).unwrap();
+        assert_eq!(at("inner"), Ok(libc::S_IFREG as u32));
+        assert_eq!(at(&inner[0]), Err(errno(errno::ENOENT)));
+        assert_eq!(create(c"new"), 0);
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
         std::fs::remove_dir_all(&host).unwrap();
     }
 
