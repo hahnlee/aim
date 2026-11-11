@@ -110,7 +110,11 @@ pub fn watch(events: Sender<PropertyEvent>, tzdata: Vec<u8>, initial: Vec<(&'sta
                     if *name != LOCALE_PROP
                         && !last.iter().any(|(n, v)| n == name && v == value)
                         && events
-                            .send(PropertyEvent::Host(name.to_string(), value.clone()))
+                            .send(PropertyEvent::Host(
+                                name.to_string(),
+                                value.clone(),
+                                aim_services::boot_trace::thread_lane(),
+                            ))
                             .is_err()
                     {
                         return;

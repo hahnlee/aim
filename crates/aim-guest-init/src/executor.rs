@@ -27,6 +27,7 @@ use aim_android_init::engine::{
 use aim_android_init::props::service::ControlMessage;
 use aim_android_init::props::{SetEffect, SetOutcome};
 use aim_android_init::rc::{CommandSpec, Rlimit, Service, expand_props};
+use aim_services::boot_trace;
 
 use crate::fscrypt::Action;
 use crate::fsops::{Effect, FsOps, parse_mode};
@@ -172,17 +173,23 @@ impl GuestExecutor {
 
     /// init setting a property (`SetProperty` from init's main thread).
     pub fn set_property(&mut self, name: &str, value: &str) -> Result<(), String> {
+        // A service's state is its own lane's, set as it starts or exits.
+        let lane = match name.strip_prefix("init.svc.") {
+            Some(service) => format!("svc/{service}"),
+            None => "init".to_string(),
+        };
         let outcome = self.props.borrow_mut().init_set(name, value);
-        self.finish_property_set(outcome)
+        self.finish_property_set(outcome, &lane)
     }
 
     /// A native service's SystemProperties.set, including persistent storage.
-    pub fn set_host_property(&mut self, name: &str, value: &str) -> Result<(), String> {
+    /// `lane` is the setter's in the boot's trace.
+    pub fn set_host_property(&mut self, name: &str, value: &str, lane: &str) -> Result<(), String> {
         let outcome = self.props.borrow_mut().builtin_set(name, value);
-        self.finish_property_set(outcome)
+        self.finish_property_set(outcome, lane)
     }
 
-    fn finish_property_set(&mut self, outcome: SetOutcome) -> Result<(), String> {
+    fn finish_property_set(&mut self, outcome: SetOutcome, lane: &str) -> Result<(), String> {
         if !outcome.is_success() {
             return Err(outcome.error.unwrap_or_default());
         }
@@ -192,6 +199,7 @@ impl GuestExecutor {
             .any(|e| matches!(e, SetEffect::Persist { .. }));
         for effect in outcome.effects {
             if let SetEffect::Changed { name, value } = effect {
+                boot_trace::mark(lane, &format!("set {name}={value}"), "");
                 self.outbox
                     .push_back(Outgoing::PropertyChanged(name, value));
             }
@@ -222,6 +230,8 @@ impl GuestExecutor {
         match outcome {
             StartOutcome::Started { pid, spec } => {
                 let service = spec.service.clone();
+                let lane = format!("svc/{service}");
+                boot_trace::mark(&lane, &format!("start pid {pid}"), "lane:init");
                 self.launches.push(LaunchRecord {
                     pid,
                     spec: *spec,
@@ -1015,8 +1025,17 @@ impl GuestExecutor {
         }
     }
 
+    /// The trace lane of a guest process: its service's, else its pid's.
+    pub fn lane(&self, pid: u32) -> String {
+        match self.launches.iter().rev().find(|l| l.pid == pid) {
+            Some(launch) => format!("svc/{}", launch.spec.service),
+            None => format!("pid/{pid}"),
+        }
+    }
+
     /// A process exited (`ReapOneProcess`).
     pub fn handle_exit(&mut self, pid: u32, exit: Exit) {
+        boot_trace::mark(&self.lane(pid), &format!("exit {exit}"), "");
         let props = self.props.clone();
         let props = props.borrow();
         let known = self.supervisor.reap(

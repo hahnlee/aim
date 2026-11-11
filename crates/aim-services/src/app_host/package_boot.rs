@@ -5,6 +5,7 @@
 //! deferred app-data preparation joined. Each stage publishes its result.
 
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use aim_binder_host::parcel::{Binder, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::dev_aim_server_ipackagebootsession as session;
@@ -39,28 +40,44 @@ pub(super) fn prepare<T>(
     construction: impl FnOnce(T) -> Result<(), Exception>,
     app_data: impl FnOnce() -> Result<(), Exception>,
 ) -> Result<(), Exception> {
+    use crate::boot_trace::{span, thread_lane, timed};
+    // A thread that finds a stage running waits for the one running it.
+    let (from, running, mut ran) = (Instant::now(), ready.runtime.get().is_none(), false);
     let runtime = ready.runtime.get_or_init(|| {
-        let scanned = scan();
+        ran = true;
+        let scanned = timed("package scan", scan);
         let _ = ready
             .scan
             .set(scanned.as_ref().map(|_| ()).map_err(Clone::clone));
-        construction(scanned?)
+        timed("package construction", || construction(scanned?))
     });
-    ready
+    if running && !ran {
+        span(&thread_lane(), "wait", "stage:package construction", from);
+    }
+    let (from, running, mut ran) = (Instant::now(), ready.storage.get().is_none(), false);
+    let storage = ready
         .storage
         .get_or_init(|| {
+            ran = true;
             runtime.clone()?;
-            app_data()
+            timed("package app data", app_data)
         })
-        .clone()
+        .clone();
+    if running && !ran {
+        span(&thread_lane(), "wait", "stage:package app data", from);
+    }
+    storage
 }
 
 pub(super) fn wait_for(
     name: &str,
     wait: impl FnOnce(std::time::Instant) -> Result<bool, String>,
 ) -> Result<(), Exception> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    if !wait(deadline).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{name}: {e}")))? {
+    let from = Instant::now();
+    let deadline = from + std::time::Duration::from_secs(60);
+    let ready = wait(deadline);
+    crate::boot_trace::span(&crate::boot_trace::thread_lane(), "wait", name, from);
+    if !ready.map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{name}: {e}")))? {
         return Err(Exception::new(
             EX_ILLEGAL_STATE,
             format!("{name} did not become ready"),

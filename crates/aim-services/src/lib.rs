@@ -14,6 +14,7 @@
 //! services are native and how they conform.
 
 pub mod app_host;
+pub mod boot_trace;
 mod bundle;
 pub mod clip;
 pub mod clipboard;
@@ -328,11 +329,17 @@ impl NativeServices {
         let Some(host) = self.app_host.clone() else {
             return;
         };
-        std::thread::spawn(move || {
-            if let Err(e) = app_host::package_boot::run(&host) {
-                eprintln!("app host: early package boot: {e:?}");
-            }
-        });
+        let spawned = std::thread::Builder::new()
+            .name("app-host package boot".into())
+            .spawn(move || {
+                boot_trace::mark("app-host package boot", "started", "lane:init");
+                if let Err(e) = app_host::package_boot::run(&host) {
+                    eprintln!("app host: early package boot: {e:?}");
+                }
+            });
+        if let Err(e) = spawned {
+            eprintln!("app host: early package boot: {e}");
+        }
     }
 
     /// Compares the original services `names` with their native models
