@@ -263,6 +263,7 @@ use aim_service_aidl::android_app_iactivitymanager as am;
 use aim_service_aidl::android_app_iapplicationthread as thread;
 use aim_service_aidl::{ParcelValue, ReadParcelable, WriteParcelable};
 
+use crate::boot_trace;
 use crate::package;
 
 /// The control service's binder name and descriptor.
@@ -6122,7 +6123,10 @@ impl Service for Control {
             // Join the package boot started from configured native inputs
             // before initializing the user and admitting app starts.
             let host = self.0.clone();
-            std::thread::spawn(move || {
+            let boot = std::thread::Builder::new().name("app-host boot".into());
+            let spawned = boot.spawn(move || {
+                let agent = "lane:svc/aim-app-host-agent";
+                boot_trace::mark("app-host boot", "agent attached", agent);
                 let power = host
                     .power_service
                     .get_or_init(|| Arc::new(power_service::PowerManager::new(host.clone())));
@@ -6130,7 +6134,7 @@ impl Service for Control {
                     eprintln!("app host: input interactive: {}", e.message);
                 }
                 let _ready = boot_ready::BootReady(&host);
-                match package_boot::run(&host) {
+                match boot_trace::timed("package boot", || package_boot::run(&host)) {
                     Ok(()) => eprintln!("app host: package boot: through its construction"),
                     Err(e) => return eprintln!("app host: package boot: {e:?}"),
                 }
@@ -6187,11 +6191,11 @@ impl Service for Control {
                     });
                 }
                 // The system user started, its DE storage prepared.
-                let user = match host.start_storage() {
+                let user = match boot_trace::timed("user storage", || host.start_storage()) {
                     Ok(user) => user,
                     Err(e) => return eprintln!("app host: user storage: {e}"),
                 };
-                if let Err(e) = host.system_ready() {
+                if let Err(e) = boot_trace::timed("system ready", || host.system_ready()) {
                     return eprintln!("app host: system ready: {e:?}");
                 }
                 if let Some(connectivity) = host.connectivity_service.get() {
@@ -6222,7 +6226,7 @@ impl Service for Control {
                 }
                 // `systemReady`: the home on the display, then the user's
                 // start broadcasts.
-                if let Err(e) = host.start_home() {
+                if let Err(e) = boot_trace::timed("start home", || host.start_home()) {
                     eprintln!("app host: home: {}", e.message);
                 }
                 host.send_user_start_broadcasts();
@@ -6263,10 +6267,18 @@ impl Service for Control {
                         jobs.start();
                     }
                 };
-                if let Err(e) = host.finish_booting(user, unlocking) {
+                let finished =
+                    boot_trace::timed("finish booting", || host.finish_booting(user, unlocking));
+                if let Err(e) = finished {
                     eprintln!("app host: the boot: {e}");
                 }
             });
+            if let Err(e) = spawned {
+                return reply(Err(Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("app host boot: {e}"),
+                )));
+            }
             let mut p = Parcel::new();
             p.write_no_exception();
             return Ok(p);

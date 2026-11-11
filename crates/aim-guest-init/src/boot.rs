@@ -22,7 +22,7 @@ use aim_android_init::props::{SetEffect, Ucred};
 use aim_android_init::rc::{IdResolver, ScriptLoader, vendor_android_version};
 use aim_android_init::{ImageRoot, PropertyLookup};
 use aim_binder_host::server::Server;
-use aim_services::NativeServices;
+use aim_services::{NativeServices, boot_trace};
 
 use crate::apex;
 use crate::executor::{GuestExecutor, Outgoing, PropsAdapter};
@@ -696,6 +696,7 @@ impl Boot {
         // The boot's start, as the kernel's boot is init's: `ro.boottime.*`
         // and the timeline count from here.
         let epoch = Instant::now();
+        boot_trace::start(epoch);
         // The wall clock too, to line the timeline up with logd's.
         let wall = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1077,10 +1078,16 @@ impl Boot {
                         &layout.net_dir(),
                         Box::new(move |name| lookup_property(&areas, &properties_dir, name)),
                         Box::new(move |name, value, deadline| {
-                            wait_property(&wait_dir, name, value, deadline)
-                                .map_err(|e| e.to_string())
+                            let from = Instant::now();
+                            let ready = wait_property(&wait_dir, name, value, deadline)
+                                .map_err(|e| e.to_string());
+                            let on = format!("property:{name}={value}");
+                            boot_trace::span(&boot_trace::thread_lane(), "wait", &on, from);
+                            ready
                         }),
                         Box::new(move |name, value| {
+                            let set = format!("set {name}={value}");
+                            boot_trace::mark(&boot_trace::thread_lane(), &set, "");
                             drop(
                                 sets.lock()
                                     .unwrap()
@@ -1396,6 +1403,8 @@ impl Boot {
         for effect in served.effects {
             match effect {
                 SetEffect::Changed { name, value } => {
+                    let lane = self.executor.lane(request.peer_pid as u32);
+                    boot_trace::mark(&lane, &format!("set {name}={value}"), "");
                     self.report
                         .timeline
                         .push((at, format!("pid {} set {name}={value}", request.peer_pid)));
@@ -1496,7 +1505,12 @@ impl Boot {
     fn handle_event(&mut self, event: PropertyEvent) {
         match event {
             PropertyEvent::Set(request) => self.handle_set_request(request),
-            PropertyEvent::Host(name, value) => self.set_host_property(&name, &value),
+            PropertyEvent::Host(name, value) => {
+                self.set_host_property(&name, &value);
+                if name == "sys.boot_completed" && value == "1" {
+                    self.write_boot_trace();
+                }
+            }
             PropertyEvent::ChildExited => {}
         }
     }
@@ -1508,6 +1522,14 @@ impl Boot {
             self.report.log.push(format!("{name}={value}: {error}"));
         }
         self.pump_outbox();
+    }
+
+    /// Writes the boot's trace (`aim_services::boot_trace`) to the logs.
+    fn write_boot_trace(&mut self) {
+        let path = self.layout.logs_dir().join("boot-trace");
+        if let Err(error) = boot_trace::write(&path) {
+            self.report.log.push(format!("{}: {error}", path.display()));
+        }
     }
 
     /// Since the boot started.
@@ -1553,9 +1575,11 @@ impl Boot {
         self.executor.stop_at = deadline;
         let dry = self.options.mode == RunMode::DryRun;
         let mut blocked_since: Option<Instant> = None;
-        // What init's queue is blocked on, and since when.
-        let mut waiting: Option<(Duration, String)> = None;
+        // What init's queue is blocked on, since when, and its trace edge.
+        let mut waiting: Option<(Duration, String, String)> = None;
         let mut idle_logged = false;
+        // Since when the queue has been idle, for the trace.
+        let mut idle_since: Option<Instant> = None;
         let mut steps = 0usize;
         loop {
             steps += 1;
@@ -1590,6 +1614,7 @@ impl Boot {
                 break;
             }
             let at = self.elapsed();
+            let started = Instant::now();
             let step = {
                 let mut adapter = PropsAdapter {
                     props: self.props.clone(),
@@ -1610,8 +1635,9 @@ impl Boot {
                 step
             };
             if !matches!(step, Step::WaitingForProperty { .. } | Step::WaitingForExec)
-                && let Some((since, what)) = waiting.take()
+                && let Some((since, what, on)) = waiting.take()
             {
+                boot_trace::between("init", "wait", &on, started - (at - since), started);
                 self.report.timeline.push((
                     at,
                     format!("waited {:.3} s for {what}", (at - since).as_secs_f64()),
@@ -1620,6 +1646,21 @@ impl Boot {
             let wait = match step {
                 Step::Ran(executed) => {
                     blocked_since = None;
+                    if let Some(since) = idle_since.take() {
+                        // A property trigger's action ends an idle queue.
+                        let action = &executed.action;
+                        let on = match action.split(" && ").all(|t| t.contains('=')) {
+                            true => format!("property:{action}"),
+                            false => String::new(),
+                        };
+                        boot_trace::between("init", "idle", &on, since, started);
+                    }
+                    let command = match executed.expanded.is_empty() {
+                        true => executed.command.clone(),
+                        false => executed.expanded.join(" "),
+                    };
+                    let what = format!("[{}] {command}", executed.action);
+                    boot_trace::span("init", &what, "", started);
                     self.record_command(executed, at);
                     continue;
                 }
@@ -1627,6 +1668,7 @@ impl Boot {
                     if dry {
                         break;
                     }
+                    idle_since.get_or_insert(started);
                     if !idle_logged {
                         idle_logged = true;
                         let elapsed = self.elapsed();
@@ -1645,7 +1687,10 @@ impl Boot {
                         self.simulate_property(&name, &value);
                         continue;
                     }
-                    waiting.get_or_insert_with(|| (at, format!("{name}={value}")));
+                    waiting.get_or_insert_with(|| {
+                        let on = format!("property:{name}={value}");
+                        (at, format!("{name}={value}"), on)
+                    });
                     Some(("property", name, value))
                 }
                 Step::WaitingForExec => {
@@ -1664,7 +1709,8 @@ impl Boot {
                         let pid = self.executor.exec_pid.unwrap_or(0);
                         let launch = self.executor.launches.iter().rev().find(|l| l.pid == pid);
                         let service = launch.map_or("", |l| l.spec.service.as_str());
-                        (at, format!("{service} (pid {pid})"))
+                        let on = format!("lane:svc/{service}");
+                        (at, format!("{service} (pid {pid})"), on)
                     });
                     Some(("exec", String::new(), String::new()))
                 }
@@ -1794,6 +1840,7 @@ impl Boot {
 
     fn finish(&mut self) {
         if self.options.mode == RunMode::Run {
+            self.write_boot_trace();
             // Stop new namespace admission before adbd goes offline and the
             // serving Binder/POSIX/verity owners begin their shutdown.
             if let Some(registration) = self.init_registration.take()

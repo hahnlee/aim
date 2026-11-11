@@ -581,6 +581,42 @@ linkage pass. The original-ART signer-isolation and reconstruction-counter fixtu
 remain unrun because the explicit M4 cohort input is absent. Chrome startup has not
 been remeasured; no guest boot was run (2026-10-28).
 
+## Boot trace
+
+Every boot writes its trace to `DATA.run/logs/boot-trace` when the app host
+sets `sys.boot_completed` and again when it stops
+(`crates/aim-services/src/boot_trace.rs`); it stays there until the next
+boot, as the other logs do. It is always on: events are kept in memory
+(the first 20000) and written whole. A line is `START END LANE WHAT ON`
+in microseconds from the boot's epoch, which `ro.boottime.*` count from.
+Lanes are init's main loop (`init`: each command, its waits for a
+property or an `exec`, its idle queue), each service (`svc/NAME`: its
+start, exit and property sets; `pid/N` for a process that is not one) and
+the app host's threads (`app-host boot`, `app-host package boot`: their
+stages, `package_boot::wait_for`'s waits and their property waits and
+sets). `ON` is what an event waited on: `property:NAME=VALUE`,
+`lane:LANE` or `stage:NAME`, or a description where nothing records the
+other end.
+
+```
+tools/boot-trace.py DATA              # the critical path to sys.boot_completed=1
+tools/boot-trace.py --to NAME=VALUE DATA
+tools/boot-trace.py --timeline DATA   # every event, by start
+```
+
+The critical path is walked back from the property's set: on a lane to
+the event that ended last before it, and from a wait along its edge to the
+lane that ended it, when that came after the wait began. Consecutive
+steps under 5 ms on one lane are one line, and the totals per lane
+follow. Not traced yet: the layer's own stages (exec, fork) and binder
+waits for a service, so a guest service's time before its property set
+is one `(running)` step, and a wait whose other end the trace does not
+hold goes on along its own lane. A warm boot (2026-11-11, guest-init
+rebuilt, so its parse cache was stale) reached `sys.boot_completed` at
+2.88 s: init to vold's start 0.38 s, vold until user 0's DE storage
+0.58 s, the package scan 1.41 s, construction 0.13 s, app data 0.17 s,
+then the app host's user storage, system ready and home 0.21 s.
+
 ## How to reproduce
 
 ```

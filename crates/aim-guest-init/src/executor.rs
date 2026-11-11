@@ -27,6 +27,7 @@ use aim_android_init::engine::{
 use aim_android_init::props::service::ControlMessage;
 use aim_android_init::props::{SetEffect, SetOutcome};
 use aim_android_init::rc::{CommandSpec, Rlimit, Service, expand_props};
+use aim_services::boot_trace;
 
 use crate::fscrypt::Action;
 use crate::fsops::{Effect, FsOps, parse_mode};
@@ -172,6 +173,12 @@ impl GuestExecutor {
 
     /// init setting a property (`SetProperty` from init's main thread).
     pub fn set_property(&mut self, name: &str, value: &str) -> Result<(), String> {
+        // A service's state is its own lane's, set as it starts or exits.
+        let lane = match name.strip_prefix("init.svc.") {
+            Some(service) => format!("svc/{service}"),
+            None => "init".to_string(),
+        };
+        boot_trace::mark(&lane, &format!("set {name}={value}"), "");
         let outcome = self.props.borrow_mut().init_set(name, value);
         self.finish_property_set(outcome)
     }
@@ -222,6 +229,8 @@ impl GuestExecutor {
         match outcome {
             StartOutcome::Started { pid, spec } => {
                 let service = spec.service.clone();
+                let lane = format!("svc/{service}");
+                boot_trace::mark(&lane, &format!("start pid {pid}"), "lane:init");
                 self.launches.push(LaunchRecord {
                     pid,
                     spec: *spec,
@@ -1015,8 +1024,17 @@ impl GuestExecutor {
         }
     }
 
+    /// The trace lane of a guest process: its service's, else its pid's.
+    pub fn lane(&self, pid: u32) -> String {
+        match self.launches.iter().rev().find(|l| l.pid == pid) {
+            Some(launch) => format!("svc/{}", launch.spec.service),
+            None => format!("pid/{pid}"),
+        }
+    }
+
     /// A process exited (`ReapOneProcess`).
     pub fn handle_exit(&mut self, pid: u32, exit: Exit) {
+        boot_trace::mark(&self.lane(pid), &format!("exit {exit}"), "");
         let props = self.props.clone();
         let props = props.borrow();
         let known = self.supervisor.reap(
