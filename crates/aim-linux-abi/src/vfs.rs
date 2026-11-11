@@ -1633,7 +1633,7 @@ pub(crate) fn unnamed_file(prefix: &str) -> Result<i32, Errno> {
         (Some(scratch), _) => scratch.clone(),
         (None, Some(runtime)) => {
             let scratch = runtime.join("scratch");
-            std::fs::create_dir_all(&scratch)
+            make_scratch(&scratch)
                 .map_err(|error| errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
             SCRATCH.get_or_init(|| scratch).clone()
         }
@@ -1652,6 +1652,18 @@ pub(crate) fn unnamed_file(prefix: &str) -> Result<i32, Errno> {
     // SAFETY: the name mkstemp just made.
     unsafe { libc::unlink(template.as_ptr().cast()) };
     Ok(fd)
+}
+
+/// The scratch directory of a runtime guest-init did not prepare it in:
+/// the layer's own (0700) whatever the umask a guest thread has set,
+/// which is the process's.
+fn make_scratch(scratch: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(scratch) {
+        Ok(()) => std::fs::set_permissions(scratch, std::fs::Permissions::from_mode(0o700)),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// A mount as `/proc/mounts` lists it.
@@ -3333,6 +3345,27 @@ mod tests {
                 .starts_with("vfs-test")
         }));
         unsafe { libc::close(fd) };
+    }
+
+    /// A scratch directory made under a guest's umask is still the
+    /// layer's to make files in.
+    #[test]
+    fn the_scratch_directory_does_not_take_the_guest_umask() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "vfs::tests::the_scratch_directory_does_not_take_the_guest_umask",
+        ) {
+            return;
+        }
+        let root = aim_paths::Scratch::new("vfs-scratch-umask");
+        let scratch = root.join("scratch");
+        let previous = unsafe { libc::umask(0o777) };
+        let made = super::make_scratch(&scratch);
+        unsafe { libc::umask(previous) };
+        made.unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&scratch).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o700);
+        std::fs::write(scratch.join("file"), b"").unwrap();
     }
 
     /// The table's visibility of each mount and its generation follow
