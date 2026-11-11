@@ -1957,6 +1957,10 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
         if let Some(r) = super::memfd::reopen(n, host_flags) {
             return Some(r);
         }
+        // A bpf object is an anon inode, which no open reopens.
+        if super::bpf::is_object(n) {
+            return Some(-(errno::ENXIO as i64));
+        }
         // The link leads to the file itself, which may_open checks for
         // this open's access as any open of it (proc_fd_link, then
         // inode_permission).

@@ -609,7 +609,8 @@ fn object_path(fd: i32) -> Option<CString> {
 
 /// Whether `fd` is an object's (a map's, program's or type
 /// information's): a file the objects directory names, where all of an
-/// object's names are. Linux's are anon inodes, on no mount a path is on.
+/// object's names are. Linux's are anon inodes, on no mount a path is on,
+/// that no open reopens (an inode's default `no_open_fops`: ENXIO).
 pub(crate) fn is_object(fd: i32) -> bool {
     let mut buf = [0u8; libc::PATH_MAX as usize];
     // SAFETY: F_GETPATH writes at most PATH_MAX bytes.
@@ -1197,6 +1198,11 @@ mod tests {
             elem(read, MAP_UPDATE_ELEM, key.as_ptr(), value.as_mut_ptr(), 0),
             -(EPERM as i64)
         );
+        // Nor does its /proc/self/fd link reopen it, in any access.
+        for flags in [0, 2] {
+            let magic = std::ffi::CString::new(format!("/proc/self/fd/{read}")).unwrap();
+            assert_eq!(open(&magic, flags), -(errno::ENXIO as i64));
+        }
         let write = get(c"/sys/fs/bpf/map", F_WRONLY, 0);
         assert!(write >= 0, "get: {write}");
         assert_eq!(
