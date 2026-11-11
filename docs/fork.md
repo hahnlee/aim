@@ -63,7 +63,12 @@ The design is the one Cygwin uses on Windows. The parent spawns a fresh
    Copies are taken before `fork` returns, so what the parent writes
    afterwards stays its own.
 3. **State.** The layer's per-process state is written into one blob
-   (`sys/fork/state.rs`). Each module saves and restores its own part:
+   (`sys/fork/state.rs`). What goes with the descriptors is saved with the
+   fd table before the spawn; the rest, the records of the memory among
+   it (stub islands, the program break, mapping names, file copies, memfd
+   and ashmem views), after the memory is copied, so that the child never
+   has a record older than the memory it holds. Each module saves and
+   restores its own part:
    - the fd table: each fd's kind (eventfd, timerfd, socket, epoll,
      inotify, pidfd, directory stream, memfd), with dup'ed fds sharing one
      object, and the hidden fds;

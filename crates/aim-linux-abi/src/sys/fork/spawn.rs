@@ -3,9 +3,11 @@
 //! A Darwin `fork()` without exec leaves the child unable to reach XPC
 //! services (launchd refuses its lookups), so Metal cannot compile shaders
 //! there, among others. A guest fork is therefore made the way Cygwin makes
-//! one on Windows: the parent snapshots its guest memory and layer state,
-//! spawns `linux-run --fork-child`, and the child maps the memory at the
-//! same addresses, rebuilds the state and resumes the forking thread's
+//! one on Windows: the parent saves its descriptors' state and spawns
+//! `linux-run --fork-child` with them, then copies its guest memory and
+//! saves the rest of its layer state (the records of that memory among it)
+//! while the child starts. The child maps the memory at the same
+//! addresses, rebuilds the state and resumes the forking thread's
 //! registers with 0 in x0. The child is the parent's real Darwin child, so
 //! waitpid, pidfds and SIGCHLD work as for any child.
 //!
@@ -681,8 +683,9 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
     w.bytes(&shadow_stack());
     w.str(&crate::vfs::cwd());
     w.str(&mount_text);
-    // The memory regions follow the head in the blob. They are taken once
-    // the child has been started, so they are put in place last.
+    // The memory regions and the process's state (`state::save_process`)
+    // follow the head in the blob. They are taken once the child has been
+    // started, so they are put in place last.
     let head = w.written();
     let tracked = super::super::verity_pager::tracked_identities().map_err(|error| {
         -(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64)
@@ -707,7 +710,8 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
     let fd_guard = fdtab::lifecycle();
     let writer_receipts = fdtab::fork_writer_receipts().map_err(|error| -(error as i64))?;
     let (fds, guest_receipts) = fdtab::fork_guest_snapshot().map_err(|error| -(error as i64))?;
-    state::save(&mut w, &mount_text);
+    super::super::procfs::fork_prepare();
+    state::save_files(&mut w, &mount_text);
     let diag = crate::diag::log_fd();
     if !fds.iter().any(|(fd, ..)| *fd == diag) {
         w.retain_private(diag);
@@ -771,18 +775,24 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
         }
     };
     // The memory is copied while the child starts (exec, dyld, the
-    // runtime's own set-up); it asks for its state only after that.
+    // runtime's own set-up); it asks for its state only after that. No
+    // mapping changes between the copy and its records, as Linux holds
+    // mmap_lock for writing while it copies the mappings.
+    let mut memory = Writer::default();
+    let epoch = super::super::verity_pager::exclusive_mutation();
     let snap = match snapshot() {
         Ok(snap) => snap,
         Err(error) => {
+            drop(epoch);
             abandon(pid, port);
             return Err(error);
         }
     };
-    let mut regions = Writer::default();
-    save_regions(&mut regions, &snap.regions);
+    save_regions(&mut memory, &snap.regions);
+    state::save_process(&mut memory);
+    drop(epoch);
     let mut blob = w.into_bytes();
-    blob.splice(head..head, regions.into_bytes());
+    blob.splice(head..head, memory.into_bytes());
     // Only the child holds a send right now: its exit is a no-senders
     // notification.
     // SAFETY: our port; the notification comes to the port itself.

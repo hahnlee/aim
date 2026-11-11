@@ -2181,6 +2181,7 @@ pub fn init_brk(hint: u64) {
 pub fn brk(a: [u64; 6]) -> i64 {
     let want = a[0];
     let limits = super::cred::memory_limits();
+    let _epoch = super::verity_pager::mutation();
     let mut b = BRK.lock().unwrap();
     if want == 0 || want < b.base || want > b.limit {
         return b.cur as i64;

@@ -1148,6 +1148,86 @@ static void fork_memory_runs(void) {
   printf("ok fork_memory_runs\n");
 }
 
+#ifndef PR_SET_VMA
+#define PR_SET_VMA 0x53564d41
+#define PR_SET_VMA_ANON_NAME 0
+#endif
+
+enum { RACE_PAGE = 16384, RACE_SIZE = 3 * RACE_PAGE, RACE_KEPT = 8 };
+static char* volatile race_kept[RACE_KEPT];
+static volatile int race_stop;
+
+// Maps, names and then marks memory, and unmaps it again, until stopped.
+static void* race_names(void* arg) {
+  (void)arg;
+  for (unsigned i = 0; !race_stop; i++) {
+    char* old = race_kept[i % RACE_KEPT];
+    race_kept[i % RACE_KEPT] = NULL;
+    if (old) munmap(old, RACE_SIZE);
+    char* p = mmap(NULL, RACE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) continue;
+    if (prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, p, RACE_SIZE, "fork-race") != 0) _exit(2);
+    p[0] = 1;
+    race_kept[i % RACE_KEPT] = p;
+  }
+  return NULL;
+}
+
+// The /proc/self/maps line of the mapping holding `p`, if any.
+static int maps_line(const char* p, char* line, size_t size) {
+  FILE* f = fopen("/proc/self/maps", "r");
+  if (!f) return 0;
+  int found = 0;
+  while (!found && fgets(line, size, f)) {
+    unsigned long lo, hi;
+    found = sscanf(line, "%lx-%lx", &lo, &hi) == 2 && lo <= (unsigned long)p &&
+            (unsigned long)p < hi;
+  }
+  fclose(f);
+  return found;
+}
+
+// While another thread maps and names memory, a fork child that has a
+// mapping of it also has the mapping's name: the records of the memory
+// (names, the program break, stub islands, ...) are never older than the
+// memory the child holds, as on Linux, where fork copies them together.
+static void fork_records_follow_memory(void) {
+  pthread_t t;
+  CHECK(pthread_create(&t, NULL, race_names, NULL) == 0, "thread");
+  int checked = 0;
+  for (int n = 0; n < 100; n++) {
+    int p[2];
+    CHECK(pipe(p) == 0, "pipe");
+    pid_t pid = fork();
+    CHECK(pid >= 0, "fork");
+    if (pid == 0) {
+      int marked = 0, bad = 0;
+      for (int i = 0; i < RACE_KEPT; i++) {
+        char* m = race_kept[i];
+        char line[512];
+        if (!m || !maps_line(m, line, sizeof(line)) || !strstr(line, " rw-p ") || m[0] != 1)
+          continue;
+        marked++;
+        bad |= strstr(line, "[anon:fork-race]") == NULL;
+      }
+      if (write(p[1], &marked, sizeof(marked)) != sizeof(marked)) _exit(3);
+      _exit(bad);
+    }
+    close(p[1]);
+    int marked = 0;
+    CHECK(read(p[0], &marked, sizeof(marked)) == sizeof(marked), "child report");
+    close(p[0]);
+    int st;
+    CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st), "child %#x", st);
+    CHECK(WEXITSTATUS(st) == 0, "fork %d: a marked mapping without its name", n);
+    checked += marked;
+  }
+  race_stop = 1;
+  pthread_join(t, NULL);
+  CHECK(checked > 0, "no mapping was checked");
+  printf("ok fork_records_follow_memory\n");
+}
+
 // Adjacent mappings never touched are allocated afresh in the child as
 // one run (docs/fork.md): each page reads as zeros, keeps its own
 // protection in the child (and in the child's child) and stays private.
@@ -2453,6 +2533,7 @@ int main(int argc, char** argv) {
       {"suspend_pending", suspend_pending}, {"vdso_sigreturn", vdso_sigreturn},
       {"fork_memory", fork_memory}, {"fork_memory_runs", fork_memory_runs},
       {"fork_untouched_runs", fork_untouched_runs}, {"fork_then_exit", fork_then_exit},
+      {"fork_records_follow_memory", fork_records_follow_memory},
       {"identity", identity},       {"identity_file", identity_file},
       {"seccomp_filter", seccomp_filter},
       {"xattrs", xattrs},           {"pf_key", pf_key},

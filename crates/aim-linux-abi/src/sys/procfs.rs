@@ -65,10 +65,13 @@ fn stack() -> Option<StackInfo> {
 
 /// Fork: the main thread's stack areas (the child's memory has them at
 /// the same addresses).
-pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
-    // The pool stays with this process: its hidden fds go before the
-    // child inherits the fd table.
+/// Fork, before the child is spawned: the pool stays with this process,
+/// so its hidden fds go before the child inherits the fd table.
+pub(super) fn fork_prepare() {
     POOL.drain();
+}
+
+pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
     w.opt(stack(), |w, s| {
         for v in [
             s.lo,
