@@ -570,4 +570,40 @@ mod shutdown_tests {
         retained.shutdown().unwrap();
         fs::remove_file(path).unwrap();
     }
+
+    /// A boot that stops before the package boot (a failed data mount)
+    /// shuts the app host down without loading what nothing loaded, so
+    /// without waiting for init's properties.
+    #[test]
+    fn configured_app_host_never_booted_shuts_down_without_waiting_for_init() {
+        let root = aim_paths::scratch_dir("aim-native-services-unbooted");
+        let waits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let services = NativeServices::new(&Driver::new(), &["activity".into()]).unwrap();
+        let seen = waits.clone();
+        services
+            .configure_app_host(
+                &root,
+                &root.join("data"),
+                &root.join("bpf"),
+                &root.join("net"),
+                Box::new(|_| None),
+                Box::new(move |name, _, _| {
+                    seen.lock().unwrap().push(name.to_string());
+                    Ok(false)
+                }),
+                Box::new(|_, _| {}),
+                Box::new(|| Err(std::io::ErrorKind::NotFound.into())),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(services.shutdown(), Ok(()));
+        assert!(
+            waits.lock().unwrap().is_empty(),
+            "{:?}",
+            waits.lock().unwrap()
+        );
+        drop(services);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

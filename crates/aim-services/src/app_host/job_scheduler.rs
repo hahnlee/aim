@@ -1356,9 +1356,12 @@ impl JobScheduler {
         }
     }
 
+    /// Writes the pending changes; a store never read has none.
     pub(super) fn flush(&self) -> Result<(), Exception> {
         let mut state = self.state.lock().unwrap();
-        self.ensure_loaded(&mut state)?;
+        if !state.loaded {
+            return Ok(());
+        }
         self.flush_pending(&mut state)
     }
 
