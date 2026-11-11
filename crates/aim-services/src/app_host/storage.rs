@@ -386,7 +386,9 @@ impl AppHost {
             .wait()
             .clone()
             .map_err(|e| e.message)?;
-        self.prepare_user_data(&user.vold, &user.installd, USER, flags)?;
+        crate::boot_trace::timed("prepareUserData", || {
+            self.prepare_user_data(&user.vold, &user.installd, USER, flags)
+        })?;
         *self
             .storage
             .prepared_users
@@ -394,9 +396,10 @@ impl AppHost {
             .unwrap()
             .entry(USER)
             .or_default() |= flags;
-        system
-            .internal_reconcile_apps_data(USER, flags, user.updated, 1000, 0)
-            .map_err(|e| e.message)
+        crate::boot_trace::timed("reconcileAppsData", || {
+            system.internal_reconcile_apps_data(USER, flags, user.updated, 1000, 0)
+        })
+        .map_err(|e| e.message)
     }
 
     pub(super) fn ce_storage_prepared(&self, user: i32) -> bool {
