@@ -110,6 +110,7 @@ fn create_uid_map(host: &AppHost, key_size: u32, value_size: u32) -> UidMap {
     let beside = objects.join(object.file_name().unwrap());
     if !beside.exists() {
         std::fs::hard_link(object, &beside).unwrap();
+        aim_storage::bpf_object::make_pin_template(&beside).unwrap();
     }
     aim_storage::bpf_object::pin(&path, &beside).unwrap();
     UidMap(fd as i32)

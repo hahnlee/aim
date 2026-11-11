@@ -276,9 +276,24 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     // The kernel log is a character device on Linux: O_TRUNC leaves it.
     // A cgroup hierarchy's files are the kernel's (kernfs): none can be
     // made, and O_TRUNC leaves a control file.
-    let cgroup = vfs::cgroup(&r.guest);
-    if cgroup.is_some() && flags & O_CREAT != 0 && attrs::absent(&r.host) {
+    let fstype = vfs::fstype(&r.guest);
+    let cgroup = fstype.as_deref().is_some_and(|t| {
+        t == "cgroup2" || aim_storage::cgroup_v1::Controller::from_map_kind(t).is_some()
+    });
+    if cgroup && flags & O_CREAT != 0 && attrs::absent(&r.host) {
         return -(EACCES as i64);
+    }
+    // bpffs has no `create` (BPF_OBJ_PIN makes its files), and a pin opens
+    // as no file (bpffs_obj_open; bpffs_map_open without a printer): EIO.
+    if fstype.as_deref() == Some("bpf") && flags & O_PATH == 0 {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::lstat(r.host.as_ptr(), &mut stat) } != 0 {
+            if flags & O_CREAT != 0 {
+                return -(EACCES as i64);
+            }
+        } else if stat.st_mode & libc::S_IFMT == libc::S_IFREG {
+            return -(errno::EIO as i64);
+        }
     }
     // devpts makes no node (it has no `create`): a name no guest pair
     // holds cannot be created, whatever the name.
@@ -293,7 +308,7 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     {
         return -(EACCES as i64);
     }
-    let flags = if r.guest == "/dev/kmsg" || cgroup.is_some() {
+    let flags = if r.guest == "/dev/kmsg" || cgroup {
         flags & !O_TRUNC
     } else {
         flags

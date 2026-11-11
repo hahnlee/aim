@@ -293,50 +293,102 @@ pub const OBJECTS: &str = "bpf-objects";
 pub fn objects_beside(area: &Path) -> std::path::PathBuf {
     area.with_file_name(OBJECTS)
 }
-/// What a pin holds: this prefix, then the object file's name in
-/// [`OBJECTS`].
-const PIN: &[u8] = b"AIMBPFPIN1\n";
+/// The host attribute naming a pin's object file in [`OBJECTS`]: one the
+/// guest cannot set or read (its attributes are `dev.aim.xattr.*`), so a
+/// file the guest made is no pin.
+const PIN: &std::ffi::CStr = c"dev.aim.bpf.pin";
 
-/// Pins the object file `object` (in [`OBJECTS`]) at `pin`: as bpffs's, a
-/// new inode of its own, so its mode and owner are its own, that refers to
-/// the object. Fails with `AlreadyExists` when `pin` exists.
-pub fn pin(pin: &Path, object: &Path) -> io::Result<()> {
-    use std::io::Write;
+/// The pin template of object file `object`: an empty file beside it that
+/// carries [`PIN`].
+fn template(object: &Path) -> std::path::PathBuf {
+    let mut name = object.as_os_str().to_os_string();
+    name.push(".pin");
+    name.into()
+}
+
+/// Makes the pin template of the new object file `object` (in
+/// [`OBJECTS`]), before any process can pin it.
+pub fn make_pin_template(object: &Path) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
     use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
     let name = object
         .file_name()
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let record = [PIN, name.as_bytes()].concat();
-    std::fs::File::options()
+    let path = template(object);
+    let file = std::fs::File::options()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(pin)?
-        .write_all(&record)
+        .open(&path)?;
+    // SAFETY: the attribute's name and value outlive the call.
+    if unsafe {
+        libc::fsetxattr(
+            file.as_raw_fd(),
+            PIN.as_ptr(),
+            name.as_bytes().as_ptr().cast(),
+            name.len(),
+            0,
+            0,
+        )
+    } != 0
+    {
+        let error = io::Error::last_os_error();
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Pins the object file `object` (in [`OBJECTS`]) at `pin`: as bpffs's, an
+/// empty file of its own, so its mode and owner are its own, that refers
+/// to the object. A clone of the object's pin template, it appears whole
+/// or not at all. Fails with `AlreadyExists` when `pin` exists.
+pub fn pin(pin: &Path, object: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let from = std::ffi::CString::new(template(object).as_os_str().as_bytes())?;
+    let to = std::ffi::CString::new(pin.as_os_str().as_bytes())?;
+    // SAFETY: two paths; clonefile fails with EEXIST on an existing `to`.
+    if unsafe { libc::clonefile(from.as_ptr(), to.as_ptr(), 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// The object file pinned at `pin`, of those in `objects`, opened for
-/// reading and writing.
+/// reading and writing. A file that is no pin fails with `InvalidData`.
 pub fn open(pin: &Path, objects: &Path) -> io::Result<std::fs::File> {
-    use std::io::Read;
     use std::os::unix::ffi::OsStrExt;
-    let mut record = Vec::new();
-    std::fs::File::open(pin)?
-        .take((PIN.len() + 255) as u64)
-        .read_to_end(&mut record)?;
-    let name = record
-        .strip_prefix(PIN)
-        .map(std::ffi::OsStr::from_bytes)
-        .filter(|name| {
-            let mut parts = Path::new(name).components();
-            matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none()
-        })
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{}: not a pinned object", pin.display()),
-            )
-        })?;
+    let path = std::ffi::CString::new(pin.as_os_str().as_bytes())?;
+    let mut name = [0u8; 256];
+    // SAFETY: a bounded read of the attribute into the local buffer.
+    let n = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            PIN.as_ptr(),
+            name.as_mut_ptr().cast(),
+            name.len(),
+            0,
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    let not_pin = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: not a pinned object", pin.display()),
+        )
+    };
+    if n < 0 {
+        let error = io::Error::last_os_error();
+        return Err(match error.raw_os_error() {
+            Some(libc::ENOATTR) => not_pin(),
+            _ => error,
+        });
+    }
+    let name = std::ffi::OsStr::from_bytes(&name[..n as usize]);
+    let mut parts = Path::new(name).components();
+    if !matches!(parts.next(), Some(std::path::Component::Normal(_))) || parts.next().is_some() {
+        return Err(not_pin());
+    }
     std::fs::File::options()
         .read(true)
         .write(true)
@@ -424,6 +476,7 @@ mod tests {
         std::fs::create_dir_all(dir.join(OBJECTS)).unwrap();
         std::fs::create_dir_all(dir.join("bpf")).unwrap();
         std::fs::write(&object, b).unwrap();
+        make_pin_template(&object).unwrap();
         let path = dir.join("bpf/map");
         pin(&path, &object).unwrap();
         path
@@ -492,19 +545,34 @@ mod tests {
             Mapped::open(&path, &objects).err().map(|e| e.kind()),
             Some(io::ErrorKind::InvalidData)
         );
-        // Neither a file that is no pin, nor a pin naming a path outside
-        // the objects, opens.
-        for record in [
-            &b"no pin"[..],
-            b"AIMBPFPIN1\n../bpf/map",
-            b"AIMBPFPIN1\n/etc/hosts",
-        ] {
-            std::fs::write(&second, record).unwrap();
-            assert_eq!(
-                open(&second, &objects).err().map(|e| e.kind()),
-                Some(io::ErrorKind::InvalidData)
-            );
-        }
+        // Neither a file the guest could make (whatever it holds), nor a pin
+        // naming a path outside the objects, opens; a pin is empty.
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        let forged = dir.join("bpf/forged");
+        std::fs::write(&forged, b"obj.map").unwrap();
+        assert_eq!(
+            open(&forged, &objects).err().map(|e| e.kind()),
+            Some(io::ErrorKind::InvalidData)
+        );
+        let outside = std::ffi::CString::new(forged.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a path, an attribute name and value.
+        assert_eq!(
+            unsafe {
+                libc::setxattr(
+                    outside.as_ptr(),
+                    PIN.as_ptr(),
+                    b"../bpf/map".as_ptr().cast(),
+                    10,
+                    0,
+                    0,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            open(&forged, &objects).err().map(|e| e.kind()),
+            Some(io::ErrorKind::InvalidData)
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
