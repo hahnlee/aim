@@ -28,7 +28,7 @@ use std::ffi::CString;
 use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 
 use super::fdtab;
 use crate::errno::{self, E2BIG, EBADF, EEXIST, EFAULT, EINVAL, ENOENT, EPERM};
@@ -211,6 +211,20 @@ pub(super) fn adopt(fd: i32) {
     {
         fdtab::insert(fd, fdtab::Kind::Bpf);
     }
+}
+
+/// Whether `region` maps an object file.
+pub(super) fn maps_object(region: &super::vmmap::Region) -> bool {
+    use std::os::{darwin::fs::MetadataExt as _, unix::fs::MetadataExt};
+    let Some((path, dev, ino)) = &region.file else {
+        return false;
+    };
+    std::fs::metadata(path).is_ok_and(|m| {
+        m.is_file()
+            && m.dev() == *dev
+            && m.ino() == *ino
+            && m.st_flags() & (MARK | libc::UF_NODUMP) == MARK
+    })
 }
 
 /// `BPF_F_MMAPABLE`.
@@ -476,12 +490,12 @@ fn map_create(attr: &[u32]) -> i64 {
         max_entries,
         flags,
         id: 0,
-        lock: AtomicU32::new(0),
+        lock: AtomicU64::new(0),
         count: AtomicU32::new(0),
         frozen: 0,
         name,
         data_len: 0,
-        _pad: [0; 56],
+        _pad: [0; 48],
     };
     // `map_create`: the fd's access is what the map's flags ask.
     match file_access(flags) {
@@ -615,12 +629,12 @@ fn btf_load(btf: u64, size: u32) -> i64 {
         max_entries: 0,
         flags: 0,
         id: 0,
-        lock: AtomicU32::new(0),
+        lock: AtomicU64::new(0),
         count: AtomicU32::new(0),
         frozen: 0,
         name: [0; 16],
         data_len: 0,
-        _pad: [0; 56],
+        _pad: [0; 48],
     };
     create_object(header, size as usize, Some(&data), libc::O_RDWR)
 }
@@ -640,7 +654,7 @@ fn prog_load(a: &[u32]) -> i64 {
     } else {
         Vec::new()
     };
-    let mut pad = [0; 56];
+    let mut pad = [0; 48];
     pad[..4].copy_from_slice(&a[17].to_ne_bytes());
     let header = Header {
         magic: MAGIC,
@@ -651,7 +665,7 @@ fn prog_load(a: &[u32]) -> i64 {
         max_entries: a[1],
         flags: a[11],
         id: 0,
-        lock: AtomicU32::new(0),
+        lock: AtomicU64::new(0),
         count: AtomicU32::new(0),
         frozen: 0,
         name,
@@ -1646,7 +1660,9 @@ mod tests {
     }
 
     /// mmap maps an mmapable array's values and a ring buffer's pages, its
-    /// data twice over, and never the header after them.
+    /// data twice over, and never the header after them: no mapping grows
+    /// (VM_DONTEXPAND), nor becomes writable when made read-only (no
+    /// VM_MAYWRITE).
     #[test]
     fn mmap_maps_only_mappable_data() {
         use super::super::mem;
@@ -1681,6 +1697,18 @@ mod tests {
             0
         );
         assert_eq!(value, 77);
+        // MREMAP_MAYMOVE.
+        assert_eq!(
+            mem::mremap([at as u64, page, 2 * page, 1, 0, 0]),
+            -(EFAULT as i64)
+        );
+        unmap(at, page);
+        let at = mem::mmap([0, page, 1, 1, fd, 0]);
+        assert!(at > 0, "{at}");
+        assert_eq!(
+            mem::mprotect([at as u64, page, 3, 0, 0, 0]),
+            -(errno::EACCES as i64)
+        );
         unmap(at, page);
         let mut ring = [0u32; 24];
         ring[..5].copy_from_slice(&[RINGBUF, 0, 0, PAGE as u32, 0]);
@@ -1689,6 +1717,10 @@ mod tests {
         let rb = rb as u64;
         let consumer = mem::mmap([0, page, 3, 1, rb, 0]);
         assert!(consumer > 0, "{consumer}");
+        assert_eq!(
+            mem::mremap([consumer as u64, page, 2 * page, 1, 0, 0]),
+            -(EFAULT as i64)
+        );
         unmap(consumer, page);
         assert_eq!(mem::mmap([0, 3 * page, 3, 1, rb, page]), -(EPERM as i64));
         assert_eq!(mem::mmap([0, 4 * page, 1, 1, rb, page]), -(EINVAL as i64));
@@ -1705,6 +1737,10 @@ mod tests {
             assert_eq!(((producer as u64 + page) as *const u8).read(), mark);
             assert_eq!(((producer as u64 + 2 * page) as *const u8).read(), mark);
         }
+        assert_eq!(
+            mem::mprotect([producer as u64, page, 3, 0, 0, 0]),
+            -(errno::EACCES as i64)
+        );
         unmap(producer, 3 * page);
         for fd in [plain, fd, rb] {
             assert_eq!(super::super::fs::close([fd, 0, 0, 0, 0, 0]), 0);

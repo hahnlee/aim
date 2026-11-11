@@ -8,7 +8,7 @@
 
 use std::io;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub const HASH: u32 = 1;
 pub const ARRAY: u32 = 2;
@@ -47,13 +47,14 @@ pub struct Header {
     pub max_entries: u32,
     pub flags: u32,
     pub id: u32,
-    pub lock: AtomicU32,
     pub count: AtomicU32,
     pub frozen: u32,
     pub name: [u8; 16],
     /// Bytes of data before the header.
     pub data_len: u64,
-    pub _pad: [u8; 56],
+    /// The spin lock: its holder ([`Holder`]), or 0.
+    pub lock: AtomicU64,
+    pub _pad: [u8; 48],
 }
 const _: () = assert!(std::mem::size_of::<Header>() == HEADER);
 
@@ -237,11 +238,12 @@ impl Map {
         8 + round8(self.params.key_size) + round8(self.value_len() as u32)
     }
 
-    /// The map's lock, which holds its holder's pid. A holder that is no
-    /// live process (one that died holding it) leaves it to the next.
+    /// The map's lock, which names its holder. A holder that is no
+    /// longer running (it died, or its process exec'd, holding it) leaves
+    /// it to the next.
     pub fn lock(&self) -> Guard<'_> {
         let l = &self.h().lock;
-        let me = std::process::id();
+        let me = Holder::me();
         let mut spins = 0u32;
         loop {
             let holder = match l.compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed)
@@ -252,7 +254,7 @@ impl Map {
             spins = spins.wrapping_add(1);
             if holder != 0
                 && spins % 1024 == 0
-                && !alive(holder)
+                && !Holder::running(holder)
                 && l.compare_exchange(holder, me, Ordering::Acquire, Ordering::Relaxed)
                     .is_ok()
             {
@@ -381,7 +383,7 @@ impl Map {
     }
 }
 
-pub struct Guard<'a>(&'a AtomicU32);
+pub struct Guard<'a>(&'a AtomicU64);
 
 impl Drop for Guard<'_> {
     fn drop(&mut self) {
@@ -389,14 +391,63 @@ impl Drop for Guard<'_> {
     }
 }
 
-/// Whether `pid` names a live process that may hold a lock: neither the
-/// kernel's (0) nor launchd (1), which map no objects.
-fn alive(pid: u32) -> bool {
-    // SAFETY: a signal-0 probe sends nothing.
-    pid > 1
-        && pid <= i32::MAX as u32
-        && (unsafe { libc::kill(pid as i32, 0) } == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+/// A lock holder: a process's pid (low half) and its identity version
+/// (high half), which Darwin moves on every exec, so the word names one
+/// program run by the process.
+struct Holder;
+
+/// `proc_uniqidentifierinfo`, after the BSD information in
+/// `PROC_PIDT_BSDINFOWITHUNIQID`.
+#[repr(C)]
+struct BsdWithIdentity {
+    bsd: libc::proc_bsdinfo,
+    uuid: [u8; 16],
+    unique_id: u64,
+    parent_unique_id: u64,
+    id_version: i32,
+    parent_id_version: u32,
+    _reserved: [u64; 2],
+}
+const PROC_PIDT_BSDINFOWITHUNIQID: i32 = 18;
+
+impl Holder {
+    /// The word naming this process's current program.
+    fn me() -> u64 {
+        static ME: AtomicU64 = AtomicU64::new(0);
+        let pid = std::process::id();
+        let cached = ME.load(Ordering::Relaxed);
+        // A fork child has its own pid; an exec, its own statics.
+        if cached != 0 && cached as u32 == pid {
+            return cached;
+        }
+        let word = Holder::word(pid).unwrap_or(pid as u64);
+        ME.store(word, Ordering::Relaxed);
+        word
+    }
+
+    /// The word of process `pid`, unless it is no running process (gone,
+    /// or a zombie).
+    fn word(pid: u32) -> Option<u64> {
+        let mut info: BsdWithIdentity = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<BsdWithIdentity>() as i32;
+        // SAFETY: proc_pidinfo writes at most `size` bytes into `info`.
+        let n = unsafe {
+            libc::proc_pidinfo(
+                i32::try_from(pid).ok()?,
+                PROC_PIDT_BSDINFOWITHUNIQID,
+                0,
+                (&raw mut info).cast(),
+                size,
+            )
+        };
+        (n == size && info.bsd.pbi_status != libc::SZOMB)
+            .then_some((info.id_version as u32 as u64) << 32 | pid as u64)
+    }
+
+    /// Whether `holder` still runs the program that took the lock.
+    fn running(holder: u64) -> bool {
+        Holder::word(holder as u32) == Some(holder)
+    }
 }
 
 fn fnv(b: &[u8]) -> u64 {
@@ -731,16 +782,11 @@ mod tests {
             }
         }
         // Another writer of the shared header: more entries and a wider
-        // key than the file holds, no count, and a lock no live process
-        // holds.
+        // key than the file holds, and no count.
         let backing = objects.join("obj.map");
         let mut bytes = std::fs::read(&backing).unwrap();
         let at = bytes.len() - HEADER;
-        let dead = std::process::Command::new("true")
-            .spawn()
-            .and_then(|mut child| child.wait().map(|_| child.id()))
-            .unwrap();
-        for (offset, value) in [(16, 64), (24, 1 << 30), (36, dead), (40, 0)] {
+        for (offset, value) in [(16, 64u32), (24, 1 << 30), (36, 0)] {
             bytes[at + offset..at + offset + 4].copy_from_slice(&value.to_ne_bytes());
         }
         let file = std::fs::OpenOptions::new()
@@ -766,10 +812,28 @@ mod tests {
             assert_eq!(map.claim(&3u32.to_ne_bytes(), 0), Err(NoSlot::Full));
             assert_eq!(map.probe(&[0; 64]), Err(None));
         }
-        // A word that names no process is no holder either.
-        std::os::unix::fs::FileExt::write_all_at(&file, &1u32.to_ne_bytes(), at as u64 + 36)
+        // A lock is free once its holder is gone, a zombie, or runs another
+        // program, and when its word names no process at all.
+        let lock = at as u64 + std::mem::offset_of!(Header, lock) as u64;
+        let hold = |word: u64| {
+            std::os::unix::fs::FileExt::write_all_at(&file, &word.to_ne_bytes(), lock).unwrap();
+            assert_eq!(map.lookup(&9u32.to_ne_bytes()), None);
+        };
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
             .unwrap();
-        assert_eq!(map.lookup(&9u32.to_ne_bytes()), None);
+        let word = Holder::word(child.id()).unwrap();
+        assert!(Holder::running(word));
+        child.kill().unwrap();
+        while Holder::word(child.id()).is_some() {
+            std::thread::yield_now();
+        }
+        hold(word);
+        child.wait().unwrap();
+        hold(word);
+        hold(Holder::me() + (1 << 32));
+        hold(1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

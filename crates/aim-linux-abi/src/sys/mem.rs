@@ -335,38 +335,49 @@ fn mmap_guest(mut a: [u64; 6]) -> i64 {
     result
 }
 /// mmap of a bpf object (`a[4]`, its host fd): its `pieces`, one after the
-/// other, over a reservation of the whole range.
+/// other, over a reservation of the whole range. As `bpf_map_mmap` clears
+/// VM_MAYWRITE, a mapping made without write never gains it.
 fn mmap_object(a: [u64; 6], pieces: &[(u64, u64)]) -> i64 {
-    if let [(offset, _)] = pieces {
-        return mmap_owned([a[0], a[1], a[2], a[3], a[4], *offset]);
-    }
     let len = page_up(a[1]);
-    let base = mmap_owned([
-        a[0],
-        len,
-        0,
-        (a[3] & !MAP_TYPE) | MAP_PRIVATE | MAP_ANONYMOUS,
-        u64::MAX,
-        0,
-    ]);
+    let base = match pieces {
+        [(offset, _)] => mmap_owned([a[0], a[1], a[2], a[3], a[4], *offset]),
+        _ => mmap_owned([
+            a[0],
+            len,
+            0,
+            (a[3] & !MAP_TYPE) | MAP_PRIVATE | MAP_ANONYMOUS,
+            u64::MAX,
+            0,
+        ]),
+    };
     if base < 0 {
         return base;
     }
-    let mut at = base as u64;
-    for &(offset, n) in pieces {
-        let placed = mmap_owned([
-            at,
-            n,
-            a[2],
-            (a[3] & !MAP_FIXED_NOREPLACE) | MAP_FIXED,
-            a[4],
-            offset,
-        ]);
-        if placed < 0 {
-            window::unmap(base as u64, len);
-            return placed;
+    if pieces.len() > 1 {
+        let mut at = base as u64;
+        for &(offset, n) in pieces {
+            let placed = mmap_owned([
+                at,
+                n,
+                a[2],
+                (a[3] & !MAP_FIXED_NOREPLACE) | MAP_FIXED,
+                a[4],
+                offset,
+            ]);
+            if placed < 0 {
+                window::unmap(base as u64, len);
+                return placed;
+            }
+            at += n;
         }
-        at += n;
+    }
+    if a[2] & PROT_WRITE == 0 {
+        let most = (libc::PROT_READ | libc::PROT_EXEC) as i32;
+        // SAFETY: the maximum protection of the mapping made above.
+        if unsafe { mach_vm_protect(task(), base as u64, len, 1, most) } != 0 {
+            window::unmap(base as u64, len);
+            return -(ENOMEM as i64);
+        }
     }
     base
 }
@@ -1818,7 +1829,11 @@ fn mremap_inner(a: [u64; 6]) -> i64 {
     if flags & MREMAP_DONTUNMAP != 0 && old_len != new_len {
         return -(EINVAL as i64);
     }
-    if vmmap::region_at(old).is_none_or(|r| r.start > old) {
+    let Some(region) = vmmap::region_at(old).filter(|r| r.start <= old) else {
+        return -(libc::EFAULT as i64);
+    };
+    // `vma_to_resize`: a bpf object's mapping (VM_DONTEXPAND) never grows.
+    if new_len > old_len && super::bpf::maps_object(&region) {
         return -(libc::EFAULT as i64);
     }
     let keep_old = flags & MREMAP_DONTUNMAP != 0;
