@@ -637,6 +637,15 @@ mod tests {
         let program = bpf([OBJ_GET, get.as_ptr() as u64, 16, 0, 0, 0]);
         assert!(program >= 0, "reopen loader pin: {program}");
         assert_eq!(attach_at(target, program, false), 0);
+        // The attachment is another name of the program's file; a pin of
+        // the attached program still names its object.
+        let again = c"/sys/fs/bpf/netd_shared/prog_attached";
+        let pin = [again.as_ptr() as u64, program as u64];
+        assert_eq!(bpf([OBJ_PIN, pin.as_ptr() as u64, 16, 0, 0, 0]), 0);
+        let get_again = [again.as_ptr() as u64, 0u64];
+        let reopened = bpf([OBJ_GET, get_again.as_ptr() as u64, 16, 0, 0, 0]);
+        assert!(reopened >= 0, "reopen attached pin: {reopened}");
+        close(reopened);
         close(program);
         assert_eq!(socket(2, 2), -(EPERM as i64));
         assert_eq!(attach_at(target, 0, true), 0);

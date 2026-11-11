@@ -561,8 +561,17 @@ mod tests {
             return;
         }
         let (_view, root) = crate::vfs::test_view();
-        let directory = root.join("root/sys/fs/bpf/netd_shared");
+        let bpffs = root.join("data/bpffs");
+        let directory = bpffs.join("netd_shared");
         std::fs::create_dir_all(&directory).unwrap();
+        crate::vfs::add_mount(
+            "/sys/fs/bpf",
+            bpffs,
+            crate::vfs::Area::Writable,
+            "bpf",
+            "bpf",
+        )
+        .unwrap();
         for (path, ty, key, value, entries) in [
             (COOKIE_TAG, 1, 8, 8, 16),
             (UID_COUNTERSET, 1, 4, 1, 16),

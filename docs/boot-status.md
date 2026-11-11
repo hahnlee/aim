@@ -9468,9 +9468,12 @@ images (netbpfload execs uprobestatsbpfload, then the platform bpfloader);
 netbpfload's 189,000 `lseek` and 95,000 `read` calls re-reading its ELF
 objects take 0.12 s, what the Mac's own calls cost (0.29 us per `lseek`,
 0.5 us per 4 KiB `read`); its 144 `chmod`/`chown` of pins take 0.017 s
-(#3007). A pin is a file of its own naming its object, as bpffs gives each
-pin its own inode, instead of a hard link to it: creating one costs about a
-fifth of a link on the Mac (#418, #561).
+(#3007). A pin is an empty file of its own, as bpffs gives each pin its own
+inode, instead of a hard link to its object: a clone of the object's
+template, which names it in a host attribute the guest cannot set, made
+whole in one call for about a third of a link's cost on the Mac. The bpffs
+area makes no other files and opens a pin as no file, and BPF_OBJ_GET
+checks its flags and the caller's access to the pin (#418, #561).
 
 ## Debugging
 

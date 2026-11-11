@@ -2262,7 +2262,7 @@ fn install_mount(
 
 /// The filesystem type of the mount that holds the normalized guest path.
 pub fn fstype(guest: &str) -> Option<String> {
-    let mounts = vfs().mounts.read().unwrap();
+    let mounts = VFS.get()?.mounts.read().unwrap();
     holder(&mounts, guest).and_then(|(m, _)| m.fstype.clone())
 }
 
