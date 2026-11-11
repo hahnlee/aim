@@ -1070,6 +1070,84 @@ static void fork_memory(void) {
   printf("ok fork_memory\n");
 }
 
+// Whether touching `p` (writing when `write`) kills a forked child with
+// SIGSEGV or SIGBUS.
+static int faults(volatile char* p, int write) {
+  pid_t pid = fork();
+  if (pid == 0) {
+    if (write) *p = 1;
+    else (void)*p;
+    _exit(0);
+  }
+  int st;
+  if (waitpid(pid, &st, 0) != pid) return -1;
+  return WIFSIGNALED(st) && (WTERMSIG(st) == SIGSEGV || WTERMSIG(st) == SIGBUS);
+}
+
+// Adjacent private mappings are copied as one run (docs/fork.md): each
+// page keeps its contents and its own protection in the child (and in the
+// child's child), a private file mapping among them included, and the
+// copies stay private both ways. A page never touched splits the run.
+static void fork_memory_runs(void) {
+  enum { PAGE = 16384, N = 9, UNTOUCHED = 4, FILE_PAGE = 7 };
+  const int rw = PROT_READ | PROT_WRITE;
+  const int prot[N] = {rw, PROT_READ, PROT_NONE, rw, PROT_READ, rw, PROT_READ, PROT_READ | PROT_EXEC, rw};
+  char* m = mmap(NULL, N * PAGE, rw, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(m != MAP_FAILED, "mmap");
+  int fd = open("/data/local/tmp/process", O_RDONLY | O_CLOEXEC);
+  CHECK(fd >= 0, "open");
+  CHECK(mmap(m + FILE_PAGE * PAGE, PAGE, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_FIXED, fd, 0) ==
+            m + FILE_PAGE * PAGE,
+        "file mapping");
+  close(fd);
+  char want[N][16];
+  for (int i = 0; i < N; i++) {
+    if (i == FILE_PAGE) {
+      memcpy(want[i], m + i * PAGE, sizeof(want[i]));
+      CHECK(memcmp(want[i], "\177ELF", 4) == 0, "ELF header");
+      continue;
+    }
+    snprintf(want[i], sizeof(want[i]), "page %d", i);
+    if (i != UNTOUCHED) memcpy(m + i * PAGE, want[i], sizeof(want[i]));
+    CHECK(mprotect(m + i * PAGE, PAGE, prot[i]) == 0, "mprotect %d", i);
+  }
+  int go[2], back[2];
+  CHECK(pipe(go) == 0 && pipe(back) == 0, "pipes");
+  pid_t pid = fork();
+  CHECK(pid >= 0, "fork");
+  if (pid == 0) {
+    int bad = 0;
+    for (int i = 0; i < N; i++) {
+      if (!(prot[i] & PROT_READ)) continue;
+      int same = i == UNTOUCHED ? m[i * PAGE] == 0 : !memcmp(m + i * PAGE, want[i], sizeof(want[i]));
+      bad |= !same << 0;
+    }
+    for (int i = 0; i < N; i++) {
+      bad |= (faults(m + i * PAGE, 0) != !(prot[i] & PROT_READ)) << 1;
+      bad |= (faults(m + i * PAGE, 1) != !(prot[i] & PROT_WRITE)) << 2;
+    }
+    bad |= (mprotect(m + 2 * PAGE, PAGE, PROT_READ) != 0 || strcmp(m + 2 * PAGE, "page 2")) << 3;
+    char c;
+    if (read(go[0], &c, 1) != 1) _exit(99);
+    bad |= (strcmp(m, "page 0") != 0) << 4;
+    strcpy(m + 3 * PAGE, "child");
+    if (write(back[1], "y", 1) != 1) _exit(98);
+    _exit(bad);
+  }
+  strcpy(m, "parent");
+  CHECK(write(go[1], "x", 1) == 1, "go");
+  char c;
+  CHECK(read(back[0], &c, 1) == 1, "back");
+  int st;
+  CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st), "child %#x", st);
+  CHECK(WEXITSTATUS(st) == 0, "child checks failed: mask %#x", WEXITSTATUS(st));
+  CHECK(strcmp(m + 3 * PAGE, "page 3") == 0 && m[UNTOUCHED * PAGE] == 0,
+        "the child's writes stay its own");
+  CHECK(faults(m + PAGE, 1) == 1 && faults(m + 2 * PAGE, 0) == 1, "the parent's protections");
+  munmap(m, N * PAGE);
+  printf("ok fork_memory_runs\n");
+}
+
 // A parent that exits right after fork (daemon()'s double fork): the
 // grandchild still starts and runs.
 static void fork_then_exit(void) {
@@ -2341,7 +2419,7 @@ int main(int argc, char** argv) {
       {"kqueue_fd_cloexec_fork", kqueue_fd_cloexec_fork}, {"fasync_fork_once", fasync_fork_once},
       {"fasync_shared_record", fasync_shared_record},
       {"suspend_pending", suspend_pending}, {"vdso_sigreturn", vdso_sigreturn},
-      {"fork_memory", fork_memory}, {"fork_then_exit", fork_then_exit},
+      {"fork_memory", fork_memory}, {"fork_memory_runs", fork_memory_runs}, {"fork_then_exit", fork_then_exit},
       {"identity", identity},       {"identity_file", identity_file},
       {"seccomp_filter", seccomp_filter},
       {"xattrs", xattrs},           {"pf_key", pf_key},

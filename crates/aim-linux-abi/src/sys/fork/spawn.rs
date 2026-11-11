@@ -14,6 +14,8 @@
 //!   memory, the memory itself (`MAP_MEM_VM_SHARE`) for shared mappings
 //!   (MAP_SHARED files and memory, memfds, ashmem, binder buffers), and
 //!   nothing for memory never touched, which the child allocates afresh.
+//!   Adjacent copies are taken as one entry, which the child maps once and
+//!   protects part by part.
 //!   The copies are taken before the parent returns, so what it writes
 //!   afterwards stays its own.
 //! - **Handover.** The parent gives the child a send right to a port of its
@@ -222,6 +224,11 @@ struct Region {
     prot: i32,
     max_prot: i32,
     backing: Backing,
+    /// A copy that the previous region's memory entry covers too: the
+    /// copies of adjacent entries are taken as one, one memory entry and
+    /// one mapping instead of one per VM entry, and each keeps its own
+    /// protection.
+    joined: bool,
 }
 
 /// Memory entries of every guest mapping, with their table. The ports are
@@ -238,6 +245,27 @@ impl Drop for Snapshot {
             unsafe { mach_port_deallocate(task(), e) };
         }
     }
+}
+
+fn in_window(addr: u64) -> bool {
+    (window::BASE..window::BASE + window::SIZE).contains(&addr)
+}
+
+/// Whether region `r` may be copied with the region before it, `prev`:
+/// adjacent copies, neither of them JIT memory (`map_jit`), both in the
+/// heap window or both outside it.
+fn joins(prev: &Region, r: &Region) -> bool {
+    let copy = |r: &Region| r.backing == Backing::Copy && r.prot != VM_PROT_ALL;
+    copy(prev)
+        && copy(r)
+        && prev.start + prev.len == r.start
+        && in_window(prev.start) == in_window(r.start)
+}
+
+/// The regions from `i` that one memory entry covers: `regions[i]` and
+/// the regions joined to it.
+fn run(regions: &[Region], i: usize) -> usize {
+    1 + regions[i + 1..].iter().take_while(|r| r.joined).count()
 }
 
 fn snapshot() -> Result<Snapshot, i64> {
@@ -257,7 +285,6 @@ fn snapshot() -> Result<Snapshot, i64> {
             // Reserved heap window pages: the child reserves its own.
             continue;
         }
-        let (prot, max_prot) = (i.prot as i32 & VM_PROT_ALL, i.max_prot as i32 & VM_PROT_ALL);
         // The string pages are the process's stack, mapped from its record.
         let backing = if i.shared && !super::super::procrec::is_strings(start) {
             Backing::Share
@@ -266,38 +293,42 @@ fn snapshot() -> Result<Snapshot, i64> {
         } else {
             Backing::Copy
         };
-        let max_prot = if backing == Backing::Fresh {
-            max_prot
-        } else {
-            let (port, max_prot) = entry(start, len, prot, max_prot, backing)?;
-            s.entries.push(port);
-            max_prot
-        };
-        s.regions.push(Region {
+        let mut region = Region {
             start,
             len,
-            prot,
-            max_prot,
+            prot: i.prot as i32 & VM_PROT_ALL,
+            max_prot: i.max_prot as i32 & VM_PROT_ALL,
             backing,
-        });
+            joined: false,
+        };
+        region.joined = s.regions.last().is_some_and(|prev| joins(prev, &region));
+        s.regions.push(region);
+    }
+    let mut i = 0;
+    while i < s.regions.len() {
+        let n = run(&s.regions, i);
+        if s.regions[i].backing != Backing::Fresh {
+            let (port, max_prot) = entry(&s.regions[i..i + n])?;
+            s.entries.push(port);
+            s.regions[i].max_prot = max_prot;
+        }
+        i += n;
     }
     Ok(s)
 }
 
-/// A memory entry for `[start, start+len)`, with the maximum protection
-/// the child's mapping of it may have.
+/// A memory entry for `regions` (one shared region, or a run of adjacent
+/// copies), with the maximum protection the child's mapping of it may
+/// have.
 ///
 /// A copy may become anything. The memory itself allows what its mapping
 /// here allows at most, but Darwin refuses some of those for an entry (a
 /// file mapped shared refuses the execute permission it may be given with
 /// mprotect), so less is asked for until the protection it has now.
-fn entry(
-    start: u64,
-    len: u64,
-    prot: i32,
-    max_prot: i32,
-    backing: Backing,
-) -> Result<(Port, i32), i64> {
+fn entry(regions: &[Region]) -> Result<(Port, i32), i64> {
+    let first = &regions[0];
+    let (start, prot, max_prot, backing) = (first.start, first.prot, first.max_prot, first.backing);
+    let len = regions.iter().map(|r| r.len).sum::<u64>();
     let perms: &[i32] = match backing {
         Backing::Share => &[max_prot, max_prot & !VM_PROT_EXECUTE, prot],
         _ => &[VM_PROT_ALL],
@@ -307,17 +338,29 @@ fn entry(
         _ => MAP_MEM_VM_COPY,
     };
     // A copy needs to read the pages.
-    let opened = backing == Backing::Copy && prot & VM_PROT_READ == 0;
-    // SAFETY: changing the protection of our own guest memory, restored
-    // below.
-    if opened && unsafe { mach_vm_protect(task(), start, len, 0, prot | VM_PROT_READ) } != 0 {
-        return Err(-(ENOMEM as i64));
+    let unreadable: Vec<&Region> = regions
+        .iter()
+        .filter(|r| r.backing == Backing::Copy && r.prot & VM_PROT_READ == 0)
+        .collect();
+    let restore = |opened: &[&Region]| {
+        for r in opened {
+            // SAFETY: restoring the protection of our own guest memory.
+            unsafe { mach_vm_protect(task(), r.start, r.len, 0, r.prot) };
+        }
+    };
+    for (n, r) in unreadable.iter().enumerate() {
+        // SAFETY: changing the protection of our own guest memory, restored
+        // below.
+        if unsafe { mach_vm_protect(task(), r.start, r.len, 0, r.prot | VM_PROT_READ) } != 0 {
+            restore(&unreadable[..n]);
+            return Err(-(ENOMEM as i64));
+        }
     }
     let (mut size, mut port, mut kr, mut max) = (len, 0, -1, 0);
     for &perm in perms.iter().filter(|&&p| p & prot == prot) {
         size = len;
         max = perm;
-        // SAFETY: a memory entry for our own mapping.
+        // SAFETY: a memory entry for our own mappings.
         kr = unsafe {
             mach_make_memory_entry_64(task(), &mut size, start, perm | flag, &mut port, 0)
         };
@@ -325,10 +368,7 @@ fn entry(
             break;
         }
     }
-    if opened {
-        // SAFETY: as above.
-        unsafe { mach_vm_protect(task(), start, len, 0, prot) };
-    }
+    restore(&unreadable);
     if kr != 0 || size < len {
         crate::diag!(
             "[linux-abi] fork: no memory entry for {start:#x}..{:#x} (kr {kr:#x})",
@@ -350,6 +390,7 @@ fn save_regions(w: &mut Writer, regions: &[Region]) {
         w.i32(r.prot);
         w.i32(r.max_prot);
         w.u32(r.backing as u32);
+        w.bool(r.joined);
     });
 }
 
@@ -365,12 +406,21 @@ fn map_regions(r: &mut Reader, entries: &[Port]) -> Result<(), String> {
             1 => Backing::Share,
             _ => Backing::Fresh,
         },
+        joined: r.bool(),
     });
     let mut entries = entries.iter();
-    for g in regions {
+    let mut i = 0;
+    while i < regions.len() {
+        let n = run(&regions, i);
+        let (g, joined) = (&regions[i], &regions[i + 1..i + n]);
+        i += n;
         // Only the heap window is mapped (reserved) here already.
-        let in_window = (window::BASE..window::BASE + window::SIZE).contains(&g.start);
-        let flags = VM_FLAGS_FIXED | if in_window { VM_FLAGS_OVERWRITE } else { 0 };
+        let overwrite = if in_window(g.start) {
+            VM_FLAGS_OVERWRITE
+        } else {
+            0
+        };
+        let flags = VM_FLAGS_FIXED | overwrite;
         if g.prot == VM_PROT_ALL {
             let src = if g.backing == Backing::Fresh {
                 None
@@ -384,6 +434,7 @@ fn map_regions(r: &mut Reader, entries: &[Port]) -> Result<(), String> {
             continue;
         }
         let mut addr = g.start;
+        let len = g.len + joined.iter().map(|r| r.len).sum::<u64>();
         // SAFETY (all arms): mapping the parent's memory into our own guest
         // range, which nothing else of ours uses.
         let kr = unsafe {
@@ -403,7 +454,13 @@ fn map_regions(r: &mut Reader, entries: &[Port]) -> Result<(), String> {
                         Backing::Share => VM_INHERIT_SHARE,
                         _ => VM_INHERIT_COPY,
                     };
-                    map_entry(&mut addr, g.len, flags, e, g.prot, g.max_prot, inherit)
+                    let kr = map_entry(&mut addr, len, flags, e, g.prot, g.max_prot, inherit);
+                    if kr == 0 && !joined.is_empty() {
+                        // The mapping has the first region's protection.
+                        reprotect(g.prot, joined)
+                    } else {
+                        kr
+                    }
                 }
             }
         };
@@ -411,11 +468,32 @@ fn map_regions(r: &mut Reader, entries: &[Port]) -> Result<(), String> {
             return Err(format!(
                 "fork: cannot map {:#x}..{:#x} (kr {kr:#x})",
                 g.start,
-                g.start + g.len
+                g.start + len
             ));
         }
     }
     Ok(())
+}
+
+/// Give each of `regions`, mapped with protection `mapped`, its own,
+/// one call for each span of adjacent regions of one protection.
+fn reprotect(mapped: i32, regions: &[Region]) -> Kr {
+    let mut i = 0;
+    while i < regions.len() {
+        let (start, prot) = (regions[i].start, regions[i].prot);
+        let n = regions[i..].iter().take_while(|r| r.prot == prot).count();
+        let len = regions[i..i + n].iter().map(|r| r.len).sum::<u64>();
+        i += n;
+        if prot == mapped {
+            continue;
+        }
+        // SAFETY: our own mapping of the parent's copy.
+        let kr = unsafe { mach_vm_protect(task(), start, len, 0, prot) };
+        if kr != 0 {
+            return kr;
+        }
+    }
+    0
 }
 
 /// Map memory entry `e` at `addr` with protection `prot`. Execute is
