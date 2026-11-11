@@ -620,18 +620,21 @@ rebuilt, so its parse cache was stale) reached `sys.boot_completed` at
 then the app host's user storage, system ready and home 0.21 s.
 The app data is traced in its parts, which match the original
 `fixAppsDataOnBoot` and `onBeforeStartUser`/`onBeforeUnlockUser`, each
-done on every boot: installd's `fixupAppData` (0.14-0.16 s warm) and the
-deferred packages' `reconcileAppsData` (0.10-0.11 s) on the deferring
+done on every boot: installd's `fixupAppData` (0.085-0.11 s warm) and the
+deferred packages' `reconcileAppsData` (0.09 s) on the deferring
 thread, which `package app data` waits for, then user 0's
-`prepareUserData` (0.02 s) and DE `reconcileAppsData` (0.10-0.11 s) in
+`prepareUserData` (0.02 s) and DE `reconcileAppsData` (0.09 s) in
 `user storage`, and the CE ones (0.12-0.13 s) after `sys.boot_completed`.
 Their time is installd's syscalls in the layer (a sampled warm boot:
-`newfstatat` half of it, each component's lstat and fscrypt context, then
-`getxattr`), not the app host's; a path xattr call resolves its path
-once (it resolved it twice, for the FUSE check and the call), which took
-`package app data` from 0.20-0.21 s to 0.18-0.20 s (three alternating
-warm boots a side, load 8-10, 2026-11-11; `sys.boot_completed` 2.32-2.33
-s against 2.34-2.39 s, within noise).
+`newfstatat` 40% of it, mostly each component's lstat, then `getxattr`),
+not the app host's. A path xattr call resolves its path once. A walk
+reads a directory's fscrypt context once per inode and ctime, also where
+it took no stat of it (a directory fd's path, after a symlink or `..`),
+and a walk relative to a directory fd starts from the fd's path walked
+once; `fixupAppData`'s fts, which stats relative to directory fds while
+CE is locked, went from 0.12-0.14 s to 0.085-0.11 s (six alternating warm
+boots a side, both orders, load 4-7, 2026-11-11), the reconciles and
+`sys.boot_completed` unchanged within noise.
 
 ## How to reproduce
 

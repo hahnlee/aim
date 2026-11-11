@@ -2861,8 +2861,10 @@ pub fn guest_path_of_host(host: &Path) -> Option<String> {
     HostPathView::capture()?.guest_path(host)
 }
 
-/// Guest path of an open directory fd.
-fn guest_path_of_fd(fd: i32) -> Result<String, Errno> {
+/// Guest path of an open directory fd, and whether it is by host names
+/// (one the host knows it by, which [`visible`] maps), not as the guest
+/// names it already (a FUSE file's, a synthesized directory's).
+fn guest_path_of_fd(fd: i32) -> Result<(String, bool), Errno> {
     use std::os::fd::AsRawFd;
     let pin = crate::sys::fdtab::pin_guest(fd)?;
     let fd = pin.descriptor().as_raw_fd();
@@ -2870,7 +2872,7 @@ fn guest_path_of_fd(fd: i32) -> Result<String, Errno> {
         if !file.directory {
             return Err(errno::ENOTDIR);
         }
-        return Ok(file.guest.clone());
+        return Ok((file.guest.clone(), false));
     }
     if crate::sys::fdtab::character_reference(fd).is_some() {
         return Err(errno::ENOTDIR);
@@ -2883,7 +2885,7 @@ fn guest_path_of_fd(fd: i32) -> Result<String, Errno> {
         return Err(errno::ENOTDIR);
     }
     if let Some(p) = crate::sys::synthesized_dir_path(fd) {
-        return Ok(p);
+        return Ok((p, false));
     }
     let mut buf = [0u8; libc::PATH_MAX as usize];
     // SAFETY: F_GETPATH writes at most PATH_MAX bytes.
@@ -2892,7 +2894,10 @@ fn guest_path_of_fd(fd: i32) -> Result<String, Errno> {
     }
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     let host = Path::new(OsStr::from_bytes(&buf[..len]));
-    visible(guest_path_of_host(host).unwrap_or_else(|| host.display().to_string()))
+    Ok((
+        guest_path_of_host(host).unwrap_or_else(|| host.display().to_string()),
+        true,
+    ))
 }
 
 /// `guest`, a path of host names, as the guest names it: an entry of a
@@ -2901,14 +2906,7 @@ pub(crate) fn visible(guest: String) -> Result<String, Errno> {
     if !crate::sys::fscrypt::locking()? {
         return Ok(guest);
     }
-    let (mut host, mut shown) = (Vec::new(), Vec::new());
-    let mut unlocked = None;
-    for name in guest.split('/').filter(|name| !name.is_empty()) {
-        let (lock, _) = dir_lock(&join_guest(&host), &mut unlocked, None)?;
-        shown.push(crate::sys::fscrypt::guest_name(&lock, name.as_bytes()));
-        host.push(name.as_bytes().to_vec());
-    }
-    Ok(join_guest(&shown))
+    Ok(join_guest(&Walk::of(&guest, true)?.guest))
 }
 
 fn join_guest(components: &[Vec<u8>]) -> String {
@@ -3056,6 +3054,32 @@ struct Walk {
 }
 
 impl Walk {
+    /// The walk that passed `dir`, a path of host names, naming its
+    /// components as the guest does ([`visible`]).
+    fn of(dir: &str, locking: bool) -> Result<Self, Errno> {
+        let mut walk = Walk {
+            guest: Vec::new(),
+            host: None,
+            unlocked: None,
+        };
+        for name in dir.split('/').filter(|name| !name.is_empty()) {
+            let name = name.as_bytes().to_vec();
+            let shown = if locking {
+                let (lock, _) = dir_lock(&walk.host_path(), &mut walk.unlocked, None)?;
+                crate::sys::fscrypt::guest_name(&lock, &name)
+            } else {
+                name.clone()
+            };
+            if shown != name && walk.host.is_none() {
+                walk.host = Some(walk.guest.clone());
+            }
+            if let Some(names) = &mut walk.host {
+                names.push(name);
+            }
+            walk.guest.push(shown);
+        }
+        Ok(walk)
+    }
     /// Adds `name`, looked up in the directory walked so far (whose host
     /// lstat `directory` is, where the walk took one); `new` when it is to
     /// be created.
@@ -3114,12 +3138,24 @@ fn resolve_inner(
         return Err(errno::ENOENT);
     }
     let locking = crate::sys::fscrypt::locking()?;
+    // A checked walk relative to a directory fd starts where that
+    // directory's path, by host names, leaves it: it is walked once.
+    let mut start = None;
     let base = if path[0] == b'/' {
         String::from("/")
     } else if dirfd == LINUX_AT_FDCWD {
         cwd()
     } else {
-        guest_path_of_fd(dirfd)?
+        match guest_path_of_fd(dirfd)? {
+            (base, true) if relative_base => {
+                let walk = Walk::of(&base, locking)?;
+                let base = join_guest(&walk.guest);
+                start = Some(walk);
+                base
+            }
+            (base, true) => visible(base)?,
+            (base, false) => base,
+        }
     };
     let mut pending: Vec<Vec<u8>> = Vec::new();
     let mut joined = base.as_bytes().to_vec();
@@ -3136,8 +3172,13 @@ fn resolve_inner(
         unlocked: None,
     };
     if relative_base && path[0] != b'/' {
-        for part in base.split('/').filter(|part| !part.is_empty()) {
-            done.push(part.as_bytes().to_vec(), locking, false, None)?;
+        match start {
+            Some(walk) => done = walk,
+            None => {
+                for part in base.split('/').filter(|part| !part.is_empty()) {
+                    done.push(part.as_bytes().to_vec(), locking, false, None)?;
+                }
+            }
         }
         pending = path
             .split(|&byte| byte == b'/')
