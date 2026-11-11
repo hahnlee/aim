@@ -18,6 +18,7 @@ pub struct Inputs {
     config: OnceLock<super::system_config::ImageConfig>,
     platform: OnceLock<Result<Platform, String>>,
     seinfo: OnceLock<Result<super::owner::seinfo::Policy, String>>,
+    ahead: std::sync::Mutex<Option<std::thread::JoinHandle<super::scan::Ahead>>>,
 }
 impl Inputs {
     pub fn new(image: &Path) -> Arc<Self> {
@@ -26,6 +27,7 @@ impl Inputs {
             config: OnceLock::new(),
             platform: OnceLock::new(),
             seinfo: OnceLock::new(),
+            ahead: Default::default(),
         })
     }
     /// Whether these inputs read the image directory `image`. The same
@@ -60,6 +62,19 @@ impl Inputs {
             .get_or_init(|| Platform::load(&self.image, Default::default()))
             .as_ref()
             .map_err(Clone::clone)
+    }
+    /// Parses the boot scan's packages on a thread of their own while the
+    /// boot waits (#2985); the scan takes them with [`Self::take_ahead`].
+    pub fn parse_ahead(&self, parse: impl FnOnce() -> super::scan::Ahead + Send + 'static) {
+        *self.ahead.lock().unwrap() = Some(std::thread::spawn(parse));
+    }
+    pub fn take_ahead(&self) -> Option<super::scan::Ahead> {
+        let parsing = self.ahead.lock().unwrap().take()?;
+        Some(
+            parsing
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+        )
     }
     pub fn seinfo(&self) -> Result<super::owner::seinfo::Policy, String> {
         self.seinfo

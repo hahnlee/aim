@@ -123,7 +123,7 @@ impl Image {
     /// Native parsing and full signature verification. No package feed,
     /// parser cache, settings, UID allocation or filesystem writes.
     pub fn load(apks: &Apks, apexes: &[Apex]) -> Result<Self, Error> {
-        Self::load_directories(apks, directories(apexes)?, None, &|parsed, _| {
+        Self::load_directories(apks, directories(apexes)?, None, None, &|parsed, _| {
             apks.checked_signing_details(parsed)
                 .map_err(|error| ("signatures", error))
         })
@@ -140,9 +140,13 @@ impl Image {
             &Location,
         ) -> Result<CertificateCollection<'a>, String>,
     ) -> Result<Self, Error> {
-        Self::load_directories(apks, directories(apexes)?, None, &|parsed, location| {
-            collect(apks, parsed, location, collection)
-        })
+        Self::load_directories(
+            apks,
+            directories(apexes)?,
+            None,
+            None,
+            &|parsed, location| collect(apks, parsed, location, collection),
+        )
         .map(|(image, _)| image)
     }
 
@@ -150,6 +154,7 @@ impl Image {
         apks: &Apks,
         directories: Vec<Location>,
         cache_dir: Option<&Path>,
+        ahead: Option<&Ahead>,
         signing: &dyn Fn(&AndroidPackage, &Location) -> Result<S, (&'static str, ApkSigningError)>,
     ) -> Result<(Image<S>, Vec<String>), Error> {
         let mut image = Image {
@@ -158,6 +163,7 @@ impl Image {
         };
         let mut scan_paths = Vec::new();
         let cache = super::parse_cache::Cache::open(apks, cache_dir);
+        let ahead = ahead.filter(|_| cache.is_some());
         // Each directory's candidates in scan order, up to a directory that
         // cannot be listed, whose error is returned in its turn below.
         let mut listed = Vec::new();
@@ -194,6 +200,20 @@ impl Image {
             let entry = cache
                 .as_ref()
                 .and_then(|cache| cache.entry(host, &path, flags));
+            if let Some(result) = ahead
+                .zip(entry.as_ref())
+                .and_then(|(ahead, entry)| ahead.take(&path, entry))
+            {
+                return result.map(|parsed| match parsed {
+                    Parsed::Cached(parsed) => Ok(parsed),
+                    Parsed::Fresh(bytes) => {
+                        if let (Some(cache), Some(entry)) = (&cache, &entry) {
+                            cache.store(entry, &bytes);
+                        }
+                        AndroidPackage::read_cache_entry(&bytes)
+                    }
+                });
+            }
             if let Some(parsed) = cache
                 .as_ref()
                 .zip(entry.as_ref())
@@ -373,12 +393,17 @@ pub(crate) fn parse_all<T: Sync, R: Send>(items: &[T], parse: impl Fn(&T) -> R +
 impl Image<()> {
     /// Physical system inventory before the sequential owner collects signing.
     pub fn parse(apks: &Apks, apexes: &[Apex]) -> Result<Self, Error> {
-        Self::parse_cached(apks, apexes, None)
+        Self::parse_cached(apks, apexes, None, None)
     }
 
     /// The boot owner's fingerprint directory; `None` disables caching.
-    pub fn parse_cached(apks: &Apks, apexes: &[Apex], cache: Option<&Path>) -> Result<Self, Error> {
-        Image::load_directories(apks, directories(apexes)?, cache, &|_, _| Ok(()))
+    pub fn parse_cached(
+        apks: &Apks,
+        apexes: &[Apex],
+        cache: Option<&Path>,
+        ahead: Option<&Ahead>,
+    ) -> Result<Self, Error> {
+        Image::load_directories(apks, directories(apexes)?, cache, ahead, &|_, _| Ok(()))
             .map(|(image, _)| image)
     }
 }
@@ -402,7 +427,7 @@ impl DataImage {
     /// Scan /data/app, then explicitly supplied mounted private volumes.
     /// Does not allocate UIDs, mutate settings or remove rejected candidates.
     pub fn load(apks: &Apks, volumes: &[String]) -> Result<Self, Error> {
-        Self::load_directories(apks, volumes, None, &|parsed, _| {
+        Self::load_directories(apks, volumes, None, None, &|parsed, _| {
             apks.checked_signing_details(parsed)
                 .map_err(|error| ("signatures", error))
         })
@@ -416,7 +441,7 @@ impl DataImage {
             &Location,
         ) -> Result<CertificateCollection<'a>, String>,
     ) -> Result<Self, Error> {
-        Self::load_directories(apks, volumes, None, &|parsed, location| {
+        Self::load_directories(apks, volumes, None, None, &|parsed, location| {
             collect(apks, parsed, location, collection)
         })
     }
@@ -426,15 +451,16 @@ impl DataImage<()> {
     /// Parse data candidates without opening their signing sources. Collection
     /// follows current-setting selection in the sequential data scan owner.
     pub fn parse(apks: &Apks, volumes: &[String]) -> Result<Self, Error> {
-        Self::parse_cached(apks, volumes, None)
+        Self::parse_cached(apks, volumes, None, None)
     }
 
     pub fn parse_cached(
         apks: &Apks,
         volumes: &[String],
         cache: Option<&Path>,
+        ahead: Option<&Ahead>,
     ) -> Result<Self, Error> {
-        Self::load_directories(apks, volumes, cache, &|_, _| Ok(()))
+        Self::load_directories(apks, volumes, cache, ahead, &|_, _| Ok(()))
     }
 }
 
@@ -443,46 +469,11 @@ impl<S> DataImage<S> {
         apks: &Apks,
         volumes: &[String],
         cache: Option<&Path>,
+        ahead: Option<&Ahead>,
         signing: &dyn Fn(&AndroidPackage, &Location) -> Result<S, (&'static str, ApkSigningError)>,
     ) -> Result<Self, Error> {
-        let mut roots = vec!["/data/app".to_owned()];
-        for volume in volumes {
-            if volume.is_empty()
-                || volume.contains(['/', '\0'])
-                || matches!(volume.as_str(), "." | "..")
-            {
-                return Err(Error {
-                    package: String::new(),
-                    path: volume.clone(),
-                    phase: "location",
-                    message: "invalid private volume name".into(),
-                });
-            }
-            let root = format!("/mnt/expand/{volume}/app");
-            if roots.contains(&root) {
-                return Err(Error {
-                    package: String::new(),
-                    path: root,
-                    phase: "location",
-                    message: "duplicate private volume".into(),
-                });
-            }
-            roots.push(root);
-        }
-        let (image, scan_paths) = Image::load_directories(
-            apks,
-            roots
-                .into_iter()
-                .map(|path| Location {
-                    path,
-                    partition: Partition::Data,
-                    kind: Kind::App,
-                    apex: None,
-                })
-                .collect(),
-            cache,
-            signing,
-        )?;
+        let (image, scan_paths) =
+            Image::load_directories(apks, data_roots(volumes)?, cache, ahead, signing)?;
         Ok(Self {
             packages: image
                 .packages
@@ -492,6 +483,119 @@ impl<S> DataImage<S> {
                 .collect(),
             rejected: image.rejected,
         })
+    }
+}
+
+/// /data/app, then each private volume's app directory.
+fn data_roots(volumes: &[String]) -> Result<Vec<Location>, Error> {
+    let mut roots = vec!["/data/app".to_owned()];
+    for volume in volumes {
+        if volume.is_empty()
+            || volume.contains(['/', '\0'])
+            || matches!(volume.as_str(), "." | "..")
+        {
+            return Err(Error {
+                package: String::new(),
+                path: volume.clone(),
+                phase: "location",
+                message: "invalid private volume name".into(),
+            });
+        }
+        let root = format!("/mnt/expand/{volume}/app");
+        if roots.contains(&root) {
+            return Err(Error {
+                package: String::new(),
+                path: root,
+                phase: "location",
+                message: "duplicate private volume".into(),
+            });
+        }
+        roots.push(root);
+    }
+    Ok(roots
+        .into_iter()
+        .map(|path| Location {
+            path,
+            partition: Partition::Data,
+            kind: Kind::App,
+            apex: None,
+        })
+        .collect())
+}
+
+/// What a parse made before the scan holds: a parcel read from the cache,
+/// or one parsed, which the scan stores in the cache.
+enum Parsed {
+    Cached(AndroidPackage),
+    Fresh(Vec<u8>),
+}
+
+/// The boot scan's packages parsed while the boot still waits for the
+/// storage and locale that the scan's writes under `/data` follow (#2985):
+/// it reads the parser cache, never writes it. Each parse keeps the cache
+/// key of what it read, and the scan takes it only for its own key, so a
+/// configuration or package that changed meanwhile is parsed again.
+#[derive(Default)]
+pub struct Ahead(
+    std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            (super::parse_cache::Entry, Result<Parsed, parse::Error>),
+        >,
+    >,
+);
+
+impl Ahead {
+    /// The packages of the image's scan directories, `apexes`' and the data
+    /// app directory, parsed for `apks`' configuration, reading the parser
+    /// cache in `cache`.
+    pub fn parse(apks: &Apks, apexes: &[Apex], cache: &Path) -> Self {
+        let Some(cache) = super::parse_cache::Cache::existing(apks, cache) else {
+            return Self::default();
+        };
+        let directories = directories(apexes)
+            .into_iter()
+            .chain(data_roots(&[]))
+            .flatten()
+            .filter_map(|directory| Some((candidates(apks, &directory).ok()??, directory)))
+            .collect::<Vec<_>>();
+        let items: Vec<_> = directories
+            .iter()
+            .flat_map(|(candidates, directory)| {
+                candidates
+                    .iter()
+                    .map(move |(name, host)| (directory, name, host))
+            })
+            .collect();
+        let parsed = parse_all(&items, |(directory, name, host)| {
+            let path = format!("{}/{name}", directory.path);
+            let flags = Location {
+                path: path.clone(),
+                ..(*directory).clone()
+            }
+            .parse_flags();
+            let entry = cache.entry(host, &path, flags)?;
+            let parsed = match cache.read(&entry, &path) {
+                Some(parsed) => Ok(Parsed::Cached(parsed)),
+                None => parse::parse(host, &path, flags, &apks.platform)
+                    .map(|parsed| Parsed::Fresh(parsed.to_cache_entry().bytes)),
+            };
+            Some((path, (entry, parsed)))
+        });
+        Self(std::sync::Mutex::new(
+            parsed.into_iter().flatten().collect(),
+        ))
+    }
+
+    fn take(
+        &self,
+        path: &str,
+        entry: &super::parse_cache::Entry,
+    ) -> Option<Result<Parsed, parse::Error>> {
+        match self.0.lock().unwrap().remove(path) {
+            Some((ahead, parsed)) if super::parse_cache::Cache::same(&ahead, entry) => Some(parsed),
+            _ => None,
+        }
     }
 }
 
@@ -611,6 +715,76 @@ fn stage(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A parse made ahead is taken for the scan's own cache key and its
+    /// parcel stored then, never before; a package that changed meanwhile
+    /// is parsed again.
+    #[test]
+    fn the_scan_takes_a_parse_ahead_only_for_its_own_key() {
+        let Some(image) = aim_paths::input(aim_paths::derived_image(), "derived-image") else {
+            return;
+        };
+        let root = crate::app_host::test_temp_dir("parse-ahead");
+        let app = root.join("system/app/Fixture");
+        fs::create_dir_all(&app).unwrap();
+        fs::copy(
+            image.join("system/app/PacProcessor/PacProcessor.apk"),
+            app.join("Fixture.apk"),
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("system/framework")).unwrap();
+        fs::copy(
+            image.join("system/framework/framework-res.apk"),
+            root.join("system/framework/framework-res.apk"),
+        )
+        .unwrap();
+        fs::write(root.join(".identity"), b"fixture image").unwrap();
+        let mut platform =
+            crate::package::parse::Platform::load(&image, Default::default()).unwrap();
+        platform.density_dpi = Some(320);
+        let files = root.clone();
+        let apks = Apks {
+            platform,
+            signing_overrides: None,
+            files: Box::new(move |guest| Some(files.join(guest.trim_start_matches('/')))),
+        };
+        let cache = root.join("data/system/package_cache/fixture");
+        let ahead = Ahead::parse(&apks, &[], &cache);
+        assert!(!cache.exists(), "a parse ahead wrote the cache");
+        let scanned = Image::parse_cached(&apks, &[], Some(&cache), Some(&ahead)).unwrap();
+        assert!(ahead.0.lock().unwrap().is_empty());
+        let parsed = Image::parse_cached(&apks, &[], None, None).unwrap();
+        assert_eq!(scanned.packages.len(), 2);
+        for (scanned, parsed) in scanned.packages.iter().zip(&parsed.packages) {
+            assert_eq!(scanned.parsed, parsed.parsed);
+        }
+        assert_eq!(
+            fs::read_dir(&cache).unwrap().count(),
+            4,
+            "parcels and sidecars"
+        );
+
+        let stale = Ahead::parse(&apks, &[], &cache);
+        fs::copy(
+            image.join("system/app/WallpaperBackup/WallpaperBackup.apk"),
+            app.join("Fixture.apk"),
+        )
+        .unwrap();
+        let rescanned = Image::parse_cached(&apks, &[], Some(&cache), Some(&stale)).unwrap();
+        let names = |image: &Image<()>| {
+            image
+                .packages
+                .iter()
+                .map(|code| code.parsed.package_name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&scanned), names(&parsed));
+        assert_eq!(
+            names(&rescanned),
+            ["android", "com.android.wallpaperbackup"]
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn collected_signing_replaces_parser_details_without_mutating_code() {

@@ -1100,7 +1100,14 @@ and construction (#2421): three matched warm second boots reduce median raw scan
 from 2.028 to 1.214 s; median `boot_completed` is 6.216 s
 against 6.978 s before (2026-10-30). The image scan parses every scan
 directory's packages in one parallel batch and takes the results in scan
-order. A rejected saved package is rolled back from an undo record of the
+order. While init's post-fs-data still runs `init_user0` and applies the
+locale, which the scan's first writes under /data wait for, the app host
+parses the scan's packages ahead for the configuration the boot will have
+(the Mac's locale, the display density and the SDK extensions `derive_sdk`
+sets just before `init_user0`), reading the parser cache but not writing
+it; the scan takes each parse whose cache key its own configuration gives
+(#2985): a fresh boot's system image scan takes 0.44-0.52 s instead of
+1.2-2.0 s (load 7-16). A rejected saved package is rolled back from an undo record of the
 entries its scan writes, not a copy of the whole scan owner per package, and
 keyset registration and seInfo assignment change the owner in place (#2996);
 the system image scan takes 1.10-1.15 s fresh and 0.15-0.19 s warm (from
