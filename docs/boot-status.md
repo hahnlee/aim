@@ -1122,7 +1122,14 @@ entries its scan writes, not a copy of the whole scan owner per package, and
 keyset registration and seInfo assignment change the owner in place (#2996);
 the system image scan takes 1.10-1.15 s fresh and 0.15-0.19 s warm (from
 0.28-0.53 s warm, 2026-11-11, load 9-12); the APEX modules are parsed and
-verified in parallel.
+verified in parallel. The parser cache serves a data app's package, parsed
+from the single directory inside its random /data/app directory, for the
+scanned path with that stamped descent (the original's cache never serves
+these); a warm boot's data app load takes 0.3 ms instead of 70-110 ms. A
+package scan builds only that package's seInfo input, and the raw scan's
+AppsFilter is made at the first raw visibility query, which the app host
+never asks: a warm raw scan takes 0.47-0.63 s (from 0.56-0.74 s,
+2026-11-11, load 9-12).
 The in-process services read properties from the areas mapped once, with
 bionic's serial protocol, and the package boot's live property capture is
 reused until the global property serial changes (a boot makes about 4,500
@@ -1134,9 +1141,10 @@ app standby's idle check informs the restriction owner once per check. A
 query capture whose system owners change (roles, keysets, the launch,
 archive, metadata and instant registry owners) keeps its packages'
 projections and derives only what reads those owners, also when it is
-published as a new generation of an unchanged scan (#2995). The initial
+published as a new generation of an unchanged scan (#2995); the module
+metadata load reuses the roles' AppsFilter. The initial
 scan takes 0.14 s fresh and 0.19 s warm, the construction 0.23 s and
-0.15-0.16 s (2026-11-11, load 3-9). Branch perf/boot-2 on main
+0.17-0.24 s warm at load 9-12 (2026-11-11). Branch perf/boot-2 on main
 `a3638eae3` (2026-11-11), timed from `aimctl start` on throwaway data
 directories at 1-minute load 4-9 (a build that also logs its stage times):
 `sys.boot_completed` at 5.10, 5.19 and 6.20 s fresh and 3.53, 3.55 and
