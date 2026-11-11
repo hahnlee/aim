@@ -1173,7 +1173,7 @@ const NET_FILES: [&str; 5] = ["dev", "tcp", "tcp6", "udp", "udp6"];
 
 /// Nodes under `/proc/<p>/` (`rest` is the path after it); `thread` is the
 /// tid for `/proc/<p>/task/<tid>/` (and `/proc/<tid>/`).
-fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
+fn pid_node(p: i32, rest: &str, thread: Option<i32>, listed: bool) -> Option<Node> {
     let me = p == pid();
     if !me && (!super::pidns::contains(p) || task_info(p).is_none()) {
         return None;
@@ -1236,6 +1236,7 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
         "exe" if me => Node::Link(super::process::exe_guest_path()),
         "cwd" if me => Node::Link(vfs::cwd()),
         "root" => Node::Link("/".into()),
+        "fd" if me && !listed => Node::Dir(Vec::new()),
         "fd" if me => Node::Dir(
             super::fd_visibility::visible()
                 .into_iter()
@@ -1278,13 +1279,21 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
             if !tids(p).contains(&tid) {
                 return None;
             }
-            return pid_node(p, sub, Some(tid));
+            return pid_node(p, sub, Some(tid), listed);
         }
     })
 }
 
 /// The synthesized node at a normalized guest path under /proc or /sys.
 pub fn node(guest: &str) -> Option<Node> {
+    node_listed(guest, true)
+}
+
+/// [`node`], with the entries of `/proc` and `/proc/<pid>/fd` only when
+/// `listed`: `stat` needs a directory's kind, and every path walk through
+/// `/proc/self/fd/N` stats both, while listing them walks the pid
+/// namespace's processes and every descriptor slot.
+fn node_listed(guest: &str, listed: bool) -> Option<Node> {
     if let Some(node) = super::fuse_sysfs::node(guest) {
         return node.ok();
     }
@@ -1309,23 +1318,25 @@ pub fn node(guest: &str) -> Option<Node> {
                     ("uptime", dir::DT_REG),
                     ("version", dir::DT_REG),
                 ]);
-                e.extend(
-                    pids()
-                        .into_iter()
-                        .map(|p| Entry::new(p as u64, dir::DT_DIR, p.to_string())),
-                );
+                if listed {
+                    e.extend(
+                        pids()
+                            .into_iter()
+                            .map(|p| Entry::new(p as u64, dir::DT_DIR, p.to_string())),
+                    );
+                }
                 Node::Dir(e)
             }
             "self" if tail.is_empty() => Node::Link(me.to_string()),
             "mounts" if tail.is_empty() => Node::Link("self/mounts".into()),
             "net" if tail.is_empty() => Node::Link("self/net".into()),
-            "net" => return pid_node(me, &format!("net/{tail}"), None),
+            "net" => return pid_node(me, &format!("net/{tail}"), None, listed),
             "thread-self" if tail.is_empty() => {
                 Node::Link(format!("{me}/task/{}", super::process::gettid()))
             }
-            "self" => return pid_node(me, tail, None),
+            "self" => return pid_node(me, tail, None, listed),
             "thread-self" => {
-                return pid_node(me, tail, Some(super::process::gettid() as i32));
+                return pid_node(me, tail, Some(super::process::gettid() as i32), listed);
             }
             "config.gz" => Node::File(gzip_stored(KERNEL_CONFIG.as_bytes())),
             "cpuinfo" => Node::File(cpuinfo().into_bytes()),
@@ -1354,15 +1365,15 @@ pub fn node(guest: &str) -> Option<Node> {
                 let n = super::pidns::syscall_pid(guest).ok()?;
                 let p = super::thread::owner(n);
                 if p == n {
-                    return pid_node(p, tail, None);
+                    return pid_node(p, tail, None, listed);
                 }
                 if !tids(p).contains(&n) {
                     return None;
                 }
                 if tail == "task" || tail.starts_with("task/") {
-                    return pid_node(p, tail, None);
+                    return pid_node(p, tail, None, listed);
                 }
-                return pid_node(p, tail, Some(n));
+                return pid_node(p, tail, Some(n), listed);
             }
         });
     }
@@ -2204,7 +2215,7 @@ pub fn stat(guest: &str, follow: bool) -> Option<Result<libc::stat, Errno>> {
     st.st_atime = now;
     st.st_mtime = now;
     st.st_ctime = now;
-    match node(&canon) {
+    match node_listed(&canon, false) {
         Some(Node::Mem(_)) => {
             st.st_mode = libc::S_IFREG | 0o600;
             st.st_nlink = 1;
@@ -2517,6 +2528,32 @@ mod tests {
         crate::vfs::remove_mount("/mnt/proc-link-test").unwrap();
         assert_eq!(read("/proc/mounts"), before);
         std::fs::remove_dir(host).unwrap();
+    }
+
+    #[test]
+    fn stat_of_proc_and_an_fd_directory_lists_neither() {
+        let (_view, _) = crate::vfs::test_view();
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
+        super::super::fd_visibility::publish(fd, false).unwrap();
+        let me = super::pid();
+        let names = |node: Option<super::Node>| match node {
+            Some(super::Node::Dir(entries)) => entries
+                .iter()
+                .map(|e| String::from_utf8_lossy(&e.name).into_owned())
+                .collect::<Vec<_>>(),
+            _ => panic!("not a directory"),
+        };
+        let fds = format!("/proc/{me}/fd");
+        assert!(names(super::node(&fds)).contains(&fd.to_string()));
+        assert!(names(super::node("/proc")).contains(&me.to_string()));
+        assert!(names(super::node_listed(&fds, false)).is_empty());
+        assert!(!names(super::node_listed("/proc", false)).contains(&me.to_string()));
+        for path in ["/proc", fds.as_str()] {
+            let st = super::stat(path, true).unwrap().unwrap();
+            assert_eq!(st.st_mode, libc::S_IFDIR | 0o555, "{path}");
+        }
+        super::super::fd_visibility::withdraw(fd).unwrap();
     }
 
     fn read_all(fd: i32) -> Vec<u8> {
