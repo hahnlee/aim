@@ -364,6 +364,12 @@ impl<M: AreaMemory> PropArea<M> {
         fence(Ordering::Release);
         let serial = serial | 1;
         serial_word.store(serial, Ordering::Relaxed);
+        // Bionic stores the value straight after the dirty bit, which leaves
+        // a weakly ordered CPU free to make the new bytes visible first: a
+        // reader would copy them under the old clean serial and see it
+        // unchanged. Ordering the dirty bit first pairs with the reader's
+        // acquire fence after its copy.
+        fence(Ordering::Release);
         // strlcpy(pi->value, value, len + 1)
         let copied = value.iter().position(|b| *b == 0).unwrap_or(value.len());
         self.write_bytes(info + 4, &value[..copied]);
@@ -798,13 +804,37 @@ mod tests {
                     area.update_value(info, &values[i]);
                 }
             });
-            let torn = (0..50_000)
-                .map(|_| reader.get("debug.torn").map(|p| p.value.into_bytes()))
-                .find(|value| !value.as_ref().is_some_and(|value| values.contains(value)));
+            // Several readers widen the window in which a reader copies the
+            // value between the writer's dirty mark and its in-place write.
+            let readers: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        // SAFETY: as above.
+                        let reader = unsafe {
+                            SharedAreaReader::new(area.memory().base(), area.memory().len())
+                        }
+                        .unwrap();
+                        (0..200_000)
+                            .map(|_| reader.read(info).map(|p| p.value.into_bytes()))
+                            .find(|value| {
+                                !value.as_ref().is_some_and(|value| values.contains(value))
+                            })
+                    })
+                })
+                .collect();
+            let torn: Vec<_> = readers
+                .into_iter()
+                .filter_map(|reader| reader.join().unwrap())
+                .collect();
             stop.store(true, Ordering::Relaxed);
             torn
         });
-        assert_eq!(torn, None);
+        assert_eq!(torn, Vec::<Option<Vec<u8>>>::new());
+        assert!(
+            reader
+                .get("debug.torn")
+                .is_some_and(|p| values.contains(&p.value.into_bytes()))
+        );
         assert_eq!(reader.get("debug.missing"), None);
     }
 }
