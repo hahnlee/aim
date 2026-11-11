@@ -38,22 +38,15 @@ pub(super) fn prepare(a: &[u32]) -> Result<Vec<u8>, i64> {
                 let fd = i32::from_ne_bytes(code[pc + 4..pc + 8].try_into().unwrap());
                 let pin = fdtab::pin_guest(fd).map_err(|e| -(e as i64))?;
                 let fd = pin.descriptor().as_raw_fd();
-                let (header, stat) = read_header(fd).ok_or(-(EINVAL as i64))?;
+                let (header, _) = read_header(fd).ok_or(-(EINVAL as i64))?;
                 if header.kind != KIND_MAP {
                     return Err(-(EINVAL as i64));
                 }
-                let path = object_path(fd).ok_or(-(EBADF as i64))?;
-                let name = format!("map-{}-{}", stat.st_dev, stat.st_ino);
-                match std::fs::hard_link(
-                    std::ffi::OsStr::from_bytes(path.as_bytes()),
-                    objects_dir().join(&name),
-                ) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                    Err(e) => return Err(-(io(e) as i64)),
-                }
+                // A map's file keeps its one name in the objects for the boot.
+                let name = object_name(fd).ok_or(-(EBADF as i64))?;
+                let name = name.as_bytes();
                 refs.extend_from_slice(&(name.len() as u32).to_ne_bytes());
-                refs.extend_from_slice(name.as_bytes());
+                refs.extend_from_slice(name);
                 // The reference table is indexed by instruction, not guest FD.
                 code[pc + 4..pc + 8].copy_from_slice(&(pc as u32).to_ne_bytes());
             }
