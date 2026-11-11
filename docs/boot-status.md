@@ -613,10 +613,11 @@ guest-init --image <derived> --data <data> --run \
   attach (`diskutil image attach`, about 220 ms, all of it diskutil's
   own) starts at guest-init's first step, beside the linux-run capability
   query, whose first run of a new binary waits 120-330 ms for its code
-  signature check. The POSIX lock, PTY and binder owners and the display
-  wait run beside it too (0.15-0.20 s after `aimctl start` warm, was
-  0.33-0.39 s); the verity and native owners wait for it, at about
-  0.33 s warm (#3009, 2026-11-11).
+  signature check. The POSIX lock, PTY and binder owners, the display
+  wait and the native services' construction run beside it too (the POSIX
+  owner at 0.15-0.20 s after `aimctl start` warm, was 0.33-0.39 s); only
+  the verity store and the app host's package boot wait for it, and init's
+  first command follows at about 0.35 s warm (#3009, 2026-11-11).
 - The device has no boot animation (`debug.sf.nobootanimation`);
   `--exclude bootanim` still works but is no longer needed.
 - The device is `aim` (`androidboot.hardware=aim`):
@@ -1825,10 +1826,11 @@ provider launches outside the system process fail fast as
 getContentProviderImpl's do, so aim-system's own startup calls cannot wait on
 the readiness that waits for it (a held broadcast start once deadlocked stage
 4). Activity process starts are held too and return at once: a persistent
-app's starts at system ready, the others at finishBooting in order, before
-sys.boot_completed (#2697); a boot that stops fails them. Released starts run
-on the process-start handler (mProcStartHandler), in order, so neither
-system ready nor sys.boot_completed waits for a slow zygote start (#3015). Stage 9 calls DexUseManagerLocal.systemReady
+app's are released at system ready, the others at finishBooting in order,
+queued before sys.boot_completed (#2697); a boot that stops fails them.
+Released starts run on the process-start handler (mProcStartHandler), in
+order, so neither system ready nor sys.boot_completed waits for a slow
+zygote start (#3015). Stage 9 calls DexUseManagerLocal.systemReady
 (with ArtManagerLocal's) by Binder on a live owner, a replacement when the
 owner died first, and passes only on its reply, so it precedes the completion
 broadcasts; a process attaching later runs its own. Boot dexopt (stage 10)

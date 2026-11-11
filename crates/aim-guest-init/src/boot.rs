@@ -1047,34 +1047,6 @@ impl Boot {
             wait_for_display(display)?;
             mark("display server up");
         }
-        // The data image has been attaching while the boot prepared and its
-        // other owners (POSIX locks, PTYs, binder) started; the owners that
-        // serve from it wait for it: the verity store, then the native
-        // services.
-        let verity_control = if options.mode == RunMode::Run {
-            data_mount.borrow_mut().mount()?;
-            let store = Arc::new(
-                aim_storage::fsverity::Store::new(
-                    &layout.data.join("fs-verity"),
-                    &layout.runtime.join("fs-verity-leases"),
-                )
-                .map_err(|error| format!("verity store: {error:?}"))?,
-            );
-            let owner = aim_storage::verity_control::RunningServer::start_private_with_store(
-                Duration::from_secs(5),
-                store,
-            )
-            .map_err(|error| format!("native verity control startup: {error}"))?;
-            aim_storage::verity_control::OwnerConfig {
-                endpoint: owner.endpoint().to_path_buf(),
-                process: owner.process,
-            }
-            .write(&layout.runtime.join("verity-control-owner"))
-            .map_err(|error| format!("native verity owner locator: {error}"))?;
-            Some(owner)
-        } else {
-            None
-        };
         // The boot loop's events: property service requests, children's
         // exits and the properties the host sets while the guest runs.
         let (event_sender, event_receiver) = mpsc::channel();
@@ -1159,6 +1131,37 @@ impl Boot {
             // Android's media volume is the Mac's output volume.
             aim_services::volume::start_for_namespace(server.driver(), native_pid);
             mark("binder host and native services started");
+        }
+        // The data image has been attaching while the boot prepared and the
+        // owners that do not read it (POSIX locks, PTYs, binder, the native
+        // services' construction) started; those that serve from it wait
+        // for it: the verity store, then the app host's package boot.
+        let verity_control = if options.mode == RunMode::Run {
+            data_mount.borrow_mut().mount()?;
+            let store = Arc::new(
+                aim_storage::fsverity::Store::new(
+                    &layout.data.join("fs-verity"),
+                    &layout.runtime.join("fs-verity-leases"),
+                )
+                .map_err(|error| format!("verity store: {error:?}"))?,
+            );
+            let owner = aim_storage::verity_control::RunningServer::start_private_with_store(
+                Duration::from_secs(5),
+                store,
+            )
+            .map_err(|error| format!("native verity control startup: {error}"))?;
+            aim_storage::verity_control::OwnerConfig {
+                endpoint: owner.endpoint().to_path_buf(),
+                process: owner.process,
+            }
+            .write(&layout.runtime.join("verity-control-owner"))
+            .map_err(|error| format!("native verity owner locator: {error}"))?;
+            Some(owner)
+        } else {
+            None
+        };
+        if let Some(services) = &native_services {
+            services.start_app_host_package_boot();
         }
         let linux_run = LinuxRun {
             binary: linux_run_binary,
