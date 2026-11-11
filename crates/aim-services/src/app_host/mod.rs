@@ -666,6 +666,9 @@ pub struct AppHost {
     processes_ready: OnceLock<Result<(), Exception>>,
     /// AMS.mProcessesOnHold: starts asked for before `processes_ready`.
     processes_on_hold: Mutex<Vec<process_hold::HeldStart>>,
+    /// `mProcStartHandler`: process starts whose preparation and zygote IO
+    /// run in order without holding up their caller.
+    process_starts: Mutex<Option<std::sync::mpsc::Sender<process_hold::ProcessStart>>>,
     pub(crate) accessibility_ready: boot_ready::AccessibilityReady,
     /// Retained verifier API in the current system process; replaced on attach.
     domain_frontend: Mutex<Option<Arc<crate::system::ServiceOwner>>>,
@@ -832,6 +835,7 @@ impl AppHost {
             package_boot: Default::default(),
             processes_ready: OnceLock::new(),
             processes_on_hold: Mutex::new(Vec::new()),
+            process_starts: Mutex::new(None),
             accessibility_ready: Default::default(),
             domain_frontend: Mutex::new(None),
             system_route_queries: Mutex::new(None),

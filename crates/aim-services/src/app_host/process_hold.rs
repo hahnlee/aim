@@ -1,8 +1,14 @@
 //! `ProcessList.startProcessLocked`'s `mProcessesOnHold` (android-16.0.0_r1):
 //! a start asked for before `mProcessesReady` that is not allowed while
-//! booting waits, not its caller; `finishBooting` starts it.
+//! booting waits, not its caller; `finishBooting` starts it. Starts run on
+//! `mProcStartHandler` (`FLAG_PROCESS_START_ASYNC`), so neither waits for
+//! the zygote.
 use super::{AppHost, STOCK_PM_FLAGS, SYSTEM_PROCESS, SYSTEM_UID, activity_start};
 use aim_binder_host::parcel::Exception;
+use std::sync::{Arc, mpsc};
+
+/// A job of the process-start handler.
+pub(super) type ProcessStart = Box<dyn FnOnce(&Arc<AppHost>) + Send>;
 
 /// `ApplicationInfo.FLAG_PERSISTENT`.
 const FLAG_PERSISTENT: i32 = 1 << 3;
@@ -70,6 +76,24 @@ impl AppHost {
             .map(|_| ())
     }
 
+    /// Runs `start` on the process-start handler, after the starts posted
+    /// before it.
+    pub(super) fn post_process_start(&self, start: impl FnOnce(&Arc<AppHost>) + Send + 'static) {
+        let mut handler = self.process_starts.lock().unwrap();
+        let sender = handler.get_or_insert_with(|| {
+            let (sender, starts) = mpsc::channel::<ProcessStart>();
+            let me = self.me.clone();
+            std::thread::spawn(move || {
+                for start in starts {
+                    let Some(host) = me.upgrade() else { return };
+                    start(&host);
+                }
+            });
+            sender
+        });
+        sender.send(Box::new(start)).expect("process-start handler");
+    }
+
     /// `systemReady`'s `startPersistentApps` point: the held starts allowed
     /// while booting, in order.
     pub(super) fn start_held_while_booting(&self) {
@@ -81,16 +105,16 @@ impl AppHost {
             *held = later;
             now
         };
-        held.into_iter().for_each(|start| self.start_held(start));
+        held.into_iter().for_each(|start| self.post_held(start));
     }
 
     /// `finishBooting` after `PHASE_BOOT_COMPLETED`: the processes on hold
-    /// started in order (`HOSTING_TYPE_ON_HOLD`). One whose activity
+    /// posted in order (`HOSTING_TYPE_ON_HOLD`). One whose activity
     /// finished meanwhile still starts, as the original's held
     /// `ProcessRecord` does.
     pub(super) fn start_processes_on_hold(&self) {
         let held = std::mem::take(&mut *self.processes_on_hold.lock().unwrap());
-        held.into_iter().for_each(|start| self.start_held(start));
+        held.into_iter().for_each(|start| self.post_held(start));
     }
 
     /// The boot stopped: the held starts fail with `error`.
@@ -102,18 +126,20 @@ impl AppHost {
         }
     }
 
-    fn start_held(&self, start: HeldStart) {
-        let token = start.request.as_ref().and_then(|r| r.restart);
-        let started = self.start_app_process(
-            &start.name,
-            &start.process,
-            start.request,
-            start.from_background,
-            false,
-        );
-        if let Err(e) = started {
-            self.held_start_failed(&start.process, token, &e);
-        }
+    fn post_held(&self, start: HeldStart) {
+        self.post_process_start(move |host| {
+            let token = start.request.as_ref().and_then(|r| r.restart);
+            let started = host.start_app_process(
+                &start.name,
+                &start.process,
+                start.request,
+                start.from_background,
+                false,
+            );
+            if let Err(e) = started {
+                host.held_start_failed(&start.process, token, &e);
+            }
+        });
     }
 
     /// The activity that waited for a held start that failed goes, as a

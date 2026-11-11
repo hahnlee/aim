@@ -553,7 +553,6 @@ pub struct Services {
     handler: Mutex<Option<mpsc::Sender<Job>>>,
     #[cfg(test)]
     handler_worker: Mutex<Option<std::thread::JoinHandle<()>>>,
-    process_starts: Mutex<Option<mpsc::Sender<Job>>>,
 }
 
 #[derive(Default)]
@@ -1789,38 +1788,24 @@ impl AppHost {
         Ok(())
     }
 
-    /// ProcessList's process-start handler: preparation and zygote IO never
-    /// hold service state or delay the caller's accepted bind/start result.
+    /// On the process-start handler: preparation and zygote IO never hold
+    /// service state or delay the caller's accepted bind/start result.
     fn queue_service_start(
         &self,
         token: Binder,
         start: impl FnOnce(&Arc<AppHost>) -> Result<i64, Exception> + Send + 'static,
     ) {
-        let mut queue = self.services.process_starts.lock().unwrap();
-        let sender = queue.get_or_insert_with(|| {
-            let (sender, jobs) = mpsc::channel::<Job>();
-            let me = self.me.clone();
-            std::thread::spawn(move || {
-                for job in jobs {
-                    let Some(host) = me.upgrade() else { return };
-                    job(&host);
-                }
-            });
-            sender
+        self.post_process_start(move |host| {
+            let mut state = host.services.state.lock().unwrap();
+            if !state.pending_services.contains(&token)
+                || state.record(token).is_none_or(|r| r.app.is_some())
+            {
+                return;
+            }
+            drop(state);
+            let result = start(host);
+            host.service_process_started(token, result);
         });
-        sender
-            .send(Box::new(move |host| {
-                let mut state = host.services.state.lock().unwrap();
-                if !state.pending_services.contains(&token)
-                    || state.record(token).is_none_or(|r| r.app.is_some())
-                {
-                    return;
-                }
-                drop(state);
-                let result = start(host);
-                host.service_process_started(token, result);
-            }))
-            .expect("service process-start handler");
     }
 
     fn service_process_started(&self, token: Binder, result: Result<i64, Exception>) {

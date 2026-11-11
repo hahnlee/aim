@@ -117,17 +117,8 @@ fn paused_start_accepts_unrelated_binds_and_joins_one_isolated_instance() {
         (None, true)
     );
     // Drain the serial start queue before shutting its Binder process down.
-    let sender = host
-        .services
-        .process_starts
-        .lock()
-        .unwrap()
-        .clone()
-        .unwrap();
     let (done, wait) = mpsc::channel();
-    sender
-        .send(Box::new(move |_| done.send(()).unwrap()))
-        .unwrap();
+    host.post_process_start(move |_| done.send(()).unwrap());
     wait.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(host.services.state.lock().unwrap().records.is_empty());
     host.process.shutdown().unwrap();
