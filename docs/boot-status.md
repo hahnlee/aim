@@ -1176,7 +1176,9 @@ directory's CE storage belongs to the image that first mounts it:
 `mount_all` refuses a data directory the derived image
 (the original LockSettingsService) booted to the app host image, and the
 reverse, naming both (ADR 0016). A locked directory's entries keep their
-extended attributes by their no-key paths, as on Linux, so installd's
+extended attributes by their no-key paths, as on Linux, and permission
+checks (chdir, O_TMPFILE, a create's directory, a unix socket's bind and
+connect) stat them by their host paths (#3021), so installd's
 `fixupAppData` before the unlock finds each app's `user.inode_cache` and
 leaves its cache directories' GIDs alone; until then it gave every CE
 cache directory the app's GID on each warm boot and the CE

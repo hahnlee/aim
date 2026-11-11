@@ -972,6 +972,27 @@ pub(super) fn search(
     kind: usize,
     known: Option<&libc::stat>,
 ) -> Result<(), crate::errno::Errno> {
+    search_with(guest, id, kind, || path_stat_known(guest, known))
+}
+
+/// [`search`] of a resolved directory, stat'ed by its host path: a locked
+/// directory's guest path has no-key names, which only a walk maps.
+pub(super) fn search_resolved(
+    r: &vfs::Resolved,
+    id: &super::cred::Identity,
+    kind: usize,
+) -> Result<(), crate::errno::Errno> {
+    search_with(&r.guest, id, kind, || {
+        super::fs::stat_resolved(r, true).map_err(|error| (-error) as crate::errno::Errno)
+    })
+}
+
+fn search_with(
+    guest: &str,
+    id: &super::cred::Identity,
+    kind: usize,
+    stat: impl FnOnce() -> Result<libc::stat, crate::errno::Errno>,
+) -> Result<(), crate::errno::Errno> {
     if !recording() {
         return Ok(());
     }
@@ -979,7 +1000,7 @@ pub(super) fn search(
     if vfs::fuse_route(guest).is_some_and(|route| !route.default_permissions) {
         return Ok(());
     }
-    let stat = path_stat_known(guest, known)?;
+    let stat = stat()?;
     if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
         return Err(crate::errno::ENOTDIR);
     }

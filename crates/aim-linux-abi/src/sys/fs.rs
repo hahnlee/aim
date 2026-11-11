@@ -185,9 +185,9 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
                         .unwrap_or_else(|error| -(error as i64));
                 }
                 if attrs::recording() {
-                    let stat = match attrs::path_stat(&r.guest) {
+                    let stat = match stat_resolved(&r, true) {
                         Ok(stat) => stat,
-                        Err(error) => return -(error as i64),
+                        Err(error) => return error,
                     };
                     // O_DIRECTORY's lookup fails before any permission check.
                     if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
@@ -576,10 +576,7 @@ fn open_permissions(
     id: &super::cred::Identity,
 ) -> Result<(), errno::Errno> {
     if creating {
-        let parent = std::path::Path::new(&r.guest)
-            .parent()
-            .ok_or(errno::ENOENT)?;
-        let stat = attrs::path_stat(parent.to_str().ok_or(errno::EINVAL)?)?;
+        let stat = stat_resolved_parent(r)?;
         return if attrs::permits(&stat, 3, id, attrs::FS) {
             Ok(())
         } else {
@@ -1794,6 +1791,31 @@ fn stat_at_as(
     stat_resolved(&r, follow)
 }
 
+/// stat of the directory a resolved path is in, with the guest's
+/// ownership view: by its host path, as a locked directory's guest path
+/// has no-key names, which only a walk maps.
+pub(super) fn stat_resolved_parent(r: &vfs::Resolved) -> Result<libc::stat, errno::Errno> {
+    let parent = |path: &[u8]| -> Result<Vec<u8>, errno::Errno> {
+        match path.iter().rposition(|&byte| byte == b'/') {
+            Some(0) => Ok(b"/".to_vec()),
+            Some(end) => Ok(path[..end].to_vec()),
+            None => Err(errno::ENOENT),
+        }
+    };
+    let guest = String::from_utf8(parent(r.guest.as_bytes())?).map_err(|_| errno::EINVAL)?;
+    if vfs::fuse_route(&guest).is_some() || procfs::stat(&guest, true).is_some() {
+        return attrs::path_stat(&guest);
+    }
+    let host = CString::new(parent(r.host.as_bytes())?).map_err(|_| errno::EINVAL)?;
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: host path and local stat buffer.
+    if unsafe { libc::stat(host.as_ptr(), &mut st) } < 0 {
+        return Err(errno::last());
+    }
+    attrs::apply(attrs::Host::Path(&host), || guest.clone(), &mut st);
+    Ok(st)
+}
+
 /// stat of a resolved path (`follow` as it was resolved), with the
 /// guest's ownership view.
 pub(super) fn stat_resolved(r: &vfs::Resolved, follow: bool) -> Result<libc::stat, i64> {
@@ -2274,7 +2296,7 @@ pub fn chdir(a: [u64; 6]) -> i64 {
     let p = p.as_slice();
     let id = super::cred::current();
     match resolve_as(vfs::LINUX_AT_FDCWD, p, true, &id, attrs::FS) {
-        Ok(r) => match attrs::search(&r.guest, &id, attrs::FS, None) {
+        Ok(r) => match attrs::search_resolved(&r, &id, attrs::FS) {
             Ok(()) => set_cwd_checked(r),
             Err(error) => -(error as i64),
         },

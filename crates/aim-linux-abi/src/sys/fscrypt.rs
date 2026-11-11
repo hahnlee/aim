@@ -1572,6 +1572,17 @@ mod tests {
         let mut read = [0u8; 8];
         assert_eq!(xattr(8, &guest(&format!("kept/{sub}")), &mut read), 8);
         assert_eq!(read, value);
+        // Permission checks stat a no-key directory by its host path too:
+        // a create in it is refused for the key, and chdir enters it.
+        assert_eq!(open_at(&format!("kept/{sub}/new"), 0o101), errno(ENOKEY));
+        let cwd = crate::vfs::cwd();
+        assert_eq!(
+            at(&format!("kept/{sub}"), |path| super::super::fs::chdir([
+                path, 0, 0, 0, 0, 0
+            ])),
+            0
+        );
+        crate::vfs::set_cwd(cwd);
         std::fs::remove_dir_all(&host).unwrap();
     }
 

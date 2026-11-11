@@ -812,13 +812,15 @@ fn path_socket_permission(
     if !super::attrs::recording() {
         return Ok(());
     }
-    let (guest, want) = if bind {
-        let parent = Path::new(&r.guest).parent().ok_or(errno::ENOENT)?;
-        (parent.to_str().ok_or(EINVAL)?.to_owned(), 3)
+    let (stat, want) = if bind {
+        (super::fs::stat_resolved_parent(r), 3)
     } else {
-        (r.guest.clone(), 2)
+        (
+            super::fs::stat_resolved(r, true).map_err(|error| (-error) as errno::Errno),
+            2,
+        )
     };
-    let stat = match super::attrs::path_stat(&guest) {
+    let stat = match stat {
         Ok(stat) => stat,
         // A missing socket file is the connect's own ENOENT.
         Err(errno::ENOENT) if !bind => return Ok(()),
