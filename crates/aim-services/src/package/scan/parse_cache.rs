@@ -3,6 +3,9 @@
 //! The boot owner prepares /data/system/package_cache/<partition fingerprint>.
 //! A native sidecar binds each parcel to image/parser/configuration and APK
 //! stamps (including splits, since the host does not have dm-verity mounts).
+//! Beside the image, a cache that every data directory booting it shares
+//! holds the same parcels by their keys, so a new data directory's first
+//! boot parses only what no boot of this image and parser parsed (#2984).
 use super::super::{parse::parcel::java_hash, pkg::AndroidPackage, write::Apks};
 use sha2::{Digest, Sha256};
 use std::{
@@ -14,11 +17,14 @@ use std::{
 
 pub(super) struct Cache {
     dir: PathBuf,
+    /// `package-cache/<image>-<parser>` beside the image root.
+    shared: Option<PathBuf>,
     base: Sha256,
 }
 
 pub(super) struct Entry {
     path: PathBuf,
+    shared: Option<PathBuf>,
     stamp: [u8; 32],
 }
 
@@ -27,6 +33,17 @@ impl Cache {
     pub fn open(apks: &Apks, directory: Option<&Path>) -> Option<Self> {
         let cache = Self::existing(apks, directory?)?;
         fs::create_dir_all(&cache.dir).ok()?;
+        if let Some(shared) = &cache.shared {
+            // Another image's or parser's entries are never read again.
+            if let (Some(parent), Some(name)) = (shared.parent(), shared.file_name()) {
+                for stale in fs::read_dir(parent).into_iter().flatten().flatten() {
+                    if stale.file_name() != name {
+                        let _ = fs::remove_dir_all(stale.path());
+                    }
+                }
+            }
+            let _ = fs::create_dir_all(shared);
+        }
         Some(cache)
     }
 
@@ -35,18 +52,20 @@ impl Cache {
     pub fn existing(apks: &Apks, dir: &Path) -> Option<Self> {
         let dir = dir.to_owned();
         let image = fs::read((apks.files)("/.identity")?).ok()?;
-        let exe = fs::metadata(std::env::current_exe().ok()?).ok()?;
+        // The parser is this executable's code, named by its build's UUID,
+        // whichever copy of it runs.
+        let parser = executable_uuid(&std::env::current_exe().ok()?)?;
+        let shared = (apks.files)("/")
+            .and_then(|root| Some(root.parent()?.join("package-cache")))
+            .map(|cache| {
+                let image = Sha256::digest(&image);
+                cache.join(format!("{}-{}", hex(&image[..8]), hex(&parser)))
+            });
         let p = &apks.platform;
         let mut base = Sha256::new();
-        base.update(b"AIMPARSE2\0");
+        base.update(b"AIMPARSE3\0");
         base.update(&image);
-        base.update(format!(
-            "{}:{}:{}:{}\0",
-            exe.ino(),
-            exe.size(),
-            exe.mtime(),
-            exe.mtime_nsec()
-        ));
+        base.update(parser);
         let mut features: Vec<_> = p.features.iter().collect();
         features.sort();
         let mut extensions: Vec<_> = p.sdk_extensions.iter().flatten().collect();
@@ -66,7 +85,7 @@ impl Cache {
                 split.name, split.new_permissions, split.target_sdk
             ));
         }
-        Some(Self { dir, base })
+        Some(Self { dir, shared, base })
     }
 
     pub fn entry(&self, host: &Path, path: &str, flags: i32) -> Option<Entry> {
@@ -74,11 +93,13 @@ impl Cache {
         key.update(format!("{path}\0{flags}\0"));
         stamps(host, &mut key, 0)?;
         let name = Path::new(path).file_name()?.to_str()?;
+        let stamp: [u8; 32] = key.finalize().into();
         Some(Entry {
             // PackageCacher.getCacheKey uses the guest absolute path, not the
             // host mount path (which can differ between boots).
             path: self.dir.join(format!("{name}-{flags}-{}", java_hash(path))),
-            stamp: key.finalize().into(),
+            shared: self.shared.as_ref().map(|shared| shared.join(hex(&stamp))),
+            stamp,
         })
     }
 
@@ -87,28 +108,72 @@ impl Cache {
         entry.stamp == other.stamp
     }
 
+    /// The data directory's parcel, else the shared one.
     pub fn read(&self, entry: &Entry, path: &str) -> Option<AndroidPackage> {
-        let receipt = fs::read(sidecar(&entry.path)).ok()?;
-        if receipt.len() != 64 || receipt[..32] != entry.stamp {
-            return None;
-        }
-        let bytes = fs::read(&entry.path).ok()?;
-        if receipt[32..] != Sha256::digest(&bytes)[..] {
-            return None;
-        }
-        let parsed = AndroidPackage::read_cache_entry(&bytes).ok()?;
-        (parsed.path.as_deref() == Some(path)).then_some(parsed)
+        std::iter::once(&entry.path)
+            .chain(&entry.shared)
+            .find_map(|file| read(file, &entry.stamp, path))
     }
 
     /// Sidecar includes the parcel digest: interruption between the two atomic
     /// replacements can only cause a miss, never pair old bytes with new stamps.
+    /// The data directory's parcel takes its directory's policy; the shared
+    /// one is the host's.
     pub fn store(&self, entry: &Entry, bytes: &[u8]) {
         let mut receipt = entry.stamp.to_vec();
         receipt.extend_from_slice(&Sha256::digest(bytes));
-        if atomic_write(&entry.path, bytes).is_ok() {
-            let _ = atomic_write(&sidecar(&entry.path), &receipt);
+        for (file, adopt) in
+            std::iter::once((&entry.path, true)).chain(entry.shared.iter().map(|f| (f, false)))
+        {
+            if atomic_write(file, bytes, adopt).is_ok() {
+                let _ = atomic_write(&sidecar(file), &receipt, adopt);
+            }
         }
     }
+}
+
+fn read(file: &Path, stamp: &[u8; 32], path: &str) -> Option<AndroidPackage> {
+    let receipt = fs::read(sidecar(file)).ok()?;
+    if receipt.len() != 64 || receipt[..32] != *stamp {
+        return None;
+    }
+    let bytes = fs::read(file).ok()?;
+    if receipt[32..] != Sha256::digest(&bytes)[..] {
+        return None;
+    }
+    let parsed = AndroidPackage::read_cache_entry(&bytes).ok()?;
+    (parsed.path.as_deref() == Some(path)).then_some(parsed)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The `LC_UUID` of the Mach-O executable at `path`, which the linker
+/// derives from its contents.
+fn executable_uuid(path: &Path) -> Option<[u8; 16]> {
+    const MH_MAGIC_64: u32 = 0xfeed_facf;
+    const LC_UUID: u32 = 0x1b;
+    let mut header = vec![0; 32];
+    let mut file = fs::File::open(path).ok()?;
+    std::io::Read::read_exact(&mut file, &mut header).ok()?;
+    let word =
+        |bytes: &[u8], at: usize| Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
+    if word(&header, 0)? != MH_MAGIC_64 {
+        return None;
+    }
+    let (count, size) = (word(&header, 16)?, word(&header, 20)? as usize);
+    let mut commands = vec![0; size];
+    std::io::Read::read_exact(&mut file, &mut commands).ok()?;
+    let mut at = 0;
+    for _ in 0..count {
+        let (command, length) = (word(&commands, at)?, word(&commands, at + 4)? as usize);
+        if command == LC_UUID {
+            return commands.get(at + 8..at + 24)?.try_into().ok();
+        }
+        at = at.checked_add(length).filter(|_| length >= 8)?;
+    }
+    None
 }
 
 fn stamps(path: &Path, key: &mut Sha256, depth: usize) -> Option<()> {
@@ -152,17 +217,21 @@ fn sidecar(path: &Path) -> PathBuf {
     name.into()
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn atomic_write(path: &Path, bytes: &[u8], adopt: bool) -> std::io::Result<()> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let tmp = path.with_extension(format!(
         "{}-{}.tmp",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    // Written host-side: the parcel and the directories made for it take
-    // their encrypted directory's policy (ADR 0016) before it is in place.
+    // Written host-side: a parcel under /data and the directories made for
+    // it take their encrypted directory's policy (ADR 0016) before it is in
+    // place.
     let result = fs::write(&tmp, bytes)
-        .and_then(|()| aim_storage::fscrypt::adopt(&tmp))
+        .and_then(|()| match adopt {
+            true => aim_storage::fscrypt::adopt(&tmp),
+            false => Ok(()),
+        })
         .and_then(|()| fs::rename(&tmp, path));
     if result.is_err() {
         let _ = fs::remove_file(tmp);
@@ -173,6 +242,65 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The parser key names the code, not the file: a copy of this
+    /// executable has its UUID.
+    #[test]
+    fn the_parser_is_named_by_its_executables_uuid() {
+        let exe = std::env::current_exe().unwrap();
+        let uuid = executable_uuid(&exe).unwrap();
+        let root = crate::app_host::test_temp_dir("parser-uuid");
+        let copy = root.join("copy");
+        fs::copy(&exe, &copy).unwrap();
+        assert_eq!(executable_uuid(&copy), Some(uuid));
+        fs::write(&copy, b"not an executable").unwrap();
+        assert_eq!(executable_uuid(&copy), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A new data directory reads the parcels another one's boot stored
+    /// beside the image, without writing its own; the shared cache of
+    /// another image or parser is removed.
+    #[test]
+    fn data_directories_share_the_parcels_beside_the_image() {
+        let Some(image) = aim_paths::input(aim_paths::derived_image(), "derived-image") else {
+            return;
+        };
+        let root = crate::app_host::test_temp_dir("parse-shared");
+        let system = root.join("image/root");
+        let host = system.join("system/app/app");
+        fs::create_dir_all(&host).unwrap();
+        fs::write(host.join("base.apk"), b"one").unwrap();
+        fs::write(system.join(".identity"), b"fixture image").unwrap();
+        let stale = root.join("image/package-cache/another");
+        fs::create_dir_all(&stale).unwrap();
+        let files = system.clone();
+        let apks = Apks {
+            platform: crate::package::parse::Platform::load(&image, Default::default()).unwrap(),
+            signing_overrides: None,
+            files: Box::new(move |guest| Some(files.join(guest.trim_start_matches('/')))),
+        };
+        let path = "/system/app/app";
+        let first = Cache::open(&apks, Some(&root.join("one"))).unwrap();
+        assert!(!stale.exists());
+        let bytes = AndroidPackage {
+            path: Some(path.into()),
+            feature_flag_state: Some(vec![]),
+            ..Default::default()
+        }
+        .to_cache_entry()
+        .unwrap()
+        .bytes;
+        first.store(&first.entry(&host, path, 16).unwrap(), &bytes);
+        let second = Cache::open(&apks, Some(&root.join("two"))).unwrap();
+        let entry = second.entry(&host, path, 16).unwrap();
+        assert_eq!(
+            second.read(&entry, path),
+            Some(AndroidPackage::read_cache_entry(&bytes).unwrap())
+        );
+        assert!(!entry.path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     /// A parcel written in an encrypted package_cache takes its policy, as
     /// the directory made for it does.
@@ -190,7 +318,7 @@ mod tests {
         assert_eq!(set, 0);
         let parcel = root.join("fingerprint/app-0-1");
         fs::create_dir(parcel.parent().unwrap()).unwrap();
-        atomic_write(&parcel, b"parcel").unwrap();
+        atomic_write(&parcel, b"parcel", true).unwrap();
         for made in [parcel.parent().unwrap(), &parcel] {
             let own = aim_storage::fscrypt::context(made).unwrap().unwrap();
             assert_eq!(own[..24], context[..24], "{}", made.display());
@@ -207,6 +335,7 @@ mod tests {
         fs::write(package.join("base.apk"), b"one").unwrap();
         let cache = Cache {
             dir: root.clone(),
+            shared: None,
             base: Sha256::new(),
         };
         let path = "/system/app/app";

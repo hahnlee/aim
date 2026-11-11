@@ -10,7 +10,10 @@
 # The image's translation cache (docs/storage.md) goes beside OUT, as the
 # derived image's is beside its root: the derived image's entries, kept
 # across runs (an entry is named by its content and never changes), with
-# an index for OUT's files and the agent translated.
+# an index for OUT's files and the agent translated. The package parser's
+# cache beside OUT (package-cache) is kept too: its entries are keyed by
+# their APKs' contents and times, which the clone keeps, and the app host
+# removes those of another image or parser.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,7 +27,7 @@ translated="$(dirname "$derived")/translated"
 }
 rm -rf "$out"
 mkdir -p "$(dirname "$out")"
-cp -c -R "$derived" "$out"
+cp -c -p -R "$derived" "$out"
 # Entries are read-only: removing one makes it writable first. A copy is
 # staged under a dot name, as linux-translate stages its own (.tmp-*), so
 # an interrupted run leaves no partial entry, only a stage removed here.

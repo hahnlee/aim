@@ -1297,7 +1297,7 @@ impl Capture {
             ));
         }
         super::validate_replica(&scan).map_err(|error| format!("query replica: {error:?}"))?;
-        let mut source = Arc::new(context.clone());
+        let source = Arc::new(context.clone());
         let domains = context.native_domains.take();
         if let Some(domains) = &domains {
             let expected = context.clone().resolve_domains(
@@ -1443,7 +1443,7 @@ impl Capture {
         if !context.retained_packages.is_empty() {
             return Err("foreign retained query inputs".into());
         }
-        let mut state = model::State {
+        let state = model::State {
             generation: scan.version(),
             nonce: context.nonce,
             packages: active,

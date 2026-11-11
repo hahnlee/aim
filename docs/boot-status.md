@@ -1107,7 +1107,11 @@ parses the scan's packages ahead for the configuration the boot will have
 sets just before `init_user0`), reading the parser cache but not writing
 it; the scan takes each parse whose cache key its own configuration gives
 (#2985): a fresh boot's system image scan takes 0.44-0.52 s instead of
-1.2-2.0 s (load 7-16). A rejected saved package is rolled back from an undo record of the
+1.2-2.0 s (load 7-16). The native parser cache's parcels are also kept
+beside the app-host image (`package-cache/<image>-<parser>`, the parser
+named by its executable's UUID, not its file), shared by every data
+directory booting it, so a new data directory's parses ahead read what an
+earlier boot of the same image, parser and configuration parsed (#2984). A rejected saved package is rolled back from an undo record of the
 entries its scan writes, not a copy of the whole scan owner per package, and
 keyset registration and seInfo assignment change the owner in place (#2996);
 the system image scan takes 1.10-1.15 s fresh and 0.15-0.19 s warm (from
